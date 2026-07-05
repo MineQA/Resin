@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -339,7 +340,7 @@ func writeURI(w http.ResponseWriter, outbounds []ExportOutbound) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.WriteString(sb.String())
+	_, _ = io.WriteString(w, sb.String())
 }
 
 func writeBase64(w http.ResponseWriter, outbounds []ExportOutbound) {
@@ -355,5 +356,5 @@ func writeBase64(w http.ResponseWriter, outbounds []ExportOutbound) {
 	encoded := base64.StdEncoding.EncodeToString([]byte(sb.String()))
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.WriteString(encoded)
+	_, _ = io.WriteString(w, encoded)
 }
