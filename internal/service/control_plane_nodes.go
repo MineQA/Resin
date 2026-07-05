@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/Resinat/Resin/internal/node"
+	"github.com/Resinat/Resin/internal/platform"
 	"github.com/Resinat/Resin/internal/probe"
 	"github.com/Resinat/Resin/internal/subscription"
 )
@@ -24,6 +25,7 @@ type NodeFilters struct {
 	EgressIP       *string
 	ProbedSince    *time.Time
 	TagKeyword     *string
+	Routable       *bool
 }
 
 // ListNodes returns nodes from the pool with optional filters.
@@ -45,6 +47,11 @@ func (s *ControlPlaneService) ListNodes(filters NodeFilters) ([]NodeSummary, err
 			platformView[h] = struct{}{}
 			return true
 		})
+		// When platform_id is set with routable=false, the result is always empty
+		// because platform_id already narrows to that platform's routable view.
+		if filters.Routable != nil && !*filters.Routable {
+			return []NodeSummary{}, nil
+		}
 	}
 
 	var subNodes map[node.Hash]struct{}
@@ -63,10 +70,30 @@ func (s *ControlPlaneService) ListNodes(filters NodeFilters) ([]NodeSummary, err
 		})
 	}
 
+	// Pre-build the union of all platform routable views when routable filter is set
+	// and no platform_id filter is active.
+	var routableNodes map[node.Hash]struct{}
+	if filters.Routable != nil && filters.PlatformID == nil && s.Pool != nil {
+		routableNodes = make(map[node.Hash]struct{})
+		s.Pool.RangePlatforms(func(plat *platform.Platform) bool {
+			plat.View().Range(func(h node.Hash) bool {
+				routableNodes[h] = struct{}{}
+				return true
+			})
+			return true
+		})
+	}
+
 	var result []NodeSummary
 	appendIfMatched := func(h node.Hash, entry *node.NodeEntry) {
 		if !s.nodeEntryMatchesFilters(entry, filters, subLookup) {
 			return
+		}
+		if routableNodes != nil {
+			_, inRoutableView := routableNodes[h]
+			if inRoutableView != *filters.Routable {
+				return
+			}
 		}
 		result = append(result, s.nodeEntryToSummary(h, entry))
 	}

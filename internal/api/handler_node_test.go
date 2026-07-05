@@ -282,3 +282,174 @@ func TestHandleListNodes_EnabledFilter(t *testing.T) {
 		t.Fatalf("enabled=false total: got %v, want 1", body["total"])
 	}
 }
+
+func TestHandleListNodes_NodePoolAliasRoute(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	subA := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(subA)
+
+	addNodeForNodeListTest(t, cp, subA, `{"type":"ss","server":"1.1.1.1","port":443}`, "203.0.113.10")
+	addNodeForNodeListTest(t, cp, subA, `{"type":"ss","server":"2.2.2.2","port":443}`, "203.0.113.11")
+
+	recOrig := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?subscription_id="+subA.ID, nil, true)
+	if recOrig.Code != http.StatusOK {
+		t.Fatalf("original route status: got %d, want %d, body=%s", recOrig.Code, http.StatusOK, recOrig.Body.String())
+	}
+	bodyOrig := decodeJSONMap(t, recOrig)
+
+	recAlias := doJSONRequest(
+		t,
+		srv,
+		http.MethodGet,
+		"/api/v1/node-pool/nodes?subscription_id="+subA.ID,
+		nil,
+		true,
+	)
+	if recAlias.Code != http.StatusOK {
+		t.Fatalf("alias route status: got %d, want %d, body=%s", recAlias.Code, http.StatusOK, recAlias.Body.String())
+	}
+	bodyAlias := decodeJSONMap(t, recAlias)
+
+	if bodyAlias["total"] != bodyOrig["total"] {
+		t.Fatalf("alias total: got %v, want %v", bodyAlias["total"], bodyOrig["total"])
+	}
+	if len(bodyAlias["items"].([]any)) != len(bodyOrig["items"].([]any)) {
+		t.Fatalf("alias items count mismatch: got %d, want %d", len(bodyAlias["items"].([]any)), len(bodyOrig["items"].([]any)))
+	}
+}
+
+func TestHandleListNodes_RoutableFilter(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	_ = mustCreatePlatform(t, srv, "routable-filter-test")
+
+	subA := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(subA)
+
+	// Node A: routable (meets all platform conditions).
+	rawA := `{"type":"ss","server":"1.1.1.1","port":443}`
+	hashA := node.HashFromRawOptions([]byte(rawA))
+	cp.Pool.AddNodeFromSub(hashA, []byte(rawA), subA.ID)
+	subA.ManagedNodes().StoreNode(hashA, subscription.ManagedNode{Tags: []string{"routable-a"}})
+	entryA, ok := cp.Pool.GetEntry(hashA)
+	if !ok {
+		t.Fatalf("node A missing after add")
+	}
+	entryA.SetEgressIP(netip.MustParseAddr("203.0.113.10"))
+	obA := testutil.NewNoopOutbound()
+	entryA.Outbound.Store(&obA)
+	entryA.CircuitOpenSince.Store(0)
+	entryA.LatencyTable.Update("example.com", 25*time.Millisecond, 10*time.Minute)
+	cp.Pool.NotifyNodeDirty(hashA)
+
+	// Node B: non-routable (no outbound, no latency).
+	rawB := `{"type":"ss","server":"2.2.2.2","port":443}`
+	hashB := node.HashFromRawOptions([]byte(rawB))
+	cp.Pool.AddNodeFromSub(hashB, []byte(rawB), subA.ID)
+	subA.ManagedNodes().StoreNode(hashB, subscription.ManagedNode{Tags: []string{"non-routable-b"}})
+	entryB, ok := cp.Pool.GetEntry(hashB)
+	if !ok {
+		t.Fatalf("node B missing after add")
+	}
+	entryB.SetEgressIP(netip.MustParseAddr("203.0.113.11"))
+
+	// Without routable filter — both nodes returned.
+	rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?subscription_id="+subA.ID, nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("no filter status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := decodeJSONMap(t, rec)
+	if body["total"] != float64(2) {
+		t.Fatalf("no filter total: got %v, want 2", body["total"])
+	}
+
+	// routable=true — only node A.
+	rec = doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?routable=true", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("routable=true status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body = decodeJSONMap(t, rec)
+	if body["total"] != float64(1) {
+		t.Fatalf("routable=true total: got %v, want 1, body=%s", body["total"], rec.Body.String())
+	}
+
+	// routable=false — only node B.
+	rec = doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?routable=false", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("routable=false status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body = decodeJSONMap(t, rec)
+	if body["total"] != float64(1) {
+		t.Fatalf("routable=false total: got %v, want 1, body=%s", body["total"], rec.Body.String())
+	}
+}
+
+func TestHandleListNodes_RoutableWithPlatformFilter(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	platformID := mustCreatePlatform(t, srv, "routable-platform-combo")
+
+	subA := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(subA)
+
+	// Add a routable node for this platform.
+	raw := `{"type":"ss","server":"1.1.1.1","port":443}`
+	hash := node.HashFromRawOptions([]byte(raw))
+	cp.Pool.AddNodeFromSub(hash, []byte(raw), subA.ID)
+	subA.ManagedNodes().StoreNode(hash, subscription.ManagedNode{Tags: []string{"combo-node"}})
+	entry, ok := cp.Pool.GetEntry(hash)
+	if !ok {
+		t.Fatalf("node missing after add")
+	}
+	entry.SetEgressIP(netip.MustParseAddr("203.0.113.10"))
+	ob := testutil.NewNoopOutbound()
+	entry.Outbound.Store(&ob)
+	entry.CircuitOpenSince.Store(0)
+	entry.LatencyTable.Update("example.com", 25*time.Millisecond, 10*time.Minute)
+	cp.Pool.NotifyNodeDirty(hash)
+
+	// platform_id + routable=true: same as platform_id alone.
+	rec := doJSONRequest(
+		t,
+		srv,
+		http.MethodGet,
+		"/api/v1/nodes?platform_id="+platformID+"&routable=true",
+		nil,
+		true,
+	)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("platform+routable=true status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := decodeJSONMap(t, rec)
+	if body["total"] != float64(1) {
+		t.Fatalf("platform+routable=true total: got %v, want 1", body["total"])
+	}
+
+	// platform_id + routable=false: should be empty.
+	rec = doJSONRequest(
+		t,
+		srv,
+		http.MethodGet,
+		"/api/v1/nodes?platform_id="+platformID+"&routable=false",
+		nil,
+		true,
+	)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("platform+routable=false status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body = decodeJSONMap(t, rec)
+	if body["total"] != float64(0) {
+		t.Fatalf("platform+routable=false total: got %v, want 0, body=%s", body["total"], rec.Body.String())
+	}
+}
+
+func TestHandleListNodes_NodePoolAliasRouteUnauthorized(t *testing.T) {
+	srv, _, _ := newControlPlaneTestServer(t)
+
+	rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/node-pool/nodes", nil, false)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("alias route unauthenticated status: got %d, want %d, body=%s", rec.Code, http.StatusUnauthorized, rec.Body.String())
+	}
+	assertErrorCode(t, rec, "UNAUTHORIZED")
+}

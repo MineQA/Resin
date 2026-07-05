@@ -1,5 +1,5 @@
 import { apiRequest } from "../../lib/api-client";
-import type { EnvConfig, RuntimeConfig, RuntimeConfigPatch } from "./types";
+import type { CreatedExportToken, EnvConfig, ExportToken, RuntimeConfig, RuntimeConfigPatch } from "./types";
 
 const path = "/api/v1/system/config";
 
@@ -102,4 +102,21 @@ export async function patchSystemConfig(patch: RuntimeConfigPatch): Promise<Runt
 
 export async function getEnvConfig(): Promise<EnvConfig> {
   return await apiRequest<EnvConfig>(path + "/env");
+}
+
+export async function listExportTokens(): Promise<ExportToken[]> {
+  return await apiRequest<ExportToken[]>("/api/v1/export-tokens");
+}
+
+export async function createExportToken(name: string): Promise<CreatedExportToken> {
+  return await apiRequest<CreatedExportToken>("/api/v1/export-tokens", {
+    method: "POST",
+    body: { name },
+  });
+}
+
+export async function deleteExportToken(id: string): Promise<void> {
+  await apiRequest<void>(`/api/v1/export-tokens/${id}`, {
+    method: "DELETE",
+  });
 }

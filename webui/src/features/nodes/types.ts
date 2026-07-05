@@ -45,6 +45,7 @@ export type NodeListFilters = {
   enabled?: boolean;
   circuit_open?: boolean;
   has_outbound?: boolean;
+  routable?: boolean;
 };
 
 export type NodeListQuery = NodeListFilters & {
@@ -62,4 +63,12 @@ export type EgressProbeResult = {
 
 export type LatencyProbeResult = {
   latency_ewma_ms: number;
+};
+
+export type NodePoolExportResponse = {
+  format: "sing-box";
+  outbounds: unknown[];
+  total: number;
+  limit: number;
+  offset: number;
 };

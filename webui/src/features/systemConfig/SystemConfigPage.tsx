@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, RefreshCw, RotateCcw, Save, Sparkles } from "lucide-react";
+import { AlertTriangle, Check, Copy, KeyRound, Plus, RefreshCw, RotateCcw, Save, Sparkles, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
@@ -11,7 +11,8 @@ import { ToastContainer } from "../../components/ui/Toast";
 import { useToast } from "../../hooks/useToast";
 import i18next, { useI18n } from "../../i18n";
 import { formatApiErrorMessage } from "../../lib/error-message";
-import { getEnvConfig, patchSystemConfig, getSystemConfig, getDefaultSystemConfig } from "./api";
+import { formatDateTime, formatRelativeTime } from "../../lib/time";
+import { createExportToken, deleteExportToken, getDefaultSystemConfig, getEnvConfig, getSystemConfig, listExportTokens, patchSystemConfig } from "./api";
 import type { RuntimeConfig, RuntimeConfigPatch } from "./types";
 
 type RuntimeConfigForm = {
@@ -234,6 +235,9 @@ export function SystemConfigPage() {
   const { t } = useI18n();
   const [draftForm, setDraftForm] = useState<RuntimeConfigForm | null>(null);
   const [customPatchText, setCustomPatchText] = useState<string | null>(null);
+  const [newExportTokenName, setNewExportTokenName] = useState("订阅转换器");
+  const [createdExportToken, setCreatedExportToken] = useState<string>("");
+  const [copiedExportToken, setCopiedExportToken] = useState(false);
   const { toasts, showToast, dismissToast } = useToast();
   const queryClient = useQueryClient();
 
@@ -253,6 +257,32 @@ export function SystemConfigPage() {
     queryKey: ["system-config-env"],
     queryFn: getEnvConfig,
     staleTime: Infinity, // Env config does not change at runtime
+  });
+
+  const exportTokensQuery = useQuery({
+    queryKey: ["export-tokens"],
+    queryFn: listExportTokens,
+    staleTime: 30_000,
+  });
+
+  const createExportTokenMutation = useMutation({
+    mutationFn: createExportToken,
+    onSuccess: (token) => {
+      setCreatedExportToken(token.token);
+      setNewExportTokenName("订阅转换器");
+      queryClient.invalidateQueries({ queryKey: ["export-tokens"] });
+      showToast("success", t("导出令牌已创建，请立即复制保存"));
+    },
+    onError: (error) => showToast("error", formatApiErrorMessage(error, t)),
+  });
+
+  const deleteExportTokenMutation = useMutation({
+    mutationFn: deleteExportToken,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["export-tokens"] });
+      showToast("success", t("导出令牌已删除"));
+    },
+    onError: (error) => showToast("error", formatApiErrorMessage(error, t)),
   });
 
   const baseline = configQuery.data ?? null;
@@ -405,6 +435,36 @@ export function SystemConfigPage() {
 
   const handlePatchEdit = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setCustomPatchText(e.target.value);
+  };
+
+  const copyCreatedExportToken = async () => {
+    if (!createdExportToken) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(createdExportToken);
+      setCopiedExportToken(true);
+      window.setTimeout(() => setCopiedExportToken(false), 1500);
+      showToast("success", t("导出令牌已复制"));
+    } catch {
+      showToast("error", t("复制失败，请手动复制"));
+    }
+  };
+
+  const handleCreateExportToken = () => {
+    const name = newExportTokenName.trim();
+    if (!name) {
+      showToast("error", t("请输入导出令牌名称"));
+      return;
+    }
+    createExportTokenMutation.mutate(name);
+  };
+
+  const handleDeleteExportToken = (id: string, name: string) => {
+    if (!window.confirm(t("确认删除导出令牌 {{name}}？已配置的订阅转换器将无法继续拉取节点。", { name }))) {
+      return;
+    }
+    deleteExportTokenMutation.mutate(id);
   };
 
   const defaultPatchText = useMemo(() => {
@@ -942,6 +1002,87 @@ export function SystemConfigPage() {
                       <Switch checked={envBaseline.proxy_token_set} disabled />
                     </div>
                   </div>
+                </section>
+
+                <section className="syscfg-section">
+                  <h4>{t("导出令牌")}</h4>
+                  <p className="muted" style={{ marginTop: 0 }}>
+                    {t("导出令牌只用于节点池导出接口，可给订阅转换器使用；令牌原文只会在创建时显示一次。")}
+                  </p>
+
+                  <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center", marginBottom: "12px" }}>
+                    <Input
+                      value={newExportTokenName}
+                      onChange={(event) => setNewExportTokenName(event.target.value)}
+                      placeholder={t("令牌名称，例如：订阅转换器")}
+                      style={{ maxWidth: 320 }}
+                    />
+                    <Button
+                      variant="secondary"
+                      onClick={handleCreateExportToken}
+                      disabled={createExportTokenMutation.isPending}
+                    >
+                      <Plus size={14} />
+                      {createExportTokenMutation.isPending ? t("创建中...") : t("创建导出令牌")}
+                    </Button>
+                  </div>
+
+                  {createdExportToken ? (
+                    <div className="callout callout-warning" style={{ alignItems: "flex-start" }}>
+                      <KeyRound size={14} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <strong>{t("请立即复制保存，关闭后无法再次查看令牌原文。")}</strong>
+                        <code style={{ display: "block", marginTop: 8, wordBreak: "break-all" }}>{createdExportToken}</code>
+                        <div style={{ marginTop: 8, display: "flex", gap: "0.5rem" }}>
+                          <Button size="sm" variant="secondary" onClick={() => void copyCreatedExportToken()}>
+                            {copiedExportToken ? <Check size={14} /> : <Copy size={14} />}
+                            {copiedExportToken ? t("已复制") : t("复制令牌")}
+                          </Button>
+                          <Button size="sm" variant="ghost" onClick={() => setCreatedExportToken("")}>{t("我已保存")}</Button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {exportTokensQuery.isLoading ? <p className="muted">{t("正在加载导出令牌...")}</p> : null}
+                  {exportTokensQuery.isError ? (
+                    <div className="callout callout-error">
+                      <AlertTriangle size={14} />
+                      <span>{formatApiErrorMessage(exportTokensQuery.error, t)}</span>
+                    </div>
+                  ) : null}
+                  {exportTokensQuery.data?.length ? (
+                    <div className="platform-ops-list">
+                      {exportTokensQuery.data.map((token) => (
+                        <div key={token.id} className="platform-op-item">
+                          <div className="platform-op-copy">
+                            <h5>{token.name}</h5>
+                            <p className="platform-op-hint">
+                              {t("前缀 {{prefix}} · 创建 {{created}} · 上次使用 {{used}}", {
+                                prefix: token.token_prefix,
+                                created: formatDateTime(token.created_at),
+                                used: token.last_used_at ? formatRelativeTime(token.last_used_at) : t("从未使用"),
+                              })}
+                            </p>
+                          </div>
+                          <Button
+                            size="sm"
+                            variant="danger"
+                            onClick={() => handleDeleteExportToken(token.id, token.name)}
+                            disabled={deleteExportTokenMutation.isPending}
+                          >
+                            <Trash2 size={14} />
+                            {t("删除")}
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : !exportTokensQuery.isLoading && !exportTokensQuery.isError ? (
+                    <div className="empty-box">
+                      <KeyRound size={16} />
+                      <p>{t("尚未创建导出令牌")}</p>
+                    </div>
+                  ) : null}
                 </section>
               </Card>
             )}

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createColumnHelper } from "@tanstack/react-table";
-import { AlertTriangle, Eraser, Globe, RefreshCw, Sparkles, X, Zap } from "lucide-react";
+import { AlertTriangle, Copy, Download, Eraser, Globe, RefreshCw, Settings, Sparkles, X, Zap } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useLocation } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge";
@@ -10,6 +10,7 @@ import { Card } from "../../components/ui/Card";
 import { Input } from "../../components/ui/Input";
 import { OffsetPagination } from "../../components/ui/OffsetPagination";
 import { Select } from "../../components/ui/Select";
+import { Switch } from "../../components/ui/Switch";
 import { ToastContainer } from "../../components/ui/Toast";
 import { useToast } from "../../hooks/useToast";
 import { useI18n } from "../../i18n";
@@ -18,14 +19,21 @@ import { formatDateTime, formatRelativeTime } from "../../lib/time";
 import { listPlatforms } from "../platforms/api";
 import type { Platform } from "../platforms/types";
 import { listSubscriptions } from "../subscriptions/api";
-import { getNode, listNodes, probeEgress, probeLatency } from "./api";
+import { buildNodePoolExportURL, exportNodePool, getNode, listNodes, probeEgress, probeLatency } from "./api";
 import type { NodeSummary } from "./types";
 import { getAllRegions, getRegionName } from "./regions";
 import type { NodeListFilters, NodeSortBy, SortOrder } from "./types";
 
 type NodeStatusFilter = "all" | "healthy" | "circuit_open" | "error" | "disabled";
+type NodeRoutableFilter = "all" | "routable" | "unroutable";
 type NodeDisplayStatus = "healthy" | "circuit_open" | "pending_test" | "error" | "disabled";
 type ProbeAction = "egress" | "latency";
+
+type NodeListSettings = {
+  pageSize: number;
+  autoRefresh: boolean;
+  defaultRoutableOnly: boolean;
+};
 
 type NodeFilterDraft = {
   platform_id: string;
@@ -34,6 +42,7 @@ type NodeFilterDraft = {
   region: string;
   egress_ip: string;
   status: NodeStatusFilter;
+  routable: NodeRoutableFilter;
 };
 
 const defaultFilterDraft: NodeFilterDraft = {
@@ -43,8 +52,16 @@ const defaultFilterDraft: NodeFilterDraft = {
   region: "",
   egress_ip: "",
   status: "all",
+  routable: "all",
 };
 
+const NODE_LIST_SETTINGS_KEY = "resin_node_list_settings";
+const EXPORT_TOKEN_STORAGE_KEY = "resin_export_token";
+const DEFAULT_NODE_LIST_SETTINGS: NodeListSettings = {
+  pageSize: 200,
+  autoRefresh: true,
+  defaultRoutableOnly: false,
+};
 const PAGE_SIZE_OPTIONS = [20, 50, 100, 200, 500, 1000, 2000, 5000] as const;
 const EMPTY_PLATFORMS: Platform[] = [];
 const NODE_FILTER_ITEM_STYLE: CSSProperties = {
@@ -91,6 +108,74 @@ function parseStatusParam(value: string | null): NodeStatusFilter | undefined {
   return undefined;
 }
 
+function parseRoutableParam(value: string | null): NodeRoutableFilter | undefined {
+  const parsed = parseBoolParam(value);
+  if (parsed === true) {
+    return "routable";
+  }
+  if (parsed === false) {
+    return "unroutable";
+  }
+
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === "all" || normalized === "routable" || normalized === "unroutable") {
+    return normalized;
+  }
+  return undefined;
+}
+
+function loadNodeListSettings(): NodeListSettings {
+  if (typeof window === "undefined") {
+    return DEFAULT_NODE_LIST_SETTINGS;
+  }
+  try {
+    const raw = window.localStorage.getItem(NODE_LIST_SETTINGS_KEY);
+    if (!raw) {
+      return DEFAULT_NODE_LIST_SETTINGS;
+    }
+    const parsed = JSON.parse(raw) as Partial<NodeListSettings>;
+    const pageSize = PAGE_SIZE_OPTIONS.includes(parsed.pageSize as (typeof PAGE_SIZE_OPTIONS)[number])
+      ? Number(parsed.pageSize)
+      : DEFAULT_NODE_LIST_SETTINGS.pageSize;
+    return {
+      pageSize,
+      autoRefresh: typeof parsed.autoRefresh === "boolean" ? parsed.autoRefresh : DEFAULT_NODE_LIST_SETTINGS.autoRefresh,
+      defaultRoutableOnly:
+        typeof parsed.defaultRoutableOnly === "boolean"
+          ? parsed.defaultRoutableOnly
+          : DEFAULT_NODE_LIST_SETTINGS.defaultRoutableOnly,
+    };
+  } catch {
+    return DEFAULT_NODE_LIST_SETTINGS;
+  }
+}
+
+function saveNodeListSettings(settings: NodeListSettings) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem(NODE_LIST_SETTINGS_KEY, JSON.stringify(settings));
+}
+
+function loadStoredExportToken(): string {
+  if (typeof window === "undefined") {
+    return "";
+  }
+  return window.localStorage.getItem(EXPORT_TOKEN_STORAGE_KEY) ?? "";
+}
+
+function persistExportToken(value: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  const trimmed = value.trim();
+  if (trimmed) {
+    window.localStorage.setItem(EXPORT_TOKEN_STORAGE_KEY, trimmed);
+  } else {
+    window.localStorage.removeItem(EXPORT_TOKEN_STORAGE_KEY);
+  }
+}
+
 function statusFromQuery(params: URLSearchParams): NodeStatusFilter {
   const explicitStatus = parseStatusParam(params.get("status"));
   if (explicitStatus) {
@@ -122,9 +207,10 @@ function trimQueryValue(params: URLSearchParams, key: string): string {
   return params.get(key)?.trim() ?? "";
 }
 
-function draftFromQuery(search: string): NodeFilterDraft {
+function draftFromQuery(search: string, settings: NodeListSettings = DEFAULT_NODE_LIST_SETTINGS): NodeFilterDraft {
   const params = new URLSearchParams(search);
   const tagKeyword = trimQueryValue(params, "tag_keyword") || trimQueryValue(params, "tag");
+  const routable = parseRoutableParam(params.get("routable")) ?? (settings.defaultRoutableOnly ? "routable" : "all");
 
   return {
     platform_id: trimQueryValue(params, "platform_id"),
@@ -133,6 +219,7 @@ function draftFromQuery(search: string): NodeFilterDraft {
     region: trimQueryValue(params, "region").toUpperCase(),
     egress_ip: trimQueryValue(params, "egress_ip"),
     status: statusFromQuery(params),
+    routable,
   };
 }
 
@@ -175,6 +262,7 @@ function draftToActiveFilters(draft: NodeFilterDraft): NodeListFilters {
     enabled,
     circuit_open,
     has_outbound,
+    routable: draft.routable === "all" ? undefined : draft.routable === "routable",
   };
 }
 
@@ -261,16 +349,19 @@ function regionToFlag(region: string | undefined): string {
 }
 
 export function NodesPage() {
-  const { locale, t } = useI18n();
+  const { t } = useI18n();
   const location = useLocation();
-  const [draftFilters, setDraftFilters] = useState<NodeFilterDraft>(() => draftFromQuery(location.search));
+  const [listSettings, setListSettings] = useState<NodeListSettings>(() => loadNodeListSettings());
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [exportToken, setExportToken] = useState(loadStoredExportToken);
+  const [draftFilters, setDraftFilters] = useState<NodeFilterDraft>(() => draftFromQuery(location.search, loadNodeListSettings()));
   const [activeFilters, setActiveFilters] = useState<NodeListFilters>(() =>
-    draftToActiveFilters(draftFromQuery(location.search))
+    draftToActiveFilters(draftFromQuery(location.search, loadNodeListSettings()))
   );
   const [sortBy, setSortBy] = useState<NodeSortBy>("tag");
   const [sortOrder, setSortOrder] = useState<SortOrder>("asc");
   const [page, setPage] = useState(0);
-  const [pageSize, setPageSize] = useState<number>(200);
+  const [pageSize, setPageSize] = useState<number>(() => loadNodeListSettings().pageSize);
   const [selectedNodeHash, setSelectedNodeHash] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [pendingEgressHashes, setPendingEgressHashes] = useState<Set<string>>(() => new Set());
@@ -281,7 +372,7 @@ export function NodesPage() {
 
   const queryClient = useQueryClient();
 
-  const allRegions = useMemo(() => getAllRegions(), [locale]);
+  const allRegions = useMemo(() => getAllRegions(), []);
 
   const platformsQuery = useQuery({
     queryKey: ["platforms", "all"],
@@ -319,7 +410,7 @@ export function NodesPage() {
         limit: pageSize,
         offset: page * pageSize,
       }),
-    refetchInterval: 30_000,
+    refetchInterval: listSettings.autoRefresh ? 30_000 : false,
     placeholderData: (prev) => prev,
   });
 
@@ -487,7 +578,7 @@ export function NodesPage() {
 
   const handleFilterChange = (key: keyof NodeFilterDraft, value: string) => {
     setDraftFilters((prev) => {
-      const next = { ...prev, [key]: value };
+      const next = { ...prev, [key]: value } as NodeFilterDraft;
       setActiveFilters(draftToActiveFilters(next));
       setSelectedNodeHash("");
       setDrawerOpen(false);
@@ -497,8 +588,12 @@ export function NodesPage() {
   };
 
   const resetFilters = () => {
-    setDraftFilters(defaultFilterDraft);
-    setActiveFilters(draftToActiveFilters(defaultFilterDraft));
+    const next = {
+      ...defaultFilterDraft,
+      routable: listSettings.defaultRoutableOnly ? ("routable" as const) : ("all" as const),
+    };
+    setDraftFilters(next);
+    setActiveFilters(draftToActiveFilters(next));
     setSelectedNodeHash("");
     setDrawerOpen(false);
     setPage(0);
@@ -515,8 +610,98 @@ export function NodesPage() {
   };
 
   const changePageSize = (next: number) => {
+    const nextSettings = { ...listSettings, pageSize: next };
+    setListSettings(nextSettings);
+    saveNodeListSettings(nextSettings);
     setPageSize(next);
     setPage(0);
+  };
+
+  const updateListSettings = (patch: Partial<NodeListSettings>) => {
+    const next = { ...listSettings, ...patch };
+    setListSettings(next);
+    saveNodeListSettings(next);
+    if (patch.pageSize !== undefined) {
+      setPageSize(next.pageSize);
+      setPage(0);
+    }
+    if (patch.defaultRoutableOnly !== undefined) {
+      const routable: NodeRoutableFilter = next.defaultRoutableOnly ? "routable" : "all";
+      setDraftFilters((prev) => {
+        const updated = { ...prev, routable };
+        setActiveFilters(draftToActiveFilters(updated));
+        setSelectedNodeHash("");
+        setDrawerOpen(false);
+        setPage(0);
+        return updated;
+      });
+    }
+  };
+
+  const handleExportTokenChange = (value: string) => {
+    setExportToken(value);
+    persistExportToken(value);
+  };
+
+  const exportFilters = (): NodeListFilters => ({
+    ...activeFilters,
+    routable: activeFilters.routable ?? true,
+  });
+
+  const buildAbsoluteExportURL = () => {
+    const trimmedToken = exportToken.trim();
+    if (!trimmedToken) {
+      return "";
+    }
+    const relative = buildNodePoolExportURL(
+      {
+        ...exportFilters(),
+        limit: 100000,
+        offset: 0,
+      },
+      trimmedToken,
+    );
+    if (typeof window === "undefined") {
+      return relative;
+    }
+    return new URL(relative, window.location.origin).toString();
+  };
+
+  const copyExportURL = async () => {
+    const url = buildAbsoluteExportURL();
+    if (!url) {
+      showToast("error", t("请先填写导出令牌"));
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(url);
+      showToast("success", t("导出 URL 已复制"));
+    } catch {
+      showToast("error", t("复制失败，请手动复制"));
+    }
+  };
+
+  const downloadExportJSON = async () => {
+    const trimmedToken = exportToken.trim();
+    if (!trimmedToken) {
+      showToast("error", t("请先填写导出令牌"));
+      return;
+    }
+    try {
+      const data = await exportNodePool({ ...exportFilters(), limit: 100000, offset: 0 }, trimmedToken);
+      const blob = new Blob([JSON.stringify({ outbounds: data.outbounds }, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "resin-node-pool-sing-box.json";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      showToast("success", t("已导出 {{count}} 个节点", { count: data.outbounds.length }));
+    } catch (error) {
+      showToast("error", formatApiErrorMessage(error, t));
+    }
   };
 
   const col = createColumnHelper<NodeSummary>();
@@ -789,7 +974,27 @@ export function NodesPage() {
               </Select>
             </div>
 
+            <div style={NODE_FILTER_ITEM_STYLE}>
+              <label htmlFor="node-routable" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                {t("可路由")}
+              </label>
+              <Select
+                id="node-routable"
+                value={draftFilters.routable}
+                onChange={(event) => handleFilterChange("routable", event.target.value)}
+                style={NODE_FILTER_CONTROL_STYLE}
+              >
+                <option value="all">{t("全部")}</option>
+                <option value="routable">{t("可路由")}</option>
+                <option value="unroutable">{t("不可路由")}</option>
+              </Select>
+            </div>
+
             <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.125rem", marginLeft: "auto" }}>
+              <Button size="sm" variant="secondary" onClick={() => setSettingsOpen((open) => !open)} style={{ minHeight: "32px", height: "32px", padding: "0 0.75rem", display: "flex", alignItems: "center", gap: "0.25rem" }}>
+                <Settings size={16} />
+                {t("列表设置")}
+              </Button>
               <Button size="sm" variant="secondary" onClick={refreshNodes} disabled={nodesQuery.isFetching} style={{ minHeight: "32px", height: "32px", padding: "0 0.75rem", display: "flex", alignItems: "center", gap: "0.25rem" }}>
                 <RefreshCw size={16} className={nodesQuery.isFetching ? "spin" : undefined} />
                 {t("刷新")}
@@ -800,6 +1005,71 @@ export function NodesPage() {
               </Button>
             </div>
           </div>
+          {settingsOpen ? (
+            <div
+              className="nodes-list-settings"
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: "1rem",
+                alignItems: "center",
+                paddingTop: "0.75rem",
+                borderTop: "1px solid var(--border-subtle)",
+              }}
+            >
+              <div style={{ ...NODE_FILTER_ITEM_STYLE, flex: "0 1 180px" }}>
+                <label htmlFor="node-setting-page-size" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                  {t("默认页面大小")}
+                </label>
+                <Select
+                  id="node-setting-page-size"
+                  value={String(listSettings.pageSize)}
+                  onChange={(event) => updateListSettings({ pageSize: Number(event.target.value) })}
+                  style={NODE_FILTER_CONTROL_STYLE}
+                >
+                  {PAGE_SIZE_OPTIONS.map((size) => (
+                    <option key={size} value={size}>
+                      {size}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+              <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", color: "var(--text-secondary)", fontSize: "0.875rem" }}>
+                <Switch checked={listSettings.autoRefresh} onChange={(event) => updateListSettings({ autoRefresh: event.target.checked })} />
+                {t("自动刷新")}
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", color: "var(--text-secondary)", fontSize: "0.875rem" }}>
+                <Switch checked={listSettings.defaultRoutableOnly} onChange={(event) => updateListSettings({ defaultRoutableOnly: event.target.checked })} />
+                {t("默认只看可路由节点")}
+              </label>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem", flex: "1 1 360px", minWidth: 260 }}>
+                <label htmlFor="node-export-token" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                  {t("导出令牌")}
+                </label>
+                <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+                  <Input
+                    id="node-export-token"
+                    type="password"
+                    value={exportToken}
+                    onChange={(event) => handleExportTokenChange(event.target.value)}
+                    placeholder={t("从系统配置创建后粘贴到这里")}
+                    style={{ flex: "1 1 220px", minHeight: 32, height: 32 }}
+                  />
+                  <Button size="sm" variant="secondary" onClick={() => void copyExportURL()}>
+                    <Copy size={14} />
+                    {t("复制导出 URL")}
+                  </Button>
+                  <Button size="sm" variant="secondary" onClick={() => void downloadExportJSON()}>
+                    <Download size={14} />
+                    {t("下载 JSON")}
+                  </Button>
+                </div>
+                <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                  {t("导出默认只包含当前筛选范围内的可路由节点；URL token 适合不支持自定义请求头的订阅转换器。")}
+                </span>
+              </div>
+            </div>
+          ) : null}
         </div>
       </Card>
 

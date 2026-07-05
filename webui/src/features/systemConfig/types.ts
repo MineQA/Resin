@@ -63,3 +63,16 @@ export type EnvConfig = {
 };
 
 export type RuntimeConfigPatch = Partial<RuntimeConfig>;
+
+export type ExportToken = {
+  id: string;
+  name: string;
+  token_prefix: string;
+  enabled: boolean;
+  created_at: string;
+  last_used_at: string;
+};
+
+export type CreatedExportToken = ExportToken & {
+  token: string;
+};

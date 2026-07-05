@@ -110,9 +110,15 @@ func NewServerWithAddress(
 
 		// Nodes.
 		authed.Handle("GET /api/v1/nodes", HandleListNodes(cp))
+		authed.Handle("GET /api/v1/node-pool/nodes", HandleListNodes(cp))
 		authed.Handle("GET /api/v1/nodes/{hash}", HandleGetNode(cp))
 		authed.Handle("POST /api/v1/nodes/{hash}/actions/probe-egress", HandleProbeEgress(cp))
 		authed.Handle("POST /api/v1/nodes/{hash}/actions/probe-latency", HandleProbeLatency(cp))
+
+		// Export tokens (admin management).
+		authed.Handle("GET /api/v1/export-tokens", HandleListExportTokens(cp))
+		authed.Handle("POST /api/v1/export-tokens", HandleCreateExportToken(cp))
+		authed.Handle("DELETE /api/v1/export-tokens/{id}", HandleDeleteExportToken(cp))
 
 		// GeoIP.
 		authed.Handle("GET /api/v1/geoip/status", HandleGeoIPStatus(cp))
@@ -147,6 +153,11 @@ func NewServerWithAddress(
 		authed.Handle("GET /api/v1/metrics/snapshots/node-pool", HandleSnapshotNodePool(metricsManager))
 		authed.Handle("GET /api/v1/metrics/snapshots/platform-node-pool", HandleSnapshotPlatformNodePool(metricsManager))
 		authed.Handle("GET /api/v1/metrics/snapshots/node-latency-distribution", HandleSnapshotNodeLatencyDistribution(metricsManager))
+	}
+
+	// Node-pool export endpoint uses its own export-token auth (not admin auth).
+	if cp != nil {
+		mux.Handle("GET /api/v1/node-pool/export", HandleNodePoolExport(cp))
 	}
 
 	limitedAuthed := RequestBodyLimitMiddleware(apiMaxBodyBytes, authed)

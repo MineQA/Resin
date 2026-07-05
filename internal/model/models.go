@@ -105,3 +105,14 @@ type SubscriptionNodeKey struct {
 	SubscriptionID string
 	NodeHash       string
 }
+
+// ExportToken represents an API token used for exporting node-pool data.
+type ExportToken struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	TokenHash    string `json:"-"`
+	TokenPrefix  string `json:"token_prefix"`
+	Enabled      bool   `json:"enabled"`
+	CreatedAtNs  int64  `json:"created_at_ns"`
+	LastUsedAtNs int64  `json:"last_used_at_ns"`
+}

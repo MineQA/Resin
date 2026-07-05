@@ -476,3 +476,83 @@ func (r *StateRepo) ListAccountHeaderRules() ([]model.AccountHeaderRule, error) 
 	}
 	return result, rows.Err()
 }
+
+// --- export_tokens ---
+
+// ListExportTokens returns all export tokens (without token_hash).
+func (r *StateRepo) ListExportTokens() ([]model.ExportToken, error) {
+	rows, err := r.db.Query(`SELECT id, name, token_prefix, enabled, created_at_ns, last_used_at_ns FROM export_tokens`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []model.ExportToken
+	for rows.Next() {
+		var t model.ExportToken
+		var enabled int
+		if err := rows.Scan(&t.ID, &t.Name, &t.TokenPrefix, &enabled, &t.CreatedAtNs, &t.LastUsedAtNs); err != nil {
+			return nil, err
+		}
+		t.Enabled = enabled != 0
+		result = append(result, t)
+	}
+	return result, rows.Err()
+}
+
+// CreateExportToken inserts a new export token.
+func (r *StateRepo) CreateExportToken(t model.ExportToken) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	enabled := 0
+	if t.Enabled {
+		enabled = 1
+	}
+	_, err := r.db.Exec(`
+		INSERT INTO export_tokens (id, name, token_hash, token_prefix, enabled, created_at_ns, last_used_at_ns)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, t.ID, t.Name, t.TokenHash, t.TokenPrefix, enabled, t.CreatedAtNs, t.LastUsedAtNs)
+	return err
+}
+
+// DeleteExportToken removes an export token by ID.
+func (r *StateRepo) DeleteExportToken(id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	result, err := r.db.Exec("DELETE FROM export_tokens WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// FindEnabledExportTokenByHash finds an enabled export token by its token_hash.
+// Returns nil when not found or disabled.
+func (r *StateRepo) FindEnabledExportTokenByHash(tokenHash string) (*model.ExportToken, error) {
+	row := r.db.QueryRow(`SELECT id, name, token_prefix, enabled, created_at_ns, last_used_at_ns FROM export_tokens WHERE token_hash = ? AND enabled = 1`, tokenHash)
+	var t model.ExportToken
+	var enabled int
+	if err := row.Scan(&t.ID, &t.Name, &t.TokenPrefix, &enabled, &t.CreatedAtNs, &t.LastUsedAtNs); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	t.Enabled = enabled != 0
+	return &t, nil
+}
+
+// TouchExportTokenLastUsed updates the last_used_at_ns for an export token.
+func (r *StateRepo) TouchExportTokenLastUsed(id string, lastUsedAtNs int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	_, err := r.db.Exec(`UPDATE export_tokens SET last_used_at_ns = ? WHERE id = ?`, lastUsedAtNs, id)
+	return err
+}

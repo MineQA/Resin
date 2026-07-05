@@ -137,6 +137,12 @@ func HandleListNodes(cp *service.ControlPlaneService) http.HandlerFunc {
 		}
 		filters.Enabled = enabled
 
+		routable, ok := parseBoolQueryOrWriteInvalid(w, r, "routable")
+		if !ok {
+			return
+		}
+		filters.Routable = routable
+
 		if v := q.Get("probed_since"); v != "" {
 			t, err := time.Parse(time.RFC3339Nano, v)
 			if err != nil {

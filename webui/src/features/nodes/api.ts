@@ -3,11 +3,13 @@ import type {
   EgressProbeResult,
   LatencyProbeResult,
   NodeListQuery,
+  NodePoolExportResponse,
   NodeSummary,
   PageResponse,
 } from "./types";
 
 const basePath = "/api/v1/nodes";
+const listBasePath = "/api/v1/node-pool/nodes";
 
 type ApiNodeSummary = Omit<NodeSummary, "tags"> & {
   tags?: NodeSummary["tags"] | null;
@@ -50,6 +52,15 @@ function normalizeNode(raw: ApiNodeSummary): NodeSummary {
 }
 
 export async function listNodes(filters: NodeListQuery): Promise<PageResponse<NodeSummary>> {
+  const query = buildNodeListSearchParams(filters);
+  const data = await apiRequest<PageResponse<ApiNodeSummary>>(`${listBasePath}?${query.toString()}`);
+  return {
+    ...data,
+    items: data.items.map(normalizeNode),
+  };
+}
+
+export function buildNodeListSearchParams(filters: NodeListQuery): URLSearchParams {
   const query = new URLSearchParams({
     limit: String(filters.limit ?? 50),
     offset: String(filters.offset ?? 0),
@@ -84,12 +95,11 @@ export async function listNodes(filters: NodeListQuery): Promise<PageResponse<No
   if (filters.enabled !== undefined) {
     query.set("enabled", String(filters.enabled));
   }
+  if (filters.routable !== undefined) {
+    query.set("routable", String(filters.routable));
+  }
 
-  const data = await apiRequest<PageResponse<ApiNodeSummary>>(`${basePath}?${query.toString()}`);
-  return {
-    ...data,
-    items: data.items.map(normalizeNode),
-  };
+  return query;
 }
 
 export async function getNode(hash: string): Promise<NodeSummary> {
@@ -107,4 +117,21 @@ export async function probeLatency(hash: string): Promise<LatencyProbeResult> {
   return apiRequest<LatencyProbeResult>(`${basePath}/${hash}/actions/probe-latency`, {
     method: "POST",
   });
+}
+
+export function buildNodePoolExportURL(filters: NodeListQuery, exportToken: string): string {
+  const query = buildNodeListSearchParams({
+    ...filters,
+    sort_by: undefined,
+    sort_order: undefined,
+    limit: filters.limit ?? 100000,
+    offset: filters.offset ?? 0,
+  });
+  query.set("format", "sing-box");
+  query.set("export_token", exportToken);
+  return `/api/v1/node-pool/export?${query.toString()}`;
+}
+
+export async function exportNodePool(filters: NodeListQuery, exportToken: string): Promise<NodePoolExportResponse> {
+  return apiRequest<NodePoolExportResponse>(buildNodePoolExportURL(filters, exportToken), { auth: false });
 }
