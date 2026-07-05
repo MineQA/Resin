@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/service"
+	"gopkg.in/yaml.v3"
 )
 
 // HandleListExportTokens returns a handler for GET /api/v1/export-tokens.
@@ -64,7 +66,6 @@ type ExportOutbound struct {
 // MarshalJSON implements json.Marshaler for ExportOutbound.
 // It produces {"tag":"...","type":"...", ...all other fields from Raw...}.
 func (o ExportOutbound) MarshalJSON() ([]byte, error) {
-	// Start with the raw options as a base map.
 	if len(o.Raw) == 0 {
 		return json.Marshal(map[string]any{
 			"tag":  o.Tag,
@@ -79,16 +80,13 @@ func (o ExportOutbound) MarshalJSON() ([]byte, error) {
 		})
 	}
 	base["tag"] = o.Tag
-	// Ensure "type" is consistent (RawOptions should already have type).
-	if t, ok := base["type"].(string); ok {
-		_ = t
-	} else {
+	if _, ok := base["type"].(string); !ok {
 		base["type"] = o.Type
 	}
 	return json.Marshal(base)
 }
 
-// exportSingBoxResponse is the sing-box config response for GET /api/v1/node-pool/export.
+// exportSingBoxResponse is the sing-box config response.
 type exportSingBoxResponse struct {
 	Outbounds []ExportOutbound `json:"outbounds"`
 }
@@ -129,13 +127,17 @@ func HandleNodePoolExport(cp *service.ControlPlaneService) http.HandlerFunc {
 			return
 		}
 
-		// --- Format ---
+		// --- Format (default: clash) ---
 		format := r.URL.Query().Get("format")
 		if format == "" {
-			format = "sing-box"
+			format = "clash"
 		}
-		if format != "sing-box" {
-			WriteError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "format: only 'sing-box' is supported")
+		switch format {
+		case "sing-box", "clash", "uri", "base64":
+			// valid
+		default:
+			WriteError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+				"format: supported formats are 'sing-box', 'clash', 'uri', 'base64'")
 			return
 		}
 
@@ -183,7 +185,6 @@ func HandleNodePoolExport(cp *service.ControlPlaneService) http.HandlerFunc {
 		}
 		filters.Enabled = enabled
 
-		// Default routable=true for export endpoint.
 		routable := true
 		if v := q.Get("routable"); v != "" {
 			routableBool, ok := parseBoolQueryOrWriteInvalid(w, r, "routable")
@@ -237,7 +238,7 @@ func HandleNodePoolExport(cp *service.ControlPlaneService) http.HandlerFunc {
 			pg.Offset = offset
 		}
 
-		// Build outbounds from node entries.
+		// --- Build outbounds from node entries ---
 		var outbounds []ExportOutbound
 		for _, ns := range nodes {
 			h, err := node.ParseHex(ns.NodeHash)
@@ -248,16 +249,13 @@ func HandleNodePoolExport(cp *service.ControlPlaneService) http.HandlerFunc {
 			if !ok {
 				continue
 			}
-			// Deep-copy RawOptions to avoid mutating the pool entry.
 			rawCopy := make(json.RawMessage, len(entry.RawOptions))
 			copy(rawCopy, entry.RawOptions)
 
-			// Determine display tag.
 			tag := ns.DisplayTag
 			if tag == "" && len(ns.Tags) > 0 {
 				tag = ns.Tags[0].Tag
 			}
-			// If still empty, use node hash prefix.
 			if tag == "" && ns.NodeHash != "" {
 				prefix := ns.NodeHash
 				if len(prefix) > 12 {
@@ -266,7 +264,6 @@ func HandleNodePoolExport(cp *service.ControlPlaneService) http.HandlerFunc {
 				tag = prefix
 			}
 
-			// Extract "type" from raw options for convenience.
 			outboundType := ""
 			var rawMap map[string]any
 			if err := json.Unmarshal(rawCopy, &rawMap); err == nil {
@@ -282,12 +279,81 @@ func HandleNodePoolExport(cp *service.ControlPlaneService) http.HandlerFunc {
 			})
 		}
 
-		// Apply pagination.
 		page := PaginateSlice(outbounds, pg)
 
-		// sing-box format: return {"outbounds": [...]} with no wrapper metadata.
-		WriteJSON(w, http.StatusOK, exportSingBoxResponse{
-			Outbounds: page,
-		})
+		// --- Format dispatch ---
+		switch format {
+		case "sing-box":
+			WriteJSON(w, http.StatusOK, exportSingBoxResponse{Outbounds: page})
+
+		case "clash":
+			writeClash(w, page)
+
+		case "uri":
+			writeURI(w, page)
+
+		case "base64":
+			writeBase64(w, page)
+
+		default:
+			// unreachable
+			WriteError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+				"format: supported formats are 'sing-box', 'clash', 'uri', 'base64'")
+		}
 	}
+}
+
+// --- Format writers ---
+
+func writeClash(w http.ResponseWriter, outbounds []ExportOutbound) {
+	var proxies []map[string]any
+	for _, o := range outbounds {
+		if p := outboundToClashProxy(o); p != nil {
+			proxies = append(proxies, p)
+		}
+	}
+	if proxies == nil {
+		proxies = []map[string]any{}
+	}
+
+	yamlBytes, err := yaml.Marshal(map[string]any{"proxies": proxies})
+	if err != nil {
+		WriteError(w, http.StatusInternalServerError, "INTERNAL", "failed to encode clash yaml")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(yamlBytes)
+}
+
+func writeURI(w http.ResponseWriter, outbounds []ExportOutbound) {
+	var sb strings.Builder
+	for _, o := range outbounds {
+		if uri := outboundToURI(o); uri != "" {
+			if sb.Len() > 0 {
+				sb.WriteByte('\n')
+			}
+			sb.WriteString(uri)
+		}
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.WriteString(sb.String())
+}
+
+func writeBase64(w http.ResponseWriter, outbounds []ExportOutbound) {
+	var sb strings.Builder
+	for _, o := range outbounds {
+		if uri := outboundToURI(o); uri != "" {
+			if sb.Len() > 0 {
+				sb.WriteByte('\n')
+			}
+			sb.WriteString(uri)
+		}
+	}
+	encoded := base64.StdEncoding.EncodeToString([]byte(sb.String()))
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.WriteString(encoded)
 }

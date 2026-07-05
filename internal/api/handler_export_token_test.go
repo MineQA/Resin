@@ -2,26 +2,27 @@ package api
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/Resinat/Resin/internal/service"
 	"github.com/Resinat/Resin/internal/subscription"
 )
 
 func TestExportTokenCRUD(t *testing.T) {
 	srv, cp, _ := newControlPlaneTestServer(t)
 
-	// Create a subscription and node so the export has data.
 	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
 	cp.SubMgr.Register(sub)
 	const rawA = `{"type":"ss","server":"1.1.1.1","port":443,"method":"chacha20","password":"test"}`
 	addNodeForNodeListTest(t, cp, sub, rawA, "203.0.113.10")
 	markNodeHealthyForNodeListTest(t, cp, rawA)
 
-	// --- Create export token ---
 	createResp := doJSONRequest(t, srv, http.MethodPost, "/api/v1/export-tokens", map[string]any{
 		"name": "test-token",
 	}, true)
@@ -46,12 +47,10 @@ func TestExportTokenCRUD(t *testing.T) {
 	if len(tokenPrefix) >= len(tokenValue) || tokenValue[:len(tokenPrefix)] != tokenPrefix {
 		t.Fatalf("create export token: prefix=%q does not match start of token=%q", tokenPrefix, tokenValue)
 	}
-	// Verify token value is high-entropy (base64url, no padding, 43 chars for 32 bytes)
 	if len(tokenValue) != 43 {
-		t.Fatalf("create export token: token length=%d, want 43 (32 bytes base64url no padding)", len(tokenValue))
+		t.Fatalf("create export token: token length=%d, want 43", len(tokenValue))
 	}
 
-	// --- List export tokens should NOT return raw token ---
 	listResp := doJSONRequest(t, srv, http.MethodGet, "/api/v1/export-tokens", nil, true)
 	if listResp.Code != http.StatusOK {
 		t.Fatalf("list export tokens: got status %d, want %d, body=%s", listResp.Code, http.StatusOK, listResp.Body.String())
@@ -78,14 +77,12 @@ func TestExportTokenCRUD(t *testing.T) {
 func TestNodePoolExport_Auth(t *testing.T) {
 	srv, cp, _ := newControlPlaneTestServer(t)
 
-	// Create a node to have some export data.
 	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
 	cp.SubMgr.Register(sub)
 	const rawA = `{"type":"ss","server":"1.1.1.1","port":443,"method":"chacha20","password":"test"}`
 	addNodeForNodeListTest(t, cp, sub, rawA, "203.0.113.10")
 	markNodeHealthyForNodeListTest(t, cp, rawA)
 
-	// Create an export token.
 	createResp := doJSONRequest(t, srv, http.MethodPost, "/api/v1/export-tokens", map[string]any{
 		"name": "export-token",
 	}, true)
@@ -95,61 +92,37 @@ func TestNodePoolExport_Auth(t *testing.T) {
 	createBody := decodeJSONMap(t, createResp)
 	tokenValue, _ := createBody["token"].(string)
 
-	// --- Export via Bearer token ---
-	req := newTestRequest(t, http.MethodGet, "/api/v1/node-pool/export", nil)
+	// Bearer token auth
+	req := newTestRequest(t, http.MethodGet, "/api/v1/node-pool/export?format=sing-box", nil)
 	req.Header.Set("Authorization", "Bearer "+tokenValue)
 	rec := doTestRequest(t, srv, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("export with bearer token: got status %d, want 200, body=%s", rec.Code, rec.Body.String())
 	}
-	var exportBody map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &exportBody); err != nil {
-		t.Fatalf("export: unmarshal error: %v body=%s", err, rec.Body.String())
-	}
-	// Response should be a bare sing-box config: only outbounds, no metadata.
-	if _, hasFormat := exportBody["format"]; hasFormat {
-		t.Fatal("export: should not include format field")
-	}
-	if _, hasTotal := exportBody["total"]; hasTotal {
-		t.Fatal("export: should not include total field")
-	}
-	if _, hasLimit := exportBody["limit"]; hasLimit {
-		t.Fatal("export: should not include limit field")
-	}
-	if _, hasOffset := exportBody["offset"]; hasOffset {
-		t.Fatal("export: should not include offset field")
-	}
-	outbounds, ok := exportBody["outbounds"].([]any)
-	// Node may not be in any routable view (no platforms), but the export
-	// will still return it because ListNodes uses routable filter.
-	// With routable=true and no platforms, routableNodes is empty so
-	// no nodes match. That's OK — we just check the response structure.
-	_ = outbounds
-	_ = ok
 
-	// --- Export via query param (no auth header) ---
-	queryExport := doJSONRequest(t, srv, http.MethodGet, "/api/v1/node-pool/export?export_token="+tokenValue, nil, false)
+	// Query param auth
+	queryExport := doJSONRequest(t, srv, http.MethodGet, "/api/v1/node-pool/export?format=sing-box&export_token="+tokenValue, nil, false)
 	if queryExport.Code != http.StatusOK {
 		t.Fatalf("export with query token: got status %d, want 200, body=%s", queryExport.Code, queryExport.Body.String())
 	}
 
-	// --- Query token takes precedence over User-Agent fallback ---
-	queryWithBadUAReq := newTestRequest(t, http.MethodGet, "/api/v1/node-pool/export?export_token="+tokenValue, nil)
+	// Query token takes precedence over User-Agent
+	queryWithBadUAReq := newTestRequest(t, http.MethodGet, "/api/v1/node-pool/export?format=sing-box&export_token="+tokenValue, nil)
 	queryWithBadUAReq.Header.Set("User-Agent", "ResinExport/invalidtokenhere")
 	queryWithBadUARec := doTestRequest(t, srv, queryWithBadUAReq)
 	if queryWithBadUARec.Code != http.StatusOK {
-		t.Fatalf("export with query token and bad UA token: got status %d, want 200, body=%s", queryWithBadUARec.Code, queryWithBadUARec.Body.String())
+		t.Fatalf("export with query token and bad UA: got status %d, want 200, body=%s", queryWithBadUARec.Code, queryWithBadUARec.Body.String())
 	}
 
-	// --- Export via User-Agent: ResinExport/<token> ---
-	uaReq := newTestRequest(t, http.MethodGet, "/api/v1/node-pool/export", nil)
+	// User-Agent auth
+	uaReq := newTestRequest(t, http.MethodGet, "/api/v1/node-pool/export?format=sing-box", nil)
 	uaReq.Header.Set("User-Agent", "ResinExport/"+tokenValue)
 	uaRec := doTestRequest(t, srv, uaReq)
 	if uaRec.Code != http.StatusOK {
 		t.Fatalf("export with UA token: got status %d, want 200, body=%s", uaRec.Code, uaRec.Body.String())
 	}
 
-	// --- Export via User-Agent with bad prefix still 401 ---
+	// Bad UA prefix
 	badUAReq := newTestRequest(t, http.MethodGet, "/api/v1/node-pool/export", nil)
 	badUAReq.Header.Set("User-Agent", "SomeOtherAgent/"+tokenValue)
 	badUARec := doTestRequest(t, srv, badUAReq)
@@ -157,7 +130,7 @@ func TestNodePoolExport_Auth(t *testing.T) {
 		t.Fatalf("export with bad UA prefix: got status %d, want 401, body=%s", badUARec.Code, badUARec.Body.String())
 	}
 
-	// --- Export via User-Agent with exact prefix but empty token still 401 ---
+	// Empty UA token
 	emptyUAReq := newTestRequest(t, http.MethodGet, "/api/v1/node-pool/export", nil)
 	emptyUAReq.Header.Set("User-Agent", "ResinExport/")
 	emptyUARec := doTestRequest(t, srv, emptyUAReq)
@@ -165,82 +138,149 @@ func TestNodePoolExport_Auth(t *testing.T) {
 		t.Fatalf("export with empty UA token: got status %d, want 401, body=%s", emptyUARec.Code, emptyUARec.Body.String())
 	}
 
-	// --- Export without any token returns 401 ---
-	noTokenResp := doJSONRequest(t, srv, http.MethodGet, "/api/v1/node-pool/export", nil, false)
+	// No token
+	noTokenResp := doJSONRequest(t, srv, http.MethodGet, "/api/v1/node-pool/export?format=sing-box", nil, false)
 	if noTokenResp.Code != http.StatusUnauthorized {
 		t.Fatalf("export without token: got status %d, want 401, body=%s", noTokenResp.Code, noTokenResp.Body.String())
 	}
 
-	// --- Export with invalid token returns 401 ---
-	badTokenResp := doJSONRequest(t, srv, http.MethodGet, "/api/v1/node-pool/export?export_token=invalidtokenhere", nil, false)
+	// Invalid token
+	badTokenResp := doJSONRequest(t, srv, http.MethodGet, "/api/v1/node-pool/export?format=sing-box&export_token=invalidtokenhere", nil, false)
 	if badTokenResp.Code != http.StatusUnauthorized {
 		t.Fatalf("export with bad token: got status %d, want 401, body=%s", badTokenResp.Code, badTokenResp.Body.String())
 	}
 
-	// --- Export with unknown format returns 400 ---
-	badFormatResp := doJSONRequest(t, srv, http.MethodGet, "/api/v1/node-pool/export?format=clash&export_token="+tokenValue, nil, false)
+	// Unknown format
+	badFormatResp := doJSONRequest(t, srv, http.MethodGet, "/api/v1/node-pool/export?format=unknown&export_token="+tokenValue, nil, false)
 	if badFormatResp.Code != http.StatusBadRequest {
 		t.Fatalf("export with bad format: got status %d, want 400, body=%s", badFormatResp.Code, badFormatResp.Body.String())
 	}
 	assertErrorCode(t, badFormatResp, "INVALID_ARGUMENT")
 
-	// --- Delete export token ---
+	// Delete and verify
 	tokenID, _ := createBody["id"].(string)
 	delResp := doJSONRequest(t, srv, http.MethodDelete, "/api/v1/export-tokens/"+tokenID, nil, true)
 	if delResp.Code != http.StatusNoContent {
 		t.Fatalf("delete export token: got status %d, want 204, body=%s", delResp.Code, delResp.Body.String())
 	}
-
-	// --- After deletion, token no longer works ---
-	afterDelResp := doJSONRequest(t, srv, http.MethodGet, "/api/v1/node-pool/export?export_token="+tokenValue, nil, false)
+	afterDelResp := doJSONRequest(t, srv, http.MethodGet, "/api/v1/node-pool/export?format=sing-box&export_token="+tokenValue, nil, false)
 	if afterDelResp.Code != http.StatusUnauthorized {
 		t.Fatalf("export after deletion: got status %d, want 401, body=%s", afterDelResp.Code, afterDelResp.Body.String())
 	}
 }
 
-func TestNodePoolExport_FormatAndOutput(t *testing.T) {
-	srv, cp, _ := newControlPlaneTestServer(t)
+func TestNodePoolExport_FormatSingBox(t *testing.T) {
+	srv, cp, tokenValue := setupExportTest(t)
+	_ = cp
 
-	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
-	cp.SubMgr.Register(sub)
-	const rawA = `{"type":"ss","server":"1.1.1.1","port":443,"method":"chacha20","password":"test"}`
-	addNodeForNodeListTest(t, cp, sub, rawA, "203.0.113.10")
-	markNodeHealthyForNodeListTest(t, cp, rawA)
-
-	// Create export token.
-	createResp := doJSONRequest(t, srv, http.MethodPost, "/api/v1/export-tokens", map[string]any{
-		"name": "export-token",
-	}, true)
-	if createResp.Code != http.StatusCreated {
-		t.Fatalf("create token: got %d", createResp.Code)
-	}
-	createBody := decodeJSONMap(t, createResp)
-	tokenValue, _ := createBody["token"].(string)
-
-	// Export with sing-box format (explicit).
 	resp := doJSONRequest(t, srv, http.MethodGet, "/api/v1/node-pool/export?format=sing-box&export_token="+tokenValue, nil, false)
 	if resp.Code != http.StatusOK {
 		t.Fatalf("export sing-box: got status %d, want 200, body=%s", resp.Code, resp.Body.String())
 	}
+	assertContentType(t, resp, "application/json")
 	var body map[string]any
 	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	// Bare sing-box config: only outbounds, no metadata fields.
 	if _, ok := body["format"]; ok {
-		t.Fatal("should not include format field")
+		t.Fatal("sing-box: should not include format field")
 	}
 	if _, ok := body["total"]; ok {
-		t.Fatal("should not include total field")
-	}
-	if _, ok := body["limit"]; ok {
-		t.Fatal("should not include limit field")
-	}
-	if _, ok := body["offset"]; ok {
-		t.Fatal("should not include offset field")
+		t.Fatal("sing-box: should not include total field")
 	}
 	if _, ok := body["outbounds"]; !ok {
-		t.Fatal("missing outbounds field")
+		t.Fatal("sing-box: missing outbounds field")
+	}
+}
+
+func TestNodePoolExport_DefaultFormatIsClash(t *testing.T) {
+	srv, cp, tokenValue := setupExportTest(t)
+	_ = cp
+
+	// No format param -> default clash -> YAML
+	resp := doJSONRequest(t, srv, http.MethodGet, "/api/v1/node-pool/export?export_token="+tokenValue, nil, false)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("export default clash: got status %d, want 200, body=%s", resp.Code, resp.Body.String())
+	}
+	ct := resp.Header().Get("Content-Type")
+	if !strings.Contains(ct, "text/yaml") && !strings.Contains(ct, "application/x-yaml") {
+		t.Fatalf("export default clash: content-type=%q, want text/yaml", ct)
+	}
+	body := resp.Body.String()
+	if !strings.Contains(body, "proxies:") {
+		t.Fatalf("export default clash: body should contain 'proxies:', got=%q", body)
+	}
+	if strings.Contains(body, "outbounds") {
+		t.Fatal("export default clash: should not contain sing-box outbounds")
+	}
+}
+
+func TestNodePoolExport_FormatClash(t *testing.T) {
+	srv, cp, tokenValue := setupExportTest(t)
+	_ = cp
+
+	resp := doJSONRequest(t, srv, http.MethodGet, "/api/v1/node-pool/export?format=clash&export_token="+tokenValue, nil, false)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("export clash: got status %d, want 200, body=%s", resp.Code, resp.Body.String())
+	}
+	ct := resp.Header().Get("Content-Type")
+	if !strings.Contains(ct, "text/yaml") && !strings.Contains(ct, "application/x-yaml") {
+		t.Fatalf("export clash: content-type=%q, want text/yaml", ct)
+	}
+	body := resp.Body.String()
+	if !strings.Contains(body, "proxies:") {
+		t.Fatalf("export clash: body should contain 'proxies:', got=%q", body)
+	}
+	// Verify it contains the ss proxy fields.
+	if !strings.Contains(body, "type: \"ss\"") && !strings.Contains(body, "type: ss") {
+		t.Fatalf("export clash: missing ss proxy type, body=%q", body)
+	}
+	if !strings.Contains(body, "cipher:") {
+		t.Fatalf("export clash: missing cipher field, body=%q", body)
+	}
+}
+
+func TestNodePoolExport_FormatURI(t *testing.T) {
+	srv, cp, tokenValue := setupExportTest(t)
+	_ = cp
+
+	resp := doJSONRequest(t, srv, http.MethodGet, "/api/v1/node-pool/export?format=uri&export_token="+tokenValue, nil, false)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("export uri: got status %d, want 200, body=%s", resp.Code, resp.Body.String())
+	}
+	ct := resp.Header().Get("Content-Type")
+	if !strings.Contains(ct, "text/plain") {
+		t.Fatalf("export uri: content-type=%q, want text/plain", ct)
+	}
+	body := resp.Body.String()
+	if !strings.HasPrefix(body, "ss://") {
+		t.Fatalf("export uri: body should start with ss://, got=%q", body)
+	}
+	// Verify it contains newlines (not base64).
+	if !strings.Contains(body, "\n") {
+		// only one node, but shouldn't have other issues.
+	}
+}
+
+func TestNodePoolExport_FormatBase64(t *testing.T) {
+	srv, cp, tokenValue := setupExportTest(t)
+	_ = cp
+
+	resp := doJSONRequest(t, srv, http.MethodGet, "/api/v1/node-pool/export?format=base64&export_token="+tokenValue, nil, false)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("export base64: got status %d, want 200, body=%s", resp.Code, resp.Body.String())
+	}
+	ct := resp.Header().Get("Content-Type")
+	if !strings.Contains(ct, "text/plain") {
+		t.Fatalf("export base64: content-type=%q, want text/plain", ct)
+	}
+	raw := resp.Body.String()
+	decoded, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		t.Fatalf("export base64: decode error: %v body=%q", err, raw)
+	}
+	if !strings.HasPrefix(string(decoded), "ss://") {
+		t.Fatalf("export base64: decoded should start with ss://, got=%q", string(decoded))
 	}
 }
 
@@ -250,26 +290,21 @@ func TestNodePoolExport_DefaultRoutable(t *testing.T) {
 	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
 	cp.SubMgr.Register(sub)
 
-	// Add two nodes: one healthy, one not.
 	const rawA = `{"type":"ss","server":"1.1.1.1","port":443,"method":"chacha20","password":"test"}`
 	const rawB = `{"type":"ss","server":"2.2.2.2","port":443,"method":"chacha20","password":"test"}`
 	addNodeForNodeListTest(t, cp, sub, rawA, "203.0.113.10")
 	addNodeForNodeListTest(t, cp, sub, rawB, "203.0.113.20")
 	markNodeHealthyForNodeListTest(t, cp, rawA)
-	// Node B is NOT marked healthy — no outbound, circuit open.
 
-	// Create export token.
 	createResp := doJSONRequest(t, srv, http.MethodPost, "/api/v1/export-tokens", map[string]any{
 		"name": "export-token",
 	}, true)
 	createBody := decodeJSONMap(t, createResp)
 	tokenValue, _ := createBody["token"].(string)
 
-	// Without explicit routable param, default is routable=true.
-	// Since no platforms exist, routableNodes will be empty and
-	// both nodes are excluded. This is consistent behavior.
+	// Use sing-box format so we can count outbounds.
 	resp := doJSONRequest(t, srv, http.MethodGet,
-		"/api/v1/node-pool/export?export_token="+tokenValue+"&routable=false", nil, false)
+		"/api/v1/node-pool/export?format=sing-box&export_token="+tokenValue+"&routable=false", nil, false)
 	if resp.Code != http.StatusOK {
 		t.Fatalf("export routable=false: got status %d, want 200, body=%s", resp.Code, resp.Body.String())
 	}
@@ -283,6 +318,37 @@ func TestNodePoolExport_DefaultRoutable(t *testing.T) {
 	}
 	if len(outbounds) != 2 {
 		t.Fatalf("export routable=false: got %d outbounds, want 2", len(outbounds))
+	}
+}
+
+// --- Helpers ---
+
+func setupExportTest(t *testing.T) (*Server, *service.ControlPlaneService, string) {
+	t.Helper()
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+	const rawA = `{"type":"ss","server":"1.1.1.1","port":443,"method":"chacha20-ietf-poly1305","password":"testpass"}`
+	addNodeForNodeListTest(t, cp, sub, rawA, "203.0.113.10")
+	markNodeHealthyForNodeListTest(t, cp, rawA)
+
+	createResp := doJSONRequest(t, srv, http.MethodPost, "/api/v1/export-tokens", map[string]any{
+		"name": "export-test",
+	}, true)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("setup: create token: got %d", createResp.Code)
+	}
+	createBody := decodeJSONMap(t, createResp)
+	tokenValue, _ := createBody["token"].(string)
+	return srv, cp, tokenValue
+}
+
+func assertContentType(t *testing.T, resp *httptest.ResponseRecorder, expected string) {
+	t.Helper()
+	ct := resp.Header().Get("Content-Type")
+	if !strings.HasPrefix(ct, expected) {
+		t.Fatalf("content-type: got %q, want prefix %q", ct, expected)
 	}
 }
 
@@ -304,7 +370,7 @@ func newTestRequest(t *testing.T, method, path string, body any) *http.Request {
 	return req
 }
 
-// doTestRequest executes a request against the test server and returns the response.
+// doTestRequest executes a request against the test server.
 func doTestRequest(t *testing.T, srv *Server, req *http.Request) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()

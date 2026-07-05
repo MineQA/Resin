@@ -119,7 +119,7 @@ export async function probeLatency(hash: string): Promise<LatencyProbeResult> {
   });
 }
 
-export function buildNodePoolExportURL(filters: NodeListQuery, exportToken: string): string {
+export function buildNodePoolExportURL(filters: NodeListQuery, exportToken: string, format: string = "clash"): string {
   const query = buildNodeListSearchParams({
     ...filters,
     sort_by: undefined,
@@ -127,11 +127,29 @@ export function buildNodePoolExportURL(filters: NodeListQuery, exportToken: stri
     limit: filters.limit ?? 100000,
     offset: filters.offset ?? 0,
   });
-  query.set("format", "sing-box");
+  query.set("format", format);
   query.set("export_token", exportToken);
   return `/api/v1/node-pool/export?${query.toString()}`;
 }
 
 export async function exportNodePool(filters: NodeListQuery, exportToken: string): Promise<NodePoolExportResponse> {
-  return apiRequest<NodePoolExportResponse>(buildNodePoolExportURL(filters, exportToken), { auth: false });
+  return apiRequest<NodePoolExportResponse>(buildNodePoolExportURL(filters, exportToken, "sing-box"), { auth: false });
+}
+
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.trim() ?? "";
+
+function apiURL(path: string): string {
+  if (path.startsWith("http://") || path.startsWith("https://")) {
+    return path;
+  }
+  return `${API_BASE_URL}${path}`;
+}
+
+export async function exportNodePoolText(filters: NodeListQuery, exportToken: string, format: string = "clash"): Promise<string> {
+  const url = buildNodePoolExportURL(filters, exportToken, format);
+  const res = await fetch(apiURL(url));
+  if (!res.ok) {
+    throw new Error(`export failed: ${res.status} ${res.statusText}`);
+  }
+  return res.text();
 }

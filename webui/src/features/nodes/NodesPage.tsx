@@ -19,7 +19,7 @@ import { formatDateTime, formatRelativeTime } from "../../lib/time";
 import { listPlatforms } from "../platforms/api";
 import type { Platform } from "../platforms/types";
 import { listSubscriptions } from "../subscriptions/api";
-import { buildNodePoolExportURL, exportNodePool, getNode, listNodes, probeEgress, probeLatency } from "./api";
+import { buildNodePoolExportURL, exportNodePoolText, getNode, listNodes, probeEgress, probeLatency } from "./api";
 import type { NodeSummary } from "./types";
 import { getAllRegions, getRegionName } from "./regions";
 import type { NodeListFilters, NodeSortBy, SortOrder } from "./types";
@@ -688,17 +688,17 @@ export function NodesPage() {
       return;
     }
     try {
-      const data = await exportNodePool({ ...exportFilters(), limit: 100000, offset: 0 }, trimmedToken);
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const text = await exportNodePoolText({ ...exportFilters(), limit: 100000, offset: 0 }, trimmedToken, "clash");
+      const blob = new Blob([text], { type: "text/yaml; charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = "resin-node-pool-sing-box.json";
+      link.download = "resin-node-pool-clash.yaml";
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
-      showToast("success", t("已导出 {{count}} 个节点", { count: data.outbounds.length }));
+      showToast("success", t("已导出 {{count}} 个节点", { count: (text.match(/^\s+- /gm) || []).length }));
     } catch (error) {
       showToast("error", formatApiErrorMessage(error, t));
     }
@@ -1061,7 +1061,7 @@ export function NodesPage() {
                   </Button>
                   <Button size="sm" variant="secondary" onClick={() => void downloadExportJSON()}>
                     <Download size={14} />
-                    {t("下载 JSON")}
+                    {t("下载 Clash YAML")}
                   </Button>
                 </div>
                 <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
