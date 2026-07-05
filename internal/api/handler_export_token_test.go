@@ -133,6 +133,38 @@ func TestNodePoolExport_Auth(t *testing.T) {
 		t.Fatalf("export with query token: got status %d, want 200, body=%s", queryExport.Code, queryExport.Body.String())
 	}
 
+	// --- Query token takes precedence over User-Agent fallback ---
+	queryWithBadUAReq := newTestRequest(t, http.MethodGet, "/api/v1/node-pool/export?export_token="+tokenValue, nil)
+	queryWithBadUAReq.Header.Set("User-Agent", "ResinExport/invalidtokenhere")
+	queryWithBadUARec := doTestRequest(t, srv, queryWithBadUAReq)
+	if queryWithBadUARec.Code != http.StatusOK {
+		t.Fatalf("export with query token and bad UA token: got status %d, want 200, body=%s", queryWithBadUARec.Code, queryWithBadUARec.Body.String())
+	}
+
+	// --- Export via User-Agent: ResinExport/<token> ---
+	uaReq := newTestRequest(t, http.MethodGet, "/api/v1/node-pool/export", nil)
+	uaReq.Header.Set("User-Agent", "ResinExport/"+tokenValue)
+	uaRec := doTestRequest(t, srv, uaReq)
+	if uaRec.Code != http.StatusOK {
+		t.Fatalf("export with UA token: got status %d, want 200, body=%s", uaRec.Code, uaRec.Body.String())
+	}
+
+	// --- Export via User-Agent with bad prefix still 401 ---
+	badUAReq := newTestRequest(t, http.MethodGet, "/api/v1/node-pool/export", nil)
+	badUAReq.Header.Set("User-Agent", "SomeOtherAgent/"+tokenValue)
+	badUARec := doTestRequest(t, srv, badUAReq)
+	if badUARec.Code != http.StatusUnauthorized {
+		t.Fatalf("export with bad UA prefix: got status %d, want 401, body=%s", badUARec.Code, badUARec.Body.String())
+	}
+
+	// --- Export via User-Agent with exact prefix but empty token still 401 ---
+	emptyUAReq := newTestRequest(t, http.MethodGet, "/api/v1/node-pool/export", nil)
+	emptyUAReq.Header.Set("User-Agent", "ResinExport/")
+	emptyUARec := doTestRequest(t, srv, emptyUAReq)
+	if emptyUARec.Code != http.StatusUnauthorized {
+		t.Fatalf("export with empty UA token: got status %d, want 401, body=%s", emptyUARec.Code, emptyUARec.Body.String())
+	}
+
 	// --- Export without any token returns 401 ---
 	noTokenResp := doJSONRequest(t, srv, http.MethodGet, "/api/v1/node-pool/export", nil, false)
 	if noTokenResp.Code != http.StatusUnauthorized {

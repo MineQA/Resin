@@ -1065,7 +1065,7 @@ export function NodesPage() {
                   </Button>
                 </div>
                 <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
-                  {t("导出默认只包含当前筛选范围内的可路由节点；URL token 适合不支持自定义请求头的订阅转换器。")}
+                  {t("导出默认只包含当前筛选范围内的可路由节点；支持 Authorization Bearer、User-Agent: ResinExport/<token> 或 URL query token。")}
                 </span>
               </div>
             </div>

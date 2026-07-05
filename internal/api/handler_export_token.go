@@ -93,21 +93,37 @@ type exportSingBoxResponse struct {
 	Outbounds []ExportOutbound `json:"outbounds"`
 }
 
+// exportTokenHeaderPrefix is the User-Agent prefix for export token auth.
+const exportTokenHeaderPrefix = "ResinExport/"
+
+// extractExportToken extracts an export token from the request, trying in order:
+//  1. Authorization: Bearer <token>
+//  2. ?export_token=<token>
+//  3. User-Agent: ResinExport/<token>
+func extractExportToken(r *http.Request) string {
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		const bearerPrefix = "Bearer "
+		if strings.HasPrefix(auth, bearerPrefix) {
+			return auth[len(bearerPrefix):]
+		}
+	}
+	if token := r.URL.Query().Get("export_token"); token != "" {
+		return token
+	}
+	if ua := r.Header.Get("User-Agent"); ua != "" {
+		if strings.HasPrefix(ua, exportTokenHeaderPrefix) {
+			return ua[len(exportTokenHeaderPrefix):]
+		}
+	}
+	return ""
+}
+
 // HandleNodePoolExport returns a handler for GET /api/v1/node-pool/export.
 // This endpoint does NOT require admin auth; it validates via export token.
 func HandleNodePoolExport(cp *service.ControlPlaneService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// --- Authentication via export token ---
-		var rawToken string
-		if auth := r.Header.Get("Authorization"); auth != "" {
-			const prefix = "Bearer "
-			if strings.HasPrefix(auth, prefix) {
-				rawToken = auth[len(prefix):]
-			}
-		}
-		if rawToken == "" {
-			rawToken = r.URL.Query().Get("export_token")
-		}
+		rawToken := extractExportToken(r)
 		if !cp.ValidateExportToken(rawToken) {
 			WriteError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or missing export token")
 			return
