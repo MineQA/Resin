@@ -66,9 +66,5 @@ export type LatencyProbeResult = {
 };
 
 export type NodePoolExportResponse = {
-  format: "sing-box";
   outbounds: unknown[];
-  total: number;
-  limit: number;
-  offset: number;
 };

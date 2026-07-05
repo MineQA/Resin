@@ -88,13 +88,9 @@ func (o ExportOutbound) MarshalJSON() ([]byte, error) {
 	return json.Marshal(base)
 }
 
-// nodePoolExportResponse is the response for GET /api/v1/node-pool/export.
-type nodePoolExportResponse struct {
-	Format    string           `json:"format"`
+// exportSingBoxResponse is the sing-box config response for GET /api/v1/node-pool/export.
+type exportSingBoxResponse struct {
 	Outbounds []ExportOutbound `json:"outbounds"`
-	Total     int              `json:"total"`
-	Limit     int              `json:"limit"`
-	Offset    int              `json:"offset"`
 }
 
 // HandleNodePoolExport returns a handler for GET /api/v1/node-pool/export.
@@ -271,15 +267,11 @@ func HandleNodePoolExport(cp *service.ControlPlaneService) http.HandlerFunc {
 		}
 
 		// Apply pagination.
-		total := len(outbounds)
 		page := PaginateSlice(outbounds, pg)
 
-		WriteJSON(w, http.StatusOK, nodePoolExportResponse{
-			Format:    "sing-box",
+		// sing-box format: return {"outbounds": [...]} with no wrapper metadata.
+		WriteJSON(w, http.StatusOK, exportSingBoxResponse{
 			Outbounds: page,
-			Total:     total,
-			Limit:     pg.Limit,
-			Offset:    pg.Offset,
 		})
 	}
 }

@@ -689,7 +689,7 @@ export function NodesPage() {
     }
     try {
       const data = await exportNodePool({ ...exportFilters(), limit: 100000, offset: 0 }, trimmedToken);
-      const blob = new Blob([JSON.stringify({ outbounds: data.outbounds }, null, 2)], { type: "application/json" });
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;

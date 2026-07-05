@@ -106,8 +106,18 @@ func TestNodePoolExport_Auth(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &exportBody); err != nil {
 		t.Fatalf("export: unmarshal error: %v body=%s", err, rec.Body.String())
 	}
-	if exportBody["format"] != "sing-box" {
-		t.Fatalf("export: format=%v, want sing-box", exportBody["format"])
+	// Response should be a bare sing-box config: only outbounds, no metadata.
+	if _, hasFormat := exportBody["format"]; hasFormat {
+		t.Fatal("export: should not include format field")
+	}
+	if _, hasTotal := exportBody["total"]; hasTotal {
+		t.Fatal("export: should not include total field")
+	}
+	if _, hasLimit := exportBody["limit"]; hasLimit {
+		t.Fatal("export: should not include limit field")
+	}
+	if _, hasOffset := exportBody["offset"]; hasOffset {
+		t.Fatal("export: should not include offset field")
 	}
 	outbounds, ok := exportBody["outbounds"].([]any)
 	// Node may not be in any routable view (no platforms), but the export
@@ -184,17 +194,21 @@ func TestNodePoolExport_FormatAndOutput(t *testing.T) {
 	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if body["format"] != "sing-box" {
-		t.Fatalf("format: got %v, want sing-box", body["format"])
+	// Bare sing-box config: only outbounds, no metadata fields.
+	if _, ok := body["format"]; ok {
+		t.Fatal("should not include format field")
 	}
-	if _, ok := body["total"]; !ok {
-		t.Fatal("missing total field")
+	if _, ok := body["total"]; ok {
+		t.Fatal("should not include total field")
 	}
-	if _, ok := body["limit"]; !ok {
-		t.Fatal("missing limit field")
+	if _, ok := body["limit"]; ok {
+		t.Fatal("should not include limit field")
 	}
-	if _, ok := body["offset"]; !ok {
-		t.Fatal("missing offset field")
+	if _, ok := body["offset"]; ok {
+		t.Fatal("should not include offset field")
+	}
+	if _, ok := body["outbounds"]; !ok {
+		t.Fatal("missing outbounds field")
 	}
 }
 
@@ -231,9 +245,12 @@ func TestNodePoolExport_DefaultRoutable(t *testing.T) {
 	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	total := body["total"].(float64)
-	if int(total) != 2 {
-		t.Fatalf("export routable=false: total=%v, want 2", total)
+	outbounds, ok := body["outbounds"].([]any)
+	if !ok {
+		t.Fatalf("export routable=false: missing outbounds field")
+	}
+	if len(outbounds) != 2 {
+		t.Fatalf("export routable=false: got %d outbounds, want 2", len(outbounds))
 	}
 }
 
