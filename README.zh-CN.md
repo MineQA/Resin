@@ -65,6 +65,35 @@
 - 对于 sing-box JSON/原始 outbounds：`socks`、`http`、`shadowsocks`、`vmess`、`trojan`、`wireguard`、`hysteria`、`vless`、`shadowtls`、`tuic`、`hysteria2`、`anytls`、`ssh`。
 - 对于 Clash 转换：`ss`/`shadowsocks`、`socks`/`socks4`/`socks4a`/`socks5`、`http`、`vmess`、`vless`、`trojan`、`wireguard`/`wg`、`hysteria`、`hysteria2`/`hy2`、`tuic`、`anytls`、`ssh`。
 
+### 导出节点池
+
+Resin 可以把已管理的节点导出为订阅源，供 sub-web-modify/subconverter 等工具使用。
+
+1. 在 WebUI 的**系统设置**中创建导出令牌。
+2. 到**节点池**页面，在节点导出区域填写/保存该导出令牌。
+3. 在令牌附近选择导出选项，然后复制导出 URL 或下载生成文件。
+
+支持的导出格式：
+
+- `clash`（默认）：顶层为 `proxies:` 的 Clash YAML，推荐作为转换器输入。
+- `base64`：Base64 包裹的 URI 行。
+- `uri`：明文 URI 行。
+- `sing-box`：裸 sing-box JSON，例如 `{"outbounds":[...]}`。
+
+导出地址为 `GET /api/v1/node-pool/export`。它不使用管理后台 token，而是使用导出令牌鉴权，支持以下方式：
+
+- `?export_token=<token>`（推荐给转换器后端使用）
+- `Authorization: Bearer <token>`
+- `User-Agent: ResinExport/<token>`
+
+转换器后端拉取订阅源时通常不会透传自定义 Header 或 User-Agent，因此推荐使用 query token URL，例如：
+
+```text
+http://127.0.0.1:2260/api/v1/node-pool/export?format=clash&export_token=<token>
+```
+
+支持的导出筛选参数与节点列表一致：`platform_id`、`subscription_id`、`region`、`egress_ip`、`tag_keyword`、`circuit_open=true|false`、`has_outbound=true|false`、`enabled=true|false`、`routable=true|false`、`probed_since=<RFC3339 时间>`、`limit`、`offset`。如果不传 `routable`，不会默认只导出可路由节点。
+
 
 ## 🚀 Quick Start
 

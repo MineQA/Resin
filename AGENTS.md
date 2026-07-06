@@ -30,5 +30,8 @@
 - New nodes start circuit-open/fused and become routable only after successful probes.
 - Node identity is based on canonical outbound options with tag stripped; dedup across subscriptions is expected.
 - Hot-path routing uses precomputed platform routable views; avoid adding cold-path filtering work to request routing.
+- Node pool exports are public-control endpoints protected by WebUI-managed export tokens, not `RESIN_ADMIN_TOKEN`. Keep `/api/v1/node-pool/export` converter-friendly: default `format=clash`, support `format=base64|uri|sing-box`, and prefer `?export_token=<token>` for sub-web/subconverter integrations because converter backends usually do not forward custom headers or User-Agent.
+- Export token auth supports `Authorization: Bearer <token>`, `?export_token=<token>`, and only the `User-Agent: ResinExport/<token>` prefix form; do not accept arbitrary User-Agent values as tokens.
+- Node export filtering reuses node list filters: `platform_id`, `subscription_id`, `region`, `egress_ip`, `tag_keyword`, `circuit_open`, `has_outbound`, `enabled`, `routable`, `probed_since`, `limit`, `offset`. Missing `routable` means no routable-only filter.
 - `DESIGN.md` is the detailed architecture source (Chinese); README is bilingual and less authoritative than executable config/tests when they conflict.
 - Root `Dockerfile` builds from source; release GHCR images use `.github/Dockerfile.release` with prebuilt Linux binaries.

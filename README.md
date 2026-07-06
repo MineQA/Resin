@@ -65,6 +65,35 @@ It helps shield your services from unstable underlying proxy nodes by aggregatin
 - For sing-box JSON/raw outbounds: `socks`, `http`, `shadowsocks`, `vmess`, `trojan`, `wireguard`, `hysteria`, `vless`, `shadowtls`, `tuic`, `hysteria2`, `anytls`, `ssh`.
 - For Clash conversion: `ss`/`shadowsocks`, `socks`/`socks4`/`socks4a`/`socks5`, `http`, `vmess`, `vless`, `trojan`, `wireguard`/`wg`, `hysteria`, `hysteria2`/`hy2`, `tuic`, `anytls`, `ssh`.
 
+### Exporting the node pool
+
+Resin can export managed nodes as a subscription source for tools such as sub-web-modify/subconverter.
+
+1. Open the Web UI and create an export token in **System Settings**.
+2. Go to **Nodes**, paste/save that export token in the node export area.
+3. Choose export options near the token field, then copy the export URL or download the generated file.
+
+Supported export formats:
+
+- `clash` (default): Clash YAML with a top-level `proxies:` list. This is the recommended converter input.
+- `base64`: Base64-wrapped URI lines.
+- `uri`: Plain URI lines.
+- `sing-box`: Bare sing-box JSON, for example `{"outbounds":[...]}`.
+
+The export URL is `GET /api/v1/node-pool/export`. It does not use the admin token; it requires an export token via one of:
+
+- `?export_token=<token>` (recommended for converter backends)
+- `Authorization: Bearer <token>`
+- `User-Agent: ResinExport/<token>`
+
+Converter backends usually do not preserve custom headers or User-Agent when fetching source subscriptions, so prefer the query-token URL, for example:
+
+```text
+http://127.0.0.1:2260/api/v1/node-pool/export?format=clash&export_token=<token>
+```
+
+Supported export filters are the same node-list filters: `platform_id`, `subscription_id`, `region`, `egress_ip`, `tag_keyword`, `circuit_open=true|false`, `has_outbound=true|false`, `enabled=true|false`, `routable=true|false`, `probed_since=<RFC3339 time>`, `limit`, and `offset`. If `routable` is omitted, Resin does not apply a routable-only filter.
+
 ## 🚀 Quick Start
 
 In just three steps, you can turn your proxy subscriptions into a highly available proxy pool.

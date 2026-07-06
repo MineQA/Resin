@@ -1628,6 +1628,9 @@ Body：
 #### 列出节点
 
 **GET** `/nodes`
+
+别名：**GET** `/node-pool/nodes`
+
 Query：
 * `limit`：默认 50，最大 100000
 * `offset`：分页偏移
@@ -1637,6 +1640,8 @@ Query：
 * `region`：hk/us/...（可选）
 * `circuit_open`：true|false（可选）
 * `has_outbound`：true|false（可选）
+* `enabled`：true|false（可选）
+* `routable`：true|false（可选）。需要配合 `platform_id` 语义最清晰；不传则不按可路由状态过滤。
 * `egress_ip`：IP 地址（可选）
 * `probed_since`：RFC3339Nano（可选），按节点 `LastLatencyProbeAttempt` 过滤
 * `sort_by`：排序字段（可选）
@@ -1692,6 +1697,54 @@ Response：
 * 仅统计有有效 `egress_ip` 的节点（空值不计入）。
 
 `unique_healthy_egress_ips` 说明：unique_egress_ips 中健康的部分。
+
+#### 导出节点池
+
+**GET** `/node-pool/export`
+
+该端点注册在控制面根路由上，但不使用 `RESIN_ADMIN_TOKEN`。调用方必须提供 WebUI 管理的导出令牌。
+
+鉴权方式：
+* `Authorization: Bearer <export_token>`
+* `export_token` query 参数，例如 `?export_token=...`
+* `User-Agent: ResinExport/<export_token>`。只识别 `ResinExport/` 前缀，不应把任意 User-Agent 当 token。
+
+对于 sub-web-modify/subconverter 等转换器，推荐把 token 放在 query 中；转换器后端通常不会透传自定义 Header 或 User-Agent。
+
+Query：
+* `format`：`clash|base64|uri|sing-box`。默认 `clash`。
+  * `clash`：返回 Clash YAML，顶层为 `proxies:`。
+  * `base64`：返回 Base64 包裹的 URI 行文本。
+  * `uri`：返回明文 URI 行文本。
+  * `sing-box`：返回裸 sing-box JSON：`{"outbounds":[...]}`。
+* 过滤参数同“列出节点”：`platform_id`、`subscription_id`、`region`、`egress_ip`、`tag_keyword`、`circuit_open`、`has_outbound`、`enabled`、`routable`、`probed_since`、`limit`、`offset`。
+
+导出筛选规则：
+* 不传 `routable` 时，不默认限制为可路由节点。
+* `routable=true` 只导出可路由节点；`routable=false` 只导出不可路由节点。
+* `clash`、`uri`、`base64` 会跳过无法转换为对应格式的节点，避免生成损坏订阅。
+
+示例：
+
+```text
+GET /api/v1/node-pool/export?format=clash&routable=true&enabled=true&export_token=<token>
+```
+
+#### 导出令牌
+
+导出令牌用于保护节点池导出端点。令牌通过 WebUI/控制面 API 管理；令牌原文仅在创建时返回一次，服务端持久化 SHA-256 hash。
+
+**GET** `/export-tokens`
+
+列出导出令牌元信息，不返回 token 原文。
+
+**POST** `/export-tokens`
+
+创建导出令牌。请求体可包含 `name`，响应中只本次返回 token 原文。
+
+**DELETE** `/export-tokens/{id}`
+
+删除导出令牌。
 
 #### 获取单个节点
 
