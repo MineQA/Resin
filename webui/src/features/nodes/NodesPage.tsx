@@ -26,8 +26,19 @@ import type { NodeListFilters, NodeSortBy, SortOrder } from "./types";
 
 type NodeStatusFilter = "all" | "healthy" | "circuit_open" | "error" | "disabled";
 type NodeRoutableFilter = "all" | "routable" | "unroutable";
+type ExportFormat = "clash" | "base64" | "uri" | "sing-box";
+type ExportRoutableMode = "current" | "all" | "routable" | "unroutable";
+type ExportBooleanMode = "any" | "true" | "false";
 type NodeDisplayStatus = "healthy" | "circuit_open" | "pending_test" | "error" | "disabled";
 type ProbeAction = "egress" | "latency";
+
+type NodeExportSettings = {
+  format: ExportFormat;
+  routable: ExportRoutableMode;
+  enabled: ExportBooleanMode;
+  hasOutbound: ExportBooleanMode;
+  tagKeyword: string;
+};
 
 type NodeListSettings = {
   pageSize: number;
@@ -57,6 +68,13 @@ const defaultFilterDraft: NodeFilterDraft = {
 
 const NODE_LIST_SETTINGS_KEY = "resin_node_list_settings";
 const EXPORT_TOKEN_STORAGE_KEY = "resin_export_token";
+const DEFAULT_EXPORT_SETTINGS: NodeExportSettings = {
+  format: "clash",
+  routable: "current",
+  enabled: "any",
+  hasOutbound: "any",
+  tagKeyword: "",
+};
 const DEFAULT_NODE_LIST_SETTINGS: NodeListSettings = {
   pageSize: 200,
   autoRefresh: true,
@@ -174,6 +192,14 @@ function persistExportToken(value: string) {
   } else {
     window.localStorage.removeItem(EXPORT_TOKEN_STORAGE_KEY);
   }
+}
+
+function applyExportBooleanFilter(filters: NodeListFilters, key: "enabled" | "has_outbound", value: ExportBooleanMode) {
+  if (value === "any") {
+    delete filters[key];
+    return;
+  }
+  filters[key] = value === "true";
 }
 
 function statusFromQuery(params: URLSearchParams): NodeStatusFilter {
@@ -354,6 +380,7 @@ export function NodesPage() {
   const [listSettings, setListSettings] = useState<NodeListSettings>(() => loadNodeListSettings());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [exportToken, setExportToken] = useState(loadStoredExportToken);
+  const [exportSettings, setExportSettings] = useState<NodeExportSettings>(DEFAULT_EXPORT_SETTINGS);
   const [draftFilters, setDraftFilters] = useState<NodeFilterDraft>(() => draftFromQuery(location.search, loadNodeListSettings()));
   const [activeFilters, setActiveFilters] = useState<NodeListFilters>(() =>
     draftToActiveFilters(draftFromQuery(location.search, loadNodeListSettings()))
@@ -643,7 +670,64 @@ export function NodesPage() {
     persistExportToken(value);
   };
 
-  const exportFilters = (): NodeListFilters => activeFilters;
+  const updateExportSettings = (patch: Partial<NodeExportSettings>) => {
+    setExportSettings((prev) => ({ ...prev, ...patch }));
+  };
+
+  const exportFilters = (): NodeListFilters => {
+    const filters: NodeListFilters = { ...activeFilters };
+    const tagKeyword = exportSettings.tagKeyword.trim();
+    if (tagKeyword) {
+      filters.tag_keyword = tagKeyword;
+    }
+
+    switch (exportSettings.routable) {
+      case "all":
+        delete filters.routable;
+        break;
+      case "routable":
+        filters.routable = true;
+        break;
+      case "unroutable":
+        filters.routable = false;
+        break;
+      case "current":
+      default:
+        break;
+    }
+
+    applyExportBooleanFilter(filters, "enabled", exportSettings.enabled);
+    applyExportBooleanFilter(filters, "has_outbound", exportSettings.hasOutbound);
+    return filters;
+  };
+
+  const exportDownloadLabel = () => {
+    switch (exportSettings.format) {
+      case "base64":
+        return t("下载 Base64");
+      case "uri":
+        return t("下载 URI");
+      case "sing-box":
+        return t("下载 sing-box JSON");
+      case "clash":
+      default:
+        return t("下载 Clash YAML");
+    }
+  };
+
+  const exportFileMeta = () => {
+    switch (exportSettings.format) {
+      case "base64":
+        return { name: "resin-node-pool-base64.txt", type: "text/plain; charset=utf-8" };
+      case "uri":
+        return { name: "resin-node-pool-uri.txt", type: "text/plain; charset=utf-8" };
+      case "sing-box":
+        return { name: "resin-node-pool-sing-box.json", type: "application/json; charset=utf-8" };
+      case "clash":
+      default:
+        return { name: "resin-node-pool-clash.yaml", type: "text/yaml; charset=utf-8" };
+    }
+  };
 
   const buildAbsoluteExportURL = () => {
     const trimmedToken = exportToken.trim();
@@ -657,6 +741,7 @@ export function NodesPage() {
         offset: 0,
       },
       trimmedToken,
+      exportSettings.format,
     );
     if (typeof window === "undefined") {
       return relative;
@@ -678,24 +763,25 @@ export function NodesPage() {
     }
   };
 
-  const downloadExportJSON = async () => {
+  const downloadExportFile = async () => {
     const trimmedToken = exportToken.trim();
     if (!trimmedToken) {
       showToast("error", t("请先填写导出令牌"));
       return;
     }
     try {
-      const text = await exportNodePoolText({ ...exportFilters(), limit: 100000, offset: 0 }, trimmedToken, "clash");
-      const blob = new Blob([text], { type: "text/yaml; charset=utf-8" });
+      const text = await exportNodePoolText({ ...exportFilters(), limit: 100000, offset: 0 }, trimmedToken, exportSettings.format);
+      const meta = exportFileMeta();
+      const blob = new Blob([text], { type: meta.type });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = "resin-node-pool-clash.yaml";
+      link.download = meta.name;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
-      showToast("success", t("已导出 {{count}} 个节点", { count: (text.match(/^\s+- /gm) || []).length }));
+      showToast("success", t("导出文件已下载"));
     } catch (error) {
       showToast("error", formatApiErrorMessage(error, t));
     }
@@ -1056,14 +1142,90 @@ export function NodesPage() {
                     <Copy size={14} />
                     {t("复制导出 URL")}
                   </Button>
-                  <Button size="sm" variant="secondary" onClick={() => void downloadExportJSON()}>
+                  <Button size="sm" variant="secondary" onClick={() => void downloadExportFile()}>
                     <Download size={14} />
-                    {t("下载 Clash YAML")}
+                    {exportDownloadLabel()}
                   </Button>
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
+                  <div style={{ ...NODE_FILTER_ITEM_STYLE, flex: "1 1 120px" }}>
+                    <label htmlFor="node-export-format" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                      {t("导出格式")}
+                    </label>
+                    <Select
+                      id="node-export-format"
+                      value={exportSettings.format}
+                      onChange={(event) => updateExportSettings({ format: event.target.value as ExportFormat })}
+                      style={NODE_FILTER_CONTROL_STYLE}
+                    >
+                      <option value="clash">Clash YAML</option>
+                      <option value="base64">Base64 URI</option>
+                      <option value="uri">URI</option>
+                      <option value="sing-box">sing-box JSON</option>
+                    </Select>
+                  </div>
+                  <div style={{ ...NODE_FILTER_ITEM_STYLE, flex: "1 1 150px" }}>
+                    <label htmlFor="node-export-routable" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                      {t("可路由")}
+                    </label>
+                    <Select
+                      id="node-export-routable"
+                      value={exportSettings.routable}
+                      onChange={(event) => updateExportSettings({ routable: event.target.value as ExportRoutableMode })}
+                      style={NODE_FILTER_CONTROL_STYLE}
+                    >
+                      <option value="current">{t("跟随列表")}</option>
+                      <option value="all">{t("全部")}</option>
+                      <option value="routable">{t("仅可路由")}</option>
+                      <option value="unroutable">{t("仅不可路由")}</option>
+                    </Select>
+                  </div>
+                  <div style={{ ...NODE_FILTER_ITEM_STYLE, flex: "1 1 130px" }}>
+                    <label htmlFor="node-export-enabled" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                      {t("启用状态")}
+                    </label>
+                    <Select
+                      id="node-export-enabled"
+                      value={exportSettings.enabled}
+                      onChange={(event) => updateExportSettings({ enabled: event.target.value as ExportBooleanMode })}
+                      style={NODE_FILTER_CONTROL_STYLE}
+                    >
+                      <option value="any">{t("不限")}</option>
+                      <option value="true">{t("仅启用")}</option>
+                      <option value="false">{t("仅禁用")}</option>
+                    </Select>
+                  </div>
+                  <div style={{ ...NODE_FILTER_ITEM_STYLE, flex: "1 1 130px" }}>
+                    <label htmlFor="node-export-outbound" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                      {t("Outbound")}
+                    </label>
+                    <Select
+                      id="node-export-outbound"
+                      value={exportSettings.hasOutbound}
+                      onChange={(event) => updateExportSettings({ hasOutbound: event.target.value as ExportBooleanMode })}
+                      style={NODE_FILTER_CONTROL_STYLE}
+                    >
+                      <option value="any">{t("不限")}</option>
+                      <option value="true">{t("仅有配置")}</option>
+                      <option value="false">{t("仅缺配置")}</option>
+                    </Select>
+                  </div>
+                  <div style={{ ...NODE_FILTER_ITEM_STYLE, flex: "1 1 180px" }}>
+                    <label htmlFor="node-export-tag" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                      {t("导出标签关键词")}
+                    </label>
+                    <Input
+                      id="node-export-tag"
+                      value={exportSettings.tagKeyword}
+                      onChange={(event) => updateExportSettings({ tagKeyword: event.target.value })}
+                      placeholder={t("留空跟随列表")}
+                      style={{ minHeight: 32, height: 32 }}
+                    />
+                  </div>
                 </div>
                 <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
                   {t(
-                    "导出包含当前筛选范围内的所有节点；使用上方“可路由”筛选可仅导出可路由节点。支持 Authorization Bearer、User-Agent: ResinExport/<token> 或 URL query token。",
+                    "导出默认跟随当前列表筛选；上方选项可覆盖可路由、启用状态、Outbound 和标签条件。转换器建议使用 URL query token。",
                   )}
                 </span>
               </div>
