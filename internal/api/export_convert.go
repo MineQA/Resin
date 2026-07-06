@@ -485,6 +485,10 @@ func outboundToURI(o ExportOutbound) string {
 		return uriVLess(o.Tag, m, server, port)
 	case "hysteria2", "hy2":
 		return uriHysteria2(o.Tag, m, server, port)
+	case "http":
+		return uriHTTP(o.Tag, m, server, port)
+	case "socks", "socks5":
+		return uriSocks(o.Tag, m, server, port)
 	default:
 		return ""
 	}
@@ -717,4 +721,32 @@ func uriHysteria2(tag string, m map[string]any, server string, port int) string 
 		query = "?" + strings.Join(params, "&")
 	}
 	return fmt.Sprintf("hysteria2://%s@%s:%d%s#%s", url.QueryEscape(password), server, port, query, encodeFragment(tag))
+}
+
+func uriHTTP(tag string, m map[string]any, server string, port int) string {
+	user, _ := m["username"].(string)
+	pass, _ := m["password"].(string)
+	var userInfo string
+	if user != "" {
+		if pass != "" {
+			userInfo = url.QueryEscape(user) + ":" + url.QueryEscape(pass) + "@"
+		} else {
+			userInfo = url.QueryEscape(user) + "@"
+		}
+	}
+	return fmt.Sprintf("http://%s%s:%d#%s", userInfo, server, port, encodeFragment(tag))
+}
+
+func uriSocks(tag string, m map[string]any, server string, port int) string {
+	user, _ := m["username"].(string)
+	pass, _ := m["password"].(string)
+	var userInfo string
+	if user != "" {
+		if pass != "" {
+			userInfo = url.QueryEscape(user) + ":" + url.QueryEscape(pass) + "@"
+		} else {
+			userInfo = url.QueryEscape(user) + "@"
+		}
+	}
+	return fmt.Sprintf("socks5://%s%s:%d#%s", userInfo, server, port, encodeFragment(tag))
 }

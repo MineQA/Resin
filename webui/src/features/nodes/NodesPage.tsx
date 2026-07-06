@@ -643,10 +643,7 @@ export function NodesPage() {
     persistExportToken(value);
   };
 
-  const exportFilters = (): NodeListFilters => ({
-    ...activeFilters,
-    routable: activeFilters.routable ?? true,
-  });
+  const exportFilters = (): NodeListFilters => activeFilters;
 
   const buildAbsoluteExportURL = () => {
     const trimmedToken = exportToken.trim();
@@ -1065,7 +1062,9 @@ export function NodesPage() {
                   </Button>
                 </div>
                 <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
-                  {t("导出默认只包含当前筛选范围内的可路由节点；支持 Authorization Bearer、User-Agent: ResinExport/<token> 或 URL query token。")}
+                  {t(
+                    "导出包含当前筛选范围内的所有节点；使用上方“可路由”筛选可仅导出可路由节点。支持 Authorization Bearer、User-Agent: ResinExport/<token> 或 URL query token。",
+                  )}
                 </span>
               </div>
             </div>

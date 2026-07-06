@@ -7,11 +7,15 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/service"
 	"github.com/Resinat/Resin/internal/subscription"
+	"github.com/Resinat/Resin/internal/testutil"
 )
 
 func TestExportTokenCRUD(t *testing.T) {
@@ -284,7 +288,46 @@ func TestNodePoolExport_FormatBase64(t *testing.T) {
 	}
 }
 
-func TestNodePoolExport_DefaultRoutable(t *testing.T) {
+func TestNodePoolExport_DefaultNoRoutableFilter(t *testing.T) {
+	// Default export without routable param should include all nodes
+	// (both healthy/routable and non-routable).
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	const rawA = `{"type":"ss","server":"1.1.1.1","port":443,"method":"chacha20","password":"test"}`
+	const rawB = `{"type":"ss","server":"2.2.2.2","port":443,"method":"chacha20","password":"test"}`
+	addNodeForNodeListTest(t, cp, sub, rawA, "203.0.113.10")
+	addNodeForNodeListTest(t, cp, sub, rawB, "203.0.113.20")
+	markNodeHealthyForNodeListTest(t, cp, rawA)
+
+	createResp := doJSONRequest(t, srv, http.MethodPost, "/api/v1/export-tokens", map[string]any{
+		"name": "export-token",
+	}, true)
+	createBody := decodeJSONMap(t, createResp)
+	tokenValue, _ := createBody["token"].(string)
+
+	// No routable param → both nodes included.
+	resp := doJSONRequest(t, srv, http.MethodGet,
+		"/api/v1/node-pool/export?format=sing-box&export_token="+tokenValue, nil, false)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("export no routable filter: got status %d, want 200, body=%s", resp.Code, resp.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	outbounds, ok := body["outbounds"].([]any)
+	if !ok {
+		t.Fatalf("export no routable filter: missing outbounds field")
+	}
+	if len(outbounds) != 2 {
+		t.Fatalf("export no routable filter: got %d outbounds, want 2", len(outbounds))
+	}
+}
+
+func TestNodePoolExport_RoutableFalse(t *testing.T) {
 	srv, cp, _ := newControlPlaneTestServer(t)
 
 	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
@@ -318,6 +361,169 @@ func TestNodePoolExport_DefaultRoutable(t *testing.T) {
 	}
 	if len(outbounds) != 2 {
 		t.Fatalf("export routable=false: got %d outbounds, want 2", len(outbounds))
+	}
+}
+
+func TestNodePoolExport_RoutableTrue(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	// Create a platform so routable view exists.
+	_ = mustCreatePlatform(t, srv, "routable-export-test")
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	// Node A: fully routable (outbound, closed circuit, egress IP, latency).
+	const rawA = `{"type":"ss","server":"1.1.1.1","port":443,"method":"chacha20","password":"test"}`
+	hashA := node.HashFromRawOptions([]byte(rawA))
+	cp.Pool.AddNodeFromSub(hashA, []byte(rawA), sub.ID)
+	sub.ManagedNodes().StoreNode(hashA, subscription.ManagedNode{Tags: []string{"routable-a"}})
+	entryA, ok := cp.Pool.GetEntry(hashA)
+	if !ok {
+		t.Fatalf("node A missing after add")
+	}
+	entryA.SetEgressIP(netip.MustParseAddr("203.0.113.10"))
+	obA := testutil.NewNoopOutbound()
+	entryA.Outbound.Store(&obA)
+	entryA.CircuitOpenSince.Store(0)
+	entryA.LatencyTable.Update("example.com", 25*time.Millisecond, 10*time.Minute)
+	cp.Pool.NotifyNodeDirty(hashA)
+
+	// Node B: non-routable (no outbound, no latency).
+	const rawB = `{"type":"ss","server":"2.2.2.2","port":443,"method":"chacha20","password":"test"}`
+	hashB := node.HashFromRawOptions([]byte(rawB))
+	cp.Pool.AddNodeFromSub(hashB, []byte(rawB), sub.ID)
+	sub.ManagedNodes().StoreNode(hashB, subscription.ManagedNode{Tags: []string{"non-routable-b"}})
+	entryB, ok := cp.Pool.GetEntry(hashB)
+	if !ok {
+		t.Fatalf("node B missing after add")
+	}
+	entryB.SetEgressIP(netip.MustParseAddr("203.0.113.20"))
+
+	createResp := doJSONRequest(t, srv, http.MethodPost, "/api/v1/export-tokens", map[string]any{
+		"name": "export-token",
+	}, true)
+	createBody := decodeJSONMap(t, createResp)
+	tokenValue, _ := createBody["token"].(string)
+
+	// routable=true → only node A (the routable one).
+	resp := doJSONRequest(t, srv, http.MethodGet,
+		"/api/v1/node-pool/export?format=sing-box&export_token="+tokenValue+"&routable=true", nil, false)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("export routable=true: got status %d, want 200, body=%s", resp.Code, resp.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	outbounds, ok := body["outbounds"].([]any)
+	if !ok {
+		t.Fatalf("export routable=true: missing outbounds field")
+	}
+	if len(outbounds) != 1 {
+		t.Fatalf("export routable=true: got %d outbounds, want 1, body=%s", len(outbounds), resp.Body.String())
+	}
+}
+
+func TestNodePoolExport_FormatURI_HTTP_SOCKS(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	const rawHTTP = `{"type":"http","server":"http-proxy.example.com","port":8080,"username":"user1","password":"pass1"}`
+	const rawSOCKS = `{"type":"socks","server":"socks.example.com","port":1080}`
+	const rawSS = `{"type":"ss","server":"ss.example.com","port":443,"method":"chacha20-ietf-poly1305","password":"testpass"}`
+
+	addNodeForNodeListTest(t, cp, sub, rawHTTP, "203.0.113.10")
+	addNodeForNodeListTest(t, cp, sub, rawSOCKS, "203.0.113.11")
+	addNodeForNodeListTest(t, cp, sub, rawSS, "203.0.113.12")
+
+	createResp := doJSONRequest(t, srv, http.MethodPost, "/api/v1/export-tokens", map[string]any{
+		"name": "export-token",
+	}, true)
+	createBody := decodeJSONMap(t, createResp)
+	tokenValue, _ := createBody["token"].(string)
+
+	// URI format
+	resp := doJSONRequest(t, srv, http.MethodGet,
+		"/api/v1/node-pool/export?format=uri&export_token="+tokenValue, nil, false)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("export uri http/socks: got status %d, want 200, body=%s", resp.Code, resp.Body.String())
+	}
+	body := resp.Body.String()
+
+	if !strings.Contains(body, "http://") {
+		t.Fatalf("export uri: missing HTTP URI, body=%q", body)
+	}
+	if !strings.Contains(body, "socks5://") {
+		t.Fatalf("export uri: missing SOCKS5 URI, body=%q", body)
+	}
+	if !strings.Contains(body, "ss://") {
+		t.Fatalf("export uri: missing SS URI, body=%q", body)
+	}
+	// Verify userinfo is present in HTTP URI.
+	if !strings.Contains(body, "user1:pass1@") {
+		t.Fatalf("export uri: HTTP URI missing userinfo, body=%q", body)
+	}
+
+	// Base64 format
+	resp64 := doJSONRequest(t, srv, http.MethodGet,
+		"/api/v1/node-pool/export?format=base64&export_token="+tokenValue, nil, false)
+	if resp64.Code != http.StatusOK {
+		t.Fatalf("export base64 http/socks: got status %d, want 200, body=%s", resp64.Code, resp64.Body.String())
+	}
+	decoded, err := base64.StdEncoding.DecodeString(resp64.Body.String())
+	if err != nil {
+		t.Fatalf("export base64 http/socks: decode error: %v", err)
+	}
+	decodedBody := string(decoded)
+	if !strings.Contains(decodedBody, "http://") {
+		t.Fatalf("export base64: missing HTTP URI, body=%q", decodedBody)
+	}
+	if !strings.Contains(decodedBody, "socks5://") {
+		t.Fatalf("export base64: missing SOCKS5 URI, body=%q", decodedBody)
+	}
+	if !strings.Contains(decodedBody, "ss://") {
+		t.Fatalf("export base64: missing SS URI, body=%q", decodedBody)
+	}
+}
+
+func TestNodePoolExport_FormatClash_HTTP_SOCKS(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	const rawHTTP = `{"type":"http","server":"http-proxy.example.com","port":8080,"username":"user1","password":"pass1"}`
+	const rawSOCKS = `{"type":"socks","server":"socks.example.com","port":1080}`
+	const rawSS = `{"type":"ss","server":"ss.example.com","port":443,"method":"chacha20-ietf-poly1305","password":"testpass"}`
+
+	addNodeForNodeListTest(t, cp, sub, rawHTTP, "203.0.113.10")
+	addNodeForNodeListTest(t, cp, sub, rawSOCKS, "203.0.113.11")
+	addNodeForNodeListTest(t, cp, sub, rawSS, "203.0.113.12")
+
+	createResp := doJSONRequest(t, srv, http.MethodPost, "/api/v1/export-tokens", map[string]any{
+		"name": "export-token",
+	}, true)
+	createBody := decodeJSONMap(t, createResp)
+	tokenValue, _ := createBody["token"].(string)
+
+	resp := doJSONRequest(t, srv, http.MethodGet,
+		"/api/v1/node-pool/export?format=clash&export_token="+tokenValue, nil, false)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("export clash http/socks: got status %d, want 200, body=%s", resp.Code, resp.Body.String())
+	}
+	body := resp.Body.String()
+
+	if !strings.Contains(body, "type: http") && !strings.Contains(body, `type: "http"`) {
+		t.Fatalf("export clash http/socks: missing http proxy type, body=%q", body)
+	}
+	if !strings.Contains(body, "type: socks5") && !strings.Contains(body, `type: "socks5"`) {
+		t.Fatalf("export clash http/socks: missing socks5 proxy type, body=%q", body)
+	}
+	if !strings.Contains(body, "type: ss") && !strings.Contains(body, `type: "ss"`) {
+		t.Fatalf("export clash http/socks: missing ss proxy type, body=%q", body)
 	}
 }
 

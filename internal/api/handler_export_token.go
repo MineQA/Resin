@@ -186,17 +186,13 @@ func HandleNodePoolExport(cp *service.ControlPlaneService) http.HandlerFunc {
 		}
 		filters.Enabled = enabled
 
-		routable := true
 		if v := q.Get("routable"); v != "" {
 			routableBool, ok := parseBoolQueryOrWriteInvalid(w, r, "routable")
 			if !ok {
 				return
 			}
-			if routableBool != nil {
-				routable = *routableBool
-			}
+			filters.Routable = routableBool
 		}
-		filters.Routable = &routable
 
 		if v := q.Get("probed_since"); v != "" {
 			parsedTime, err := time.Parse(time.RFC3339Nano, v)
