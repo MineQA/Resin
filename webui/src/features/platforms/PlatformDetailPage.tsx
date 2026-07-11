@@ -2,7 +2,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ColumnDef } from "@tanstack/react-table";
 import { AlertTriangle, ArrowLeft, Info, RefreshCw, Sparkles, Trash2 } from "lucide-react";
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge";
@@ -19,6 +19,11 @@ import { useToast } from "../../hooks/useToast";
 import { useI18n } from "../../i18n";
 import { formatApiErrorMessage } from "../../lib/error-message";
 import { PROTOCOL_OPTIONS } from "../../lib/protocolOptions";
+import {
+  PROTOCOL_PILL_ROW_STYLE,
+  PROTOCOL_PILL_SELECTED_STYLE,
+  PROTOCOL_PILL_STYLE,
+} from "../../lib/protocolPillStyles";
 import { formatDateTime, formatGoDuration, formatRelativeTime } from "../../lib/time";
 import {
   clearAllPlatformLeases,
@@ -54,32 +59,6 @@ type PlatformDetailTab = "monitor" | "access" | "config" | "ops";
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
 const LEASE_MANAGEMENT_ANCHOR = "platform-lease-management";
 const LEASE_PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
-const PROTOCOL_PILL_STYLE: CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  padding: "2px 8px",
-  fontSize: "0.72rem",
-  borderRadius: "4px",
-  cursor: "pointer",
-  border: "1px solid var(--border-subtle)",
-  background: "transparent",
-  color: "var(--text-secondary)",
-  lineHeight: 1.4,
-  whiteSpace: "nowrap",
-  transition: "background 0.15s, color 0.15s, border-color 0.15s",
-};
-const PROTOCOL_PILL_SELECTED_STYLE: CSSProperties = {
-  ...PROTOCOL_PILL_STYLE,
-  background: "var(--accent)",
-  color: "var(--accent-foreground)",
-  borderColor: "var(--accent)",
-};
-const PROTOCOL_PILL_ROW_STYLE: CSSProperties = {
-  display: "flex",
-  flexWrap: "wrap",
-  gap: "4px",
-  padding: "2px 0",
-};
 const DETAIL_TABS: Array<{ key: PlatformDetailTab; label: string; hint: string }> = [
   { key: "monitor", label: "监控", hint: "平台运行态趋势和快照" },
   { key: "access", label: "接入", hint: "复制正向/反向代理地址" },

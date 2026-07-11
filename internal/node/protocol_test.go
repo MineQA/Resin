@@ -33,6 +33,9 @@ func TestNormalizeProtocol(t *testing.T) {
 		{"socks", "socks"},
 		{"socks5", "socks"},
 		{"SOCKS5", "socks"},
+		{"anytls", "anytls"},
+		{"ANYTLS", "anytls"},
+		{"  anytls  ", "anytls"},
 		// Unknown
 		{"tuic", ""},
 		{"wireguard", ""},
@@ -91,6 +94,13 @@ func TestRawOptionsProtocol_UnsupportedType(t *testing.T) {
 	}
 }
 
+func TestRawOptionsProtocol_Anytls(t *testing.T) {
+	raw := json.RawMessage(`{"type":"anytls","server":"1.1.1.1","port":443,"password":"x"}`)
+	if got := RawOptionsProtocol(raw); got != "anytls" {
+		t.Errorf("RawOptionsProtocol = %q, want %q", got, "anytls")
+	}
+}
+
 func TestRawOptionsProtocol_NilInput(t *testing.T) {
 	if got := RawOptionsProtocol(nil); got != "" {
 		t.Errorf("RawOptionsProtocol(nil) = %q, want empty", got)
@@ -116,7 +126,7 @@ func TestCanonicalProtocols_NoDuplicates(t *testing.T) {
 }
 
 func TestCanonicalProtocols_ContainsExpectedSet(t *testing.T) {
-	expected := []string{"shadowsocks", "vmess", "trojan", "vless", "hysteria2", "http", "socks"}
+	expected := []string{"shadowsocks", "vmess", "trojan", "vless", "hysteria2", "anytls", "http", "socks"}
 	for _, exp := range expected {
 		found := false
 		for _, p := range CanonicalProtocols {

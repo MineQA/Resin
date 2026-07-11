@@ -17,6 +17,11 @@ import { useI18n } from "../../i18n";
 import { formatApiErrorMessage } from "../../lib/error-message";
 import { formatDateTime, formatRelativeTime } from "../../lib/time";
 import { PROTOCOL_OPTIONS } from "../../lib/protocolOptions";
+import {
+  PROTOCOL_PILL_ROW_STYLE,
+  PROTOCOL_PILL_SELECTED_STYLE,
+  PROTOCOL_PILL_STYLE,
+} from "../../lib/protocolPillStyles";
 import { listPlatforms } from "../platforms/api";
 import type { Platform } from "../platforms/types";
 import { listSubscriptions } from "../subscriptions/api";
@@ -104,26 +109,6 @@ const NODE_FILTER_CONTROL_STYLE: CSSProperties = {
   fontSize: "0.875rem",
   minHeight: "32px",
   height: "32px",
-};
-const PROTOCOL_PILL_STYLE: CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  padding: "2px 6px",
-  fontSize: "0.7rem",
-  borderRadius: "4px",
-  cursor: "pointer",
-  border: "1px solid var(--border-subtle)",
-  background: "transparent",
-  color: "var(--text-secondary)",
-  lineHeight: "1.4",
-  whiteSpace: "nowrap",
-  transition: "background 0.15s, color 0.15s, border-color 0.15s",
-};
-const PROTOCOL_PILL_SELECTED_STYLE: CSSProperties = {
-  ...PROTOCOL_PILL_STYLE,
-  background: "var(--accent)",
-  color: "var(--accent-foreground)",
-  borderColor: "var(--accent)",
 };
 
 function parseBoolParam(value: string | null): boolean | undefined {
@@ -1196,10 +1181,10 @@ export function NodesPage() {
             </div>
 
             <div style={{ ...NODE_FILTER_ITEM_STYLE, flex: "1 1 220px" }}>
-              <label style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+              <label style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
                 {t("协议")}
               </label>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "4px", padding: "2px 0" }}>
+              <div style={PROTOCOL_PILL_ROW_STYLE}>
                 {PROTOCOL_OPTIONS.map(({ value, label }) => {
                   const selected = draftFilters.protocolInclude.includes(value);
                   return (
@@ -1209,6 +1194,7 @@ export function NodesPage() {
                       onClick={() => toggleProtocolFilter("protocolInclude", value)}
                       style={selected ? PROTOCOL_PILL_SELECTED_STYLE : PROTOCOL_PILL_STYLE}
                       title={label}
+                      aria-pressed={selected}
                     >
                       {label}
                     </button>
@@ -1217,10 +1203,10 @@ export function NodesPage() {
               </div>
             </div>
             <div style={{ ...NODE_FILTER_ITEM_STYLE, flex: "1 1 220px" }}>
-              <label style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+              <label style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
                 {t("排除协议")}
               </label>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "4px", padding: "2px 0" }}>
+              <div style={PROTOCOL_PILL_ROW_STYLE}>
                 {PROTOCOL_OPTIONS.map(({ value, label }) => {
                   const selected = draftFilters.protocolExclude.includes(value);
                   return (
@@ -1230,6 +1216,7 @@ export function NodesPage() {
                       onClick={() => toggleProtocolFilter("protocolExclude", value)}
                       style={selected ? PROTOCOL_PILL_SELECTED_STYLE : PROTOCOL_PILL_STYLE}
                       title={label}
+                      aria-pressed={selected}
                     >
                       {label}
                     </button>
@@ -1376,11 +1363,11 @@ export function NodesPage() {
                     </Select>
                   </div>
                   <div style={{ ...NODE_FILTER_ITEM_STYLE, flex: "1 1 280px" }}>
-                    <label style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                    <label style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
                       {t("协议")}
                     </label>
                     <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: "4px" }}>
+                      <div style={PROTOCOL_PILL_ROW_STYLE}>
                         {PROTOCOL_OPTIONS.map(({ value, label }) => {
                           const selected = exportProtocolsActive("protocol").includes(value);
                           return (
@@ -1390,6 +1377,7 @@ export function NodesPage() {
                               onClick={() => toggleExportProtocol(value, "protocol")}
                               style={selected ? PROTOCOL_PILL_SELECTED_STYLE : PROTOCOL_PILL_STYLE}
                               title={label}
+                              aria-pressed={selected}
                             >
                               {label}
                             </button>
@@ -1415,11 +1403,11 @@ export function NodesPage() {
                     </div>
                   </div>
                   <div style={{ ...NODE_FILTER_ITEM_STYLE, flex: "1 1 280px" }}>
-                    <label style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                    <label style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
                       {t("排除协议")}
                     </label>
                     <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: "4px" }}>
+                      <div style={PROTOCOL_PILL_ROW_STYLE}>
                         {PROTOCOL_OPTIONS.map(({ value, label }) => {
                           const selected = exportProtocolsActive("excludeProtocol").includes(value);
                           return (
@@ -1429,6 +1417,7 @@ export function NodesPage() {
                               onClick={() => toggleExportProtocol(value, "excludeProtocol")}
                               style={selected ? PROTOCOL_PILL_SELECTED_STYLE : PROTOCOL_PILL_STYLE}
                               title={label}
+                              aria-pressed={selected}
                             >
                               {label}
                             </button>

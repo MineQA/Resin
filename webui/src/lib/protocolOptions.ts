@@ -13,6 +13,7 @@ export const PROTOCOL_OPTIONS: readonly ProtocolOption[] = [
   { value: "trojan", label: "Trojan" },
   { value: "vless", label: "VLess" },
   { value: "hysteria2", label: "Hysteria2" },
+  { value: "anytls", label: "AnyTLS" },
   { value: "http", label: "HTTP" },
   { value: "socks", label: "SOCKS" },
 ] as const;

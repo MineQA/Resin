@@ -710,6 +710,58 @@ func TestNodePoolExport_ExcludeProtocolAlias(t *testing.T) {
 	}
 }
 
+func TestNodePoolExport_ProtocolFilterAnytls(t *testing.T) {
+	srv, cp, tokenValue := setupExportTest(t)
+
+	// Add an anytls node.
+	sub := subscription.NewSubscription("22222222-2222-2222-2222-222222222222", "sub-b", "https://example.com/b", true, false)
+	cp.SubMgr.Register(sub)
+	addNodeForNodeListTest(t, cp, sub, `{"type":"anytls","server":"5.5.5.5","port":443,"password":"x"}`, "203.0.113.50")
+
+	// Filter for anytls only — 1 outbound.
+	resp := doJSONRequest(t, srv, http.MethodGet,
+		"/api/v1/node-pool/export?format=sing-box&export_token="+tokenValue+"&protocol=anytls", nil, false)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("export protocol=anytls: got status %d, want 200, body=%s", resp.Code, resp.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	outbounds, ok := body["outbounds"].([]any)
+	if !ok {
+		t.Fatalf("export protocol=anytls: missing outbounds field")
+	}
+	if len(outbounds) != 1 {
+		t.Fatalf("export protocol=anytls: got %d outbounds, want 1", len(outbounds))
+	}
+	ob := outbounds[0].(map[string]any)
+	if ob["type"] != "anytls" {
+		t.Fatalf("export protocol=anytls: outbound type=%v, want anytls", ob["type"])
+	}
+
+	// Exclude anytls — 1 outbound (the original ss node).
+	resp = doJSONRequest(t, srv, http.MethodGet,
+		"/api/v1/node-pool/export?format=sing-box&export_token="+tokenValue+"&protocol_exclude=anytls", nil, false)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("export protocol_exclude=anytls: got status %d, want 200, body=%s", resp.Code, resp.Body.String())
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	outbounds, ok = body["outbounds"].([]any)
+	if !ok {
+		t.Fatalf("export protocol_exclude=anytls: missing outbounds field")
+	}
+	if len(outbounds) != 1 {
+		t.Fatalf("export protocol_exclude=anytls: got %d outbounds, want 1", len(outbounds))
+	}
+	ob = outbounds[0].(map[string]any)
+	if ob["type"] != "ss" {
+		t.Fatalf("export protocol_exclude=anytls: outbound type=%v, want ss", ob["type"])
+	}
+}
+
 // --- Helpers ---
 
 func setupExportTest(t *testing.T) (*Server, *service.ControlPlaneService, string) {

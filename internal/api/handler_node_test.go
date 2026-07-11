@@ -763,3 +763,43 @@ func TestHandleListNodes_ExcludeProtocolFilterRepeatedQuery(t *testing.T) {
 		t.Fatalf("repeated exclude total: got %v, want 1", body["total"])
 	}
 }
+
+func TestHandleListNodes_ProtocolFilterAnytls(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	addNodeForNodeListTest(t, cp, sub, `{"type":"ss","server":"1.1.1.1","port":443}`, "203.0.113.10")
+	addNodeForNodeListTest(t, cp, sub, `{"type":"anytls","server":"5.5.5.5","port":443,"password":"x"}`, "203.0.113.50")
+
+	// Filter by anytls — should match 1 node.
+	rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?protocol=anytls", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("protocol=anytls status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := decodeJSONMap(t, rec)
+	if body["total"] != float64(1) {
+		t.Fatalf("protocol=anytls total: got %v, want 1", body["total"])
+	}
+
+	// Filter by anytls alongside ss — should match 2 nodes.
+	rec = doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?protocol=anytls,ss", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("protocol=anytls,ss status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body = decodeJSONMap(t, rec)
+	if body["total"] != float64(2) {
+		t.Fatalf("protocol=anytls,ss total: got %v, want 2", body["total"])
+	}
+
+	// Exclude anytls — should match only the ss node.
+	rec = doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?exclude_protocol=anytls", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("exclude_protocol=anytls status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body = decodeJSONMap(t, rec)
+	if body["total"] != float64(1) {
+		t.Fatalf("exclude_protocol=anytls total: got %v, want 1", body["total"])
+	}
+}

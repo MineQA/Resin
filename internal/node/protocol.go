@@ -7,6 +7,10 @@ import (
 )
 
 // protocolAliases maps lower-cased input protocol names to their canonical form.
+//
+// Canonical protocol names are used for filtering and display in the UI/API.
+// Export converters (Clash/URI/base64) support a narrower set; sing-box format
+// preserves RawOptions as-is and does not depend on this map.
 var protocolAliases = map[string]string{
 	"shadowsocks": "shadowsocks",
 	"ss":          "shadowsocks",
@@ -16,6 +20,7 @@ var protocolAliases = map[string]string{
 	"vless":       "vless",
 	"hysteria2":   "hysteria2",
 	"hy2":         "hysteria2",
+	"anytls":      "anytls",
 	"http":        "http",
 	"socks":       "socks",
 	"socks5":      "socks",
