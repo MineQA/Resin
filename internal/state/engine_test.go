@@ -72,7 +72,10 @@ func TestEngine_StrongPersist_PlatformSurvivesRestart(t *testing.T) {
 
 	p := model.Platform{
 		ID: "p1", Name: "MyPlatform", StickyTTLNs: 5000,
-		RegexFilters: []string{}, RegionFilters: []string{},
+		RegexFilters:           []string{},
+		RegionFilters:          []string{},
+		ProtocolFilters:        []string{},
+		ExcludeProtocolFilters: []string{},
 		ReverseProxyMissAction: "TREAT_AS_EMPTY", AllocationPolicy: "BALANCED",
 		UpdatedAtNs: time.Now().UnixNano(),
 	}
@@ -116,7 +119,10 @@ func TestEngine_WeakPersist_CacheDataSurvivesRestart(t *testing.T) {
 	})
 	engine1.UpsertPlatform(model.Platform{
 		ID: "p1", Name: "P1", StickyTTLNs: 1000,
-		RegexFilters: []string{}, RegionFilters: []string{},
+		RegexFilters:           []string{},
+		RegionFilters:          []string{},
+		ProtocolFilters:        []string{},
+		ExcludeProtocolFilters: []string{},
 		ReverseProxyMissAction: "TREAT_AS_EMPTY", AllocationPolicy: "BALANCED",
 		UpdatedAtNs: 1,
 	})

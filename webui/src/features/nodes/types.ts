@@ -48,6 +48,7 @@ export type NodeListFilters = {
   has_outbound?: boolean;
   routable?: boolean;
   protocol?: string;
+  exclude_protocol?: string;
 };
 
 export type NodeListQuery = NodeListFilters & {

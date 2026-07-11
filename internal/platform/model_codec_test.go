@@ -178,6 +178,78 @@ func TestBuildFromModel_FixedHeaderRequiresValidHeaderName(t *testing.T) {
 	}
 }
 
+func TestBuildFromModel_WithProtocolFilters(t *testing.T) {
+	mp := model.Platform{
+		ID:                               "plat-1",
+		Name:                             "Platform-1",
+		StickyTTLNs:                      3600,
+		RegexFilters:                     []string{`^us-.*$`},
+		RegionFilters:                    []string{"us"},
+		ProtocolFilters:                  []string{"shadowsocks", "trojan"},
+		ExcludeProtocolFilters:           []string{"vmess"},
+		ReverseProxyMissAction:           "TREAT_AS_EMPTY",
+		ReverseProxyEmptyAccountBehavior: "RANDOM",
+		AllocationPolicy:                 "BALANCED",
+	}
+
+	plat, err := BuildFromModel(mp)
+	if err != nil {
+		t.Fatalf("BuildFromModel with protocol filters: %v", err)
+	}
+
+	if len(plat.ProtocolFilters) != 2 || plat.ProtocolFilters[0] != "shadowsocks" || plat.ProtocolFilters[1] != "trojan" {
+		t.Fatalf("protocol_filters mismatch: got %v", plat.ProtocolFilters)
+	}
+	if len(plat.ExcludeProtocolFilters) != 1 || plat.ExcludeProtocolFilters[0] != "vmess" {
+		t.Fatalf("exclude_protocol_filters mismatch: got %v", plat.ExcludeProtocolFilters)
+	}
+}
+
+func TestBuildFromModel_NormalisesProtocolFilterAliases(t *testing.T) {
+	mp := model.Platform{
+		ID:                               "plat-2",
+		Name:                             "Platform-2",
+		StickyTTLNs:                      3600,
+		RegexFilters:                     []string{},
+		RegionFilters:                    []string{},
+		ProtocolFilters:                  []string{"ss", "HY2", "vmess1"}, // aliases
+		ExcludeProtocolFilters:           []string{"socks5"},
+		ReverseProxyMissAction:           "TREAT_AS_EMPTY",
+		ReverseProxyEmptyAccountBehavior: "RANDOM",
+		AllocationPolicy:                 "BALANCED",
+	}
+
+	plat, err := BuildFromModel(mp)
+	if err != nil {
+		t.Fatalf("BuildFromModel: %v", err)
+	}
+
+	if !reflect.DeepEqual(plat.ProtocolFilters, []string{"shadowsocks", "hysteria2", "vmess"}) {
+		t.Fatalf("protocol_filters after normalisation: got %v, want [shadowsocks hysteria2 vmess]", plat.ProtocolFilters)
+	}
+	if !reflect.DeepEqual(plat.ExcludeProtocolFilters, []string{"socks"}) {
+		t.Fatalf("exclude_protocol_filters after normalisation: got %v, want [socks]", plat.ExcludeProtocolFilters)
+	}
+}
+
+func TestValidateProtocolFilters_Invalid(t *testing.T) {
+	err := ValidateProtocolFilters([]string{"bogus_proto"}, nil)
+	if err == nil {
+		t.Fatal("expected validation error for bogus protocol")
+	}
+	if !strings.Contains(err.Error(), "protocol_filters[0]") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	err = ValidateProtocolFilters(nil, []string{"unknown"})
+	if err == nil {
+		t.Fatal("expected validation error for unknown exclude protocol")
+	}
+	if !strings.Contains(err.Error(), "exclude_protocol_filters[0]") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestCompileRegexFilters_Invalid(t *testing.T) {
 	_, err := CompileRegexFilters([]string{"(broken"})
 	if err == nil {

@@ -157,6 +157,11 @@ func HandleListNodes(cp *service.ControlPlaneService) http.HandlerFunc {
 		} else if protocols != nil {
 			filters.Protocols = protocols
 		}
+		if excludeProtocols, ok := parseExcludeProtocolQuery(w, q); !ok {
+			return
+		} else if excludeProtocols != nil {
+			filters.ExcludeProtocols = excludeProtocols
+		}
 
 		nodes, err := cp.ListNodes(filters)
 		if err != nil {

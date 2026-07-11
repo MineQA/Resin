@@ -16,6 +16,7 @@ import { useToast } from "../../hooks/useToast";
 import { useI18n } from "../../i18n";
 import { formatApiErrorMessage } from "../../lib/error-message";
 import { formatDateTime, formatRelativeTime } from "../../lib/time";
+import { PROTOCOL_OPTIONS } from "../../lib/protocolOptions";
 import { listPlatforms } from "../platforms/api";
 import type { Platform } from "../platforms/types";
 import { listSubscriptions } from "../subscriptions/api";
@@ -39,6 +40,7 @@ type NodeExportSettings = {
   hasOutbound: ExportBooleanMode;
   tagKeyword: string;
   protocol: string;
+  excludeProtocol: string;
 };
 
 type NodeListSettings = {
@@ -55,7 +57,8 @@ type NodeFilterDraft = {
   egress_ip: string;
   status: NodeStatusFilter;
   routable: NodeRoutableFilter;
-  protocol: string;
+  protocolInclude: string[];
+  protocolExclude: string[];
 };
 
 const defaultFilterDraft: NodeFilterDraft = {
@@ -66,7 +69,8 @@ const defaultFilterDraft: NodeFilterDraft = {
   egress_ip: "",
   status: "all",
   routable: "all",
-  protocol: "",
+  protocolInclude: [],
+  protocolExclude: [],
 };
 
 const NODE_LIST_SETTINGS_KEY = "resin_node_list_settings";
@@ -78,6 +82,7 @@ const DEFAULT_EXPORT_SETTINGS: NodeExportSettings = {
   hasOutbound: "any",
   tagKeyword: "",
   protocol: "",
+  excludeProtocol: "",
 };
 const DEFAULT_NODE_LIST_SETTINGS: NodeListSettings = {
   pageSize: 200,
@@ -99,6 +104,26 @@ const NODE_FILTER_CONTROL_STYLE: CSSProperties = {
   fontSize: "0.875rem",
   minHeight: "32px",
   height: "32px",
+};
+const PROTOCOL_PILL_STYLE: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  padding: "2px 6px",
+  fontSize: "0.7rem",
+  borderRadius: "4px",
+  cursor: "pointer",
+  border: "1px solid var(--border-subtle)",
+  background: "transparent",
+  color: "var(--text-secondary)",
+  lineHeight: "1.4",
+  whiteSpace: "nowrap",
+  transition: "background 0.15s, color 0.15s, border-color 0.15s",
+};
+const PROTOCOL_PILL_SELECTED_STYLE: CSSProperties = {
+  ...PROTOCOL_PILL_STYLE,
+  background: "var(--accent)",
+  color: "var(--accent-foreground)",
+  borderColor: "var(--accent)",
 };
 
 function parseBoolParam(value: string | null): boolean | undefined {
@@ -237,6 +262,14 @@ function trimQueryValue(params: URLSearchParams, key: string): string {
   return params.get(key)?.trim() ?? "";
 }
 
+function parseProtocolList(raw: string): string[] {
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+}
+
 function draftFromQuery(search: string, settings: NodeListSettings = DEFAULT_NODE_LIST_SETTINGS): NodeFilterDraft {
   const params = new URLSearchParams(search);
   const tagKeyword = trimQueryValue(params, "tag_keyword") || trimQueryValue(params, "tag");
@@ -250,9 +283,11 @@ function draftFromQuery(search: string, settings: NodeListSettings = DEFAULT_NOD
     egress_ip: trimQueryValue(params, "egress_ip"),
     status: statusFromQuery(params),
     routable,
-    protocol: trimQueryValue(params, "protocol").toLowerCase(),
+    protocolInclude: parseProtocolList(params.get("protocol") ?? ""),
+    protocolExclude: parseProtocolList(params.get("exclude_protocol") ?? ""),
   };
 }
+
 
 
 function draftToActiveFilters(draft: NodeFilterDraft): NodeListFilters {
@@ -293,7 +328,8 @@ function draftToActiveFilters(draft: NodeFilterDraft): NodeListFilters {
     circuit_open,
     has_outbound,
     routable: draft.routable === "all" ? undefined : draft.routable === "routable",
-    protocol: draft.protocol || undefined,
+    protocol: draft.protocolInclude.length > 0 ? draft.protocolInclude.join(",") : undefined,
+    exclude_protocol: draft.protocolExclude.length > 0 ? draft.protocolExclude.join(",") : undefined,
   };
 }
 
@@ -637,7 +673,7 @@ export function NodesPage() {
     }
   };
 
-  const handleFilterChange = (key: keyof NodeFilterDraft, value: string) => {
+  const handleFilterChange = (key: Exclude<keyof NodeFilterDraft, "protocolInclude" | "protocolExclude">, value: string) => {
     setDraftFilters((prev) => {
       const next = { ...prev, [key]: value } as NodeFilterDraft;
       setActiveFilters(draftToActiveFilters(next));
@@ -645,6 +681,21 @@ export function NodesPage() {
       setDrawerOpen(false);
       setPage(0);
       return next;
+    });
+  };
+
+  const toggleProtocolFilter = (key: "protocolInclude" | "protocolExclude", protocol: string) => {
+    setDraftFilters((prev) => {
+      const current = prev[key];
+      const next = current.includes(protocol)
+        ? current.filter((p) => p !== protocol)
+        : [...current, protocol];
+      const updated = { ...prev, [key]: next } as NodeFilterDraft;
+      setActiveFilters(draftToActiveFilters(updated));
+      setSelectedNodeHash("");
+      setDrawerOpen(false);
+      setPage(0);
+      return updated;
     });
   };
 
@@ -708,6 +759,25 @@ export function NodesPage() {
     setExportSettings((prev) => ({ ...prev, ...patch }));
   };
 
+  const toggleExportProtocol = (value: string, field: "protocol" | "excludeProtocol") => {
+    // If toggling include while __all is active, start from empty instead of ["__all"]
+    let raw = exportSettings[field];
+    if (field === "protocol" && raw === "__all") {
+      raw = "";
+    }
+    const current = raw ? raw.split(",").filter(Boolean) : [];
+    const next = current.includes(value) ? current.filter((v) => v !== value) : [...current, value];
+    const patch: Partial<NodeExportSettings> = { [field]: next.length > 0 ? next.join(",") : "" };
+    // If toggling exclude while __all is active, clear __all so the exclude is meaningful
+    if (field === "excludeProtocol" && exportSettings.protocol === "__all") {
+      patch.protocol = "";
+    }
+    updateExportSettings(patch);
+  };
+
+  const exportProtocolsActive = (field: "protocol" | "excludeProtocol"): string[] =>
+    exportSettings[field] ? exportSettings[field].split(",").filter(Boolean) : [];
+
   const exportFilters = (): NodeListFilters => {
     const filters: NodeListFilters = { ...activeFilters };
     const tagKeyword = exportSettings.tagKeyword.trim();
@@ -734,8 +804,14 @@ export function NodesPage() {
     applyExportBooleanFilter(filters, "has_outbound", exportSettings.hasOutbound);
     if (exportSettings.protocol === "__all") {
       delete filters.protocol;
-    } else if (exportSettings.protocol) {
-      filters.protocol = exportSettings.protocol;
+      delete filters.exclude_protocol;
+    } else {
+      if (exportSettings.protocol) {
+        filters.protocol = exportSettings.protocol;
+      }
+      if (exportSettings.excludeProtocol) {
+        filters.exclude_protocol = exportSettings.excludeProtocol;
+      }
     }
     return filters;
   };
@@ -1119,25 +1195,47 @@ export function NodesPage() {
               </Select>
             </div>
 
-            <div style={NODE_FILTER_ITEM_STYLE}>
-              <label htmlFor="node-protocol" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+            <div style={{ ...NODE_FILTER_ITEM_STYLE, flex: "1 1 220px" }}>
+              <label style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
                 {t("协议")}
               </label>
-              <Select
-                id="node-protocol"
-                value={draftFilters.protocol}
-                onChange={(event) => handleFilterChange("protocol", event.target.value)}
-                style={NODE_FILTER_CONTROL_STYLE}
-              >
-                <option value="">{t("全部协议")}</option>
-                <option value="shadowsocks">Shadowsocks</option>
-                <option value="vmess">VMess</option>
-                <option value="trojan">Trojan</option>
-                <option value="vless">VLess</option>
-                <option value="hysteria2">Hysteria2</option>
-                <option value="http">HTTP</option>
-                <option value="socks">SOCKS</option>
-              </Select>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "4px", padding: "2px 0" }}>
+                {PROTOCOL_OPTIONS.map(({ value, label }) => {
+                  const selected = draftFilters.protocolInclude.includes(value);
+                  return (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => toggleProtocolFilter("protocolInclude", value)}
+                      style={selected ? PROTOCOL_PILL_SELECTED_STYLE : PROTOCOL_PILL_STYLE}
+                      title={label}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <div style={{ ...NODE_FILTER_ITEM_STYLE, flex: "1 1 220px" }}>
+              <label style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                {t("排除协议")}
+              </label>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "4px", padding: "2px 0" }}>
+                {PROTOCOL_OPTIONS.map(({ value, label }) => {
+                  const selected = draftFilters.protocolExclude.includes(value);
+                  return (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => toggleProtocolFilter("protocolExclude", value)}
+                      style={selected ? PROTOCOL_PILL_SELECTED_STYLE : PROTOCOL_PILL_STYLE}
+                      title={label}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
             <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.125rem", marginLeft: "auto" }}>
@@ -1277,26 +1375,74 @@ export function NodesPage() {
                       <option value="false">{t("仅缺配置")}</option>
                     </Select>
                   </div>
-                  <div style={{ ...NODE_FILTER_ITEM_STYLE, flex: "1 1 130px" }}>
-                    <label htmlFor="node-export-protocol" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                  <div style={{ ...NODE_FILTER_ITEM_STYLE, flex: "1 1 280px" }}>
+                    <label style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
                       {t("协议")}
                     </label>
-                    <Select
-                      id="node-export-protocol"
-                      value={exportSettings.protocol}
-                      onChange={(event) => updateExportSettings({ protocol: event.target.value })}
-                      style={NODE_FILTER_CONTROL_STYLE}
-                    >
-                      <option value="">{t("跟随列表")}</option>
-                      <option value="__all">{t("全部协议")}</option>
-                      <option value="shadowsocks">Shadowsocks</option>
-                      <option value="vmess">VMess</option>
-                      <option value="trojan">Trojan</option>
-                      <option value="vless">VLess</option>
-                      <option value="hysteria2">Hysteria2</option>
-                      <option value="http">HTTP</option>
-                      <option value="socks">SOCKS</option>
-                    </Select>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "4px" }}>
+                        {PROTOCOL_OPTIONS.map(({ value, label }) => {
+                          const selected = exportProtocolsActive("protocol").includes(value);
+                          return (
+                            <button
+                              key={value}
+                              type="button"
+                              onClick={() => toggleExportProtocol(value, "protocol")}
+                              style={selected ? PROTOCOL_PILL_SELECTED_STYLE : PROTOCOL_PILL_STYLE}
+                              title={label}
+                            >
+                              {label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div style={{ display: "flex", gap: "6px", alignItems: "center", fontSize: "0.7rem", color: "var(--text-muted)" }}>
+                        <label style={{ display: "flex", alignItems: "center", gap: "4px", cursor: "pointer" }}>
+                          <input
+                            type="checkbox"
+                            checked={exportSettings.protocol === "__all"}
+                            onChange={(e) => updateExportSettings({ protocol: e.target.checked ? "__all" : "", excludeProtocol: e.target.checked ? "" : "" })}
+                          />
+                          {t("全部协议")}
+                        </label>
+                        {!exportSettings.protocol && !exportSettings.excludeProtocol ? (
+                          <span>{t("跟随列表")}</span>
+                        ) : null}
+                        {exportSettings.protocol && exportSettings.protocol !== "__all" ? (
+                          <span>{t("覆盖列表筛选")}</span>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ ...NODE_FILTER_ITEM_STYLE, flex: "1 1 280px" }}>
+                    <label style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                      {t("排除协议")}
+                    </label>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "4px" }}>
+                        {PROTOCOL_OPTIONS.map(({ value, label }) => {
+                          const selected = exportProtocolsActive("excludeProtocol").includes(value);
+                          return (
+                            <button
+                              key={value}
+                              type="button"
+                              onClick={() => toggleExportProtocol(value, "excludeProtocol")}
+                              style={selected ? PROTOCOL_PILL_SELECTED_STYLE : PROTOCOL_PILL_STYLE}
+                              title={label}
+                            >
+                              {label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div style={{ display: "flex", gap: "6px", alignItems: "center", fontSize: "0.7rem", color: "var(--text-muted)" }}>
+                        {!exportSettings.excludeProtocol ? (
+                          <span>{t("跟随列表")}</span>
+                        ) : (
+                          <span>{t("覆盖列表筛选")}</span>
+                        )}
+                      </div>
+                    </div>
                   </div>
                   <div style={{ ...NODE_FILTER_ITEM_STYLE, flex: "1 1 180px" }}>
                     <label htmlFor="node-export-tag" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
@@ -1313,7 +1459,7 @@ export function NodesPage() {
                 </div>
                 <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
                   {t(
-                    "导出默认跟随当前列表筛选；上方选项可覆盖可路由、启用状态、Outbound、协议和标签条件。转换器建议使用 URL query token。",
+                    "导出默认跟随当前列表筛选；上方选项可覆盖可路由、启用状态、Outbound、协议、排除协议和标签条件。转换器建议使用 URL query token。",
                   )}
                 </span>
               </div>

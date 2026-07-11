@@ -2,10 +2,15 @@ package service
 
 import (
 	"net/netip"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/Resinat/Resin/internal/config"
+	"github.com/Resinat/Resin/internal/model"
 	"github.com/Resinat/Resin/internal/node"
+	"github.com/Resinat/Resin/internal/platform"
+	"github.com/Resinat/Resin/internal/state"
 	"github.com/Resinat/Resin/internal/subscription"
 	"github.com/Resinat/Resin/internal/testutil"
 	"github.com/Resinat/Resin/internal/topology"
@@ -159,5 +164,241 @@ func TestPreviewFilter_RegionNegation_UnknownRegionExcluded(t *testing.T) {
 		if node.NodeHash == fixture.unknownHash {
 			t.Fatalf("node with unknown region %s should not match region filters", fixture.unknownHash)
 		}
+	}
+}
+
+// --- PreviewFilter protocol filter tests ---
+
+func newPreviewFilterTestService(t *testing.T) (*ControlPlaneService, node.Hash, node.Hash) {
+	t.Helper()
+
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	subA := subscription.NewSubscription("sub-a", "sub-a", "https://example.com/a", true, false)
+	subMgr.Register(subA)
+
+	// Node 1: shadowsocks
+	ssRaw := []byte(`{"type":"ss","server":"1.1.1.1","port":443}`)
+	ssHash := addRoutableNodeForSubscriptionWithTag(t, pool, subA, ssRaw, "203.0.113.10", "ss-node")
+
+	// Node 2: vmess
+	vmessRaw := []byte(`{"type":"vmess","server":"2.2.2.2","port":443}`)
+	vmessHash := addRoutableNodeForSubscriptionWithTag(t, pool, subA, vmessRaw, "203.0.113.11", "vmess-node")
+
+	runtimeCfg := &atomic.Pointer[config.RuntimeConfig]{}
+	runtimeCfg.Store(config.NewDefaultRuntimeConfig())
+
+	svc := &ControlPlaneService{
+		Pool:       pool,
+		SubMgr:     subMgr,
+		RuntimeCfg: runtimeCfg,
+	}
+	return svc, ssHash, vmessHash
+}
+
+func TestPreviewFilter_ProtocolFilterInclude(t *testing.T) {
+	svc, ssHash, _ := newPreviewFilterTestService(t)
+
+	result, err := svc.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			ProtocolFilters: []string{"shadowsocks"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(result))
+	}
+	if result[0].NodeHash != ssHash.Hex() {
+		t.Fatalf("expected node %s, got %s", ssHash.Hex(), result[0].NodeHash)
+	}
+}
+
+func TestPreviewFilter_ProtocolFilterIncludeMatchAlias(t *testing.T) {
+	svc, ssHash, _ := newPreviewFilterTestService(t)
+
+	result, err := svc.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			ProtocolFilters: []string{"ss"}, // alias — should normalise to shadowsocks
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(result))
+	}
+	if result[0].NodeHash != ssHash.Hex() {
+		t.Fatalf("expected node %s, got %s", ssHash.Hex(), result[0].NodeHash)
+	}
+}
+
+func TestPreviewFilter_ProtocolFilterExclude(t *testing.T) {
+	svc, ssHash, _ := newPreviewFilterTestService(t)
+
+	result, err := svc.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			ExcludeProtocolFilters: []string{"shadowsocks"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter: %v", err)
+	}
+	// Only vmess node should remain
+	if len(result) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(result))
+	}
+	if result[0].NodeHash == ssHash.Hex() {
+		t.Fatal("shadowsocks node should be excluded")
+	}
+}
+
+func TestPreviewFilter_ProtocolFilterIncludeAndExcludeExclusionWins(t *testing.T) {
+	svc, _, _ := newPreviewFilterTestService(t)
+
+	result, err := svc.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			ProtocolFilters:        []string{"shadowsocks", "vmess"},
+			ExcludeProtocolFilters: []string{"shadowsocks"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter: %v", err)
+	}
+	// Should only have the vmess node (shadowsocks is excluded despite being in include)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(result))
+	}
+	if result[0].Protocol != "vmess" {
+		t.Fatalf("expected vmess node, got protocol %q", result[0].Protocol)
+	}
+}
+
+func TestPreviewFilter_ProtocolFilterUnknownProtocolIncludedRejected(t *testing.T) {
+	svc, _, _ := newPreviewFilterTestService(t)
+
+	_, err := svc.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			ProtocolFilters: []string{"tuic"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for unsupported protocol in filter")
+	}
+}
+
+func TestPreviewFilter_ProtocolFilterUnknownProtocolExcludedRejected(t *testing.T) {
+	svc, _, _ := newPreviewFilterTestService(t)
+
+	_, err := svc.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			ExcludeProtocolFilters: []string{"wireguard"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for unsupported protocol in exclude filter")
+	}
+}
+
+func TestPreviewFilter_ProtocolFilterUnknownTypeNodeWithIncludeExcluded(t *testing.T) {
+	svc, _, _ := newPreviewFilterTestService(t)
+
+	// Add a node with unknown protocol type
+	raw := []byte(`{"type":"tuic","server":"3.3.3.3"}`)
+	hash := node.HashFromRawOptions(raw)
+
+	// Mock GetEntry by directly putting the node in the pool
+	entry := node.NewNodeEntry(hash, raw, time.Now(), 16)
+	entry.AddSubscriptionID("sub-a")
+	entry.SetEgressIP(netip.MustParseAddr("203.0.113.12"))
+	entry.LatencyTable.Update("example.com", 25*time.Millisecond, 10*time.Minute)
+	ob := testutil.NewNoopOutbound()
+	entry.Outbound.Store(&ob)
+	svc.Pool.NotifyNodeDirty(hash)
+
+	// Harder: need to get the entry into the pool properly
+	// Let's just check that the PreviewFilter doesn't crash with such entries
+	// The unknown protocol node will be excluded by the include filter at evaluation time
+	svc.Pool.AddNodeFromSub(hash, raw, "sub-a")
+	if entry, ok := svc.Pool.GetEntry(hash); ok {
+		entry.SetEgressIP(netip.MustParseAddr("203.0.113.12"))
+		entry.LatencyTable.Update("example.com", 25*time.Millisecond, 10*time.Minute)
+		entry2 := testutil.NewNoopOutbound()
+		entry.Outbound.Store(&entry2)
+		svc.Pool.NotifyNodeDirty(hash)
+	}
+
+	result, err := svc.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			ProtocolFilters: []string{"shadowsocks"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter: %v", err)
+	}
+	// Unknown protocol node should be excluded; only shadowsocks from fixture remains
+	for _, r := range result {
+		if r.Protocol == "" {
+			t.Fatal("unknown-protocol node should not appear in result")
+		}
+	}
+}
+
+func TestPreviewFilter_ProtocolExcludeWithPlatformID(t *testing.T) {
+	svc, _, _ := newPreviewFilterTestService(t)
+	engine, closer, err := state.PersistenceBootstrap(t.TempDir(), t.TempDir())
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	// Create a platform that excludes shadowsocks
+	platID := "plat-preview-exclude"
+	plat := platform.NewConfiguredPlatform(
+		platID, "ExcludePreview",
+		nil, nil,          // regex, region
+		nil,               // protocolFilters (include all)
+		[]string{"vmess"}, // excludeProtocolFilters
+		int64(30*time.Minute),
+		"TREAT_AS_EMPTY", "RANDOM", "", "BALANCED", false,
+	)
+	if err := engine.UpsertPlatform(model.Platform{
+		ID:                     platID,
+		Name:                   "ExcludePreview",
+		StickyTTLNs:            int64(30 * time.Minute),
+		RegexFilters:           []string{},
+		RegionFilters:          []string{},
+		ProtocolFilters:        []string{},
+		ExcludeProtocolFilters: []string{"vmess"},
+		ReverseProxyMissAction: "TREAT_AS_EMPTY",
+		AllocationPolicy:       "BALANCED",
+		UpdatedAtNs:            time.Now().UnixNano(),
+	}); err != nil {
+		t.Fatalf("UpsertPlatform: %v", err)
+	}
+	if err := svc.Pool.ReplacePlatform(plat); err != nil {
+		t.Fatalf("ReplacePlatform: %v", err)
+	}
+
+	result, err := svc.PreviewFilter(PreviewFilterRequest{
+		PlatformID: &platID,
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter: %v", err)
+	}
+	// Only shadowsocks node should remain (vmess excluded)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(result))
+	}
+	if result[0].Protocol != "shadowsocks" {
+		t.Fatalf("expected shadowsocks, got %q", result[0].Protocol)
 	}
 }

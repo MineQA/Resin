@@ -2,7 +2,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ColumnDef } from "@tanstack/react-table";
 import { AlertTriangle, ArrowLeft, Info, RefreshCw, Sparkles, Trash2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { useForm } from "react-hook-form";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge";
@@ -18,6 +18,7 @@ import { ToastContainer } from "../../components/ui/Toast";
 import { useToast } from "../../hooks/useToast";
 import { useI18n } from "../../i18n";
 import { formatApiErrorMessage } from "../../lib/error-message";
+import { PROTOCOL_OPTIONS } from "../../lib/protocolOptions";
 import { formatDateTime, formatGoDuration, formatRelativeTime } from "../../lib/time";
 import {
   clearAllPlatformLeases,
@@ -53,6 +54,32 @@ type PlatformDetailTab = "monitor" | "access" | "config" | "ops";
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
 const LEASE_MANAGEMENT_ANCHOR = "platform-lease-management";
 const LEASE_PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
+const PROTOCOL_PILL_STYLE: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  padding: "2px 8px",
+  fontSize: "0.72rem",
+  borderRadius: "4px",
+  cursor: "pointer",
+  border: "1px solid var(--border-subtle)",
+  background: "transparent",
+  color: "var(--text-secondary)",
+  lineHeight: 1.4,
+  whiteSpace: "nowrap",
+  transition: "background 0.15s, color 0.15s, border-color 0.15s",
+};
+const PROTOCOL_PILL_SELECTED_STYLE: CSSProperties = {
+  ...PROTOCOL_PILL_STYLE,
+  background: "var(--accent)",
+  color: "var(--accent-foreground)",
+  borderColor: "var(--accent)",
+};
+const PROTOCOL_PILL_ROW_STYLE: CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: "4px",
+  padding: "2px 0",
+};
 const DETAIL_TABS: Array<{ key: PlatformDetailTab; label: string; hint: string }> = [
   { key: "monitor", label: "监控", hint: "平台运行态趋势和快照" },
   { key: "access", label: "接入", hint: "复制正向/反向代理地址" },
@@ -120,6 +147,19 @@ export function PlatformDetailPage() {
     defaultValues: defaultPlatformFormValues,
   });
   const detailEmptyAccountBehavior = editForm.watch("reverse_proxy_empty_account_behavior");
+  const protocolFilters = editForm.watch("protocol_filters");
+  const excludeProtocolFilters = editForm.watch("exclude_protocol_filters");
+
+  const toggleProtocolFilter = (
+    field: "protocol_filters" | "exclude_protocol_filters",
+    protocol: string,
+  ) => {
+    const current = editForm.getValues(field) ?? [];
+    const next = current.includes(protocol)
+      ? current.filter((value) => value !== protocol)
+      : [...current, protocol];
+    editForm.setValue(field, next, { shouldDirty: true, shouldValidate: true, shouldTouch: true });
+  };
 
   useEffect(() => {
     if (!platform) {
@@ -654,6 +694,74 @@ export function PlatformDetailPage() {
                     />
                     <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
                       {t("支持反选：以 ! 开头可排除地区（如 !hk）。可与正选混用，最终结果为“先正选再排除”。")}
+                    </p>
+                  </div>
+
+                  <div className="field-group field-span-2">
+                    <label className="field-label field-label-with-info">
+                      <span>{t("协议过滤规则")}</span>
+                      <span
+                        className="subscription-info-icon"
+                        title={t("仅保留匹配所选协议的节点。留空表示不按协议限制。")}
+                        aria-label={t("仅保留匹配所选协议的节点。留空表示不按协议限制。")}
+                        tabIndex={0}
+                      >
+                        <Info size={13} />
+                      </span>
+                    </label>
+                    <div style={PROTOCOL_PILL_ROW_STYLE}>
+                      {PROTOCOL_OPTIONS.map(({ value, label }) => {
+                        const selected = protocolFilters.includes(value);
+                        return (
+                          <button
+                            key={value}
+                            type="button"
+                            style={selected ? PROTOCOL_PILL_SELECTED_STYLE : PROTOCOL_PILL_STYLE}
+                            onClick={() => toggleProtocolFilter("protocol_filters", value)}
+                            title={label}
+                            aria-pressed={selected}
+                          >
+                            {label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
+                      {t("留空表示不按协议限制；排除规则会移除匹配协议，与包含规则重叠时排除优先。")}
+                    </p>
+                  </div>
+
+                  <div className="field-group field-span-2">
+                    <label className="field-label field-label-with-info">
+                      <span>{t("排除协议过滤规则")}</span>
+                      <span
+                        className="subscription-info-icon"
+                        title={t("排除所选协议的节点。留空表示不排除任何协议。")}
+                        aria-label={t("排除所选协议的节点。留空表示不排除任何协议。")}
+                        tabIndex={0}
+                      >
+                        <Info size={13} />
+                      </span>
+                    </label>
+                    <div style={PROTOCOL_PILL_ROW_STYLE}>
+                      {PROTOCOL_OPTIONS.map(({ value, label }) => {
+                        const selected = excludeProtocolFilters.includes(value);
+                        return (
+                          <button
+                            key={value}
+                            type="button"
+                            style={selected ? PROTOCOL_PILL_SELECTED_STYLE : PROTOCOL_PILL_STYLE}
+                            onClick={() => toggleProtocolFilter("exclude_protocol_filters", value)}
+                            title={label}
+                            aria-pressed={selected}
+                          >
+                            {label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
+                      {t("留空表示不排除任何协议；与包含规则重叠时，排除规则优先。")}
                     </p>
                   </div>
 

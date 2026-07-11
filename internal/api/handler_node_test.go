@@ -587,3 +587,179 @@ func TestHandleListNodes_ProtocolFilterInvalid(t *testing.T) {
 	}
 	assertErrorCode(t, rec, "INVALID_ARGUMENT")
 }
+
+func TestHandleListNodes_ExcludeProtocolFilter(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	addNodeForNodeListTest(t, cp, sub, `{"type":"ss","server":"1.1.1.1","port":443}`, "203.0.113.10")
+	addNodeForNodeListTest(t, cp, sub, `{"type":"vmess","server":"2.2.2.2","port":443,"uuid":"a"}`, "203.0.113.11")
+	addNodeForNodeListTest(t, cp, sub, `{"type":"trojan","server":"3.3.3.3","port":443,"password":"x"}`, "203.0.113.12")
+
+	// Exclude ss => 2 nodes (vmess, trojan).
+	rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?exclude_protocol=ss", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("exclude_protocol=ss status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := decodeJSONMap(t, rec)
+	if body["total"] != float64(2) {
+		t.Fatalf("exclude_protocol=ss total: got %v, want 2", body["total"])
+	}
+}
+
+func TestHandleListNodes_ExcludeProtocolFilterMulti(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	addNodeForNodeListTest(t, cp, sub, `{"type":"ss","server":"1.1.1.1","port":443}`, "203.0.113.10")
+	addNodeForNodeListTest(t, cp, sub, `{"type":"vmess","server":"2.2.2.2","port":443,"uuid":"a"}`, "203.0.113.11")
+	addNodeForNodeListTest(t, cp, sub, `{"type":"trojan","server":"3.3.3.3","port":443,"password":"x"}`, "203.0.113.12")
+
+	// Exclude ss,vmess => 1 node (trojan).
+	rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?exclude_protocol=ss,vmess", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("exclude_protocol=ss,vmess status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := decodeJSONMap(t, rec)
+	if body["total"] != float64(1) {
+		t.Fatalf("exclude_protocol=ss,vmess total: got %v, want 1", body["total"])
+	}
+}
+
+func TestHandleListNodes_ExcludeProtocolFilterInvalid(t *testing.T) {
+	srv, _, _ := newControlPlaneTestServer(t)
+
+	rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?exclude_protocol=badproto", nil, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("exclude_protocol=badproto status: got %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	assertErrorCode(t, rec, "INVALID_ARGUMENT")
+}
+
+func TestHandleListNodes_ExcludeProtocolAlias(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	addNodeForNodeListTest(t, cp, sub, `{"type":"ss","server":"1.1.1.1","port":443}`, "203.0.113.10")
+	addNodeForNodeListTest(t, cp, sub, `{"type":"vmess","server":"2.2.2.2","port":443,"uuid":"a"}`, "203.0.113.11")
+
+	// Use protocol_exclude alias.
+	rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?protocol_exclude=ss", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("protocol_exclude=ss status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := decodeJSONMap(t, rec)
+	if body["total"] != float64(1) {
+		t.Fatalf("protocol_exclude=ss total: got %v, want 1", body["total"])
+	}
+}
+
+func TestHandleListNodes_ProtocolFilterIncludeExclude(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	addNodeForNodeListTest(t, cp, sub, `{"type":"ss","server":"1.1.1.1","port":443}`, "203.0.113.10")
+	addNodeForNodeListTest(t, cp, sub, `{"type":"vmess","server":"2.2.2.2","port":443,"uuid":"a"}`, "203.0.113.11")
+	addNodeForNodeListTest(t, cp, sub, `{"type":"trojan","server":"3.3.3.3","port":443,"password":"x"}`, "203.0.113.12")
+
+	// Include ss,vmess,trojan but exclude ss => 2 nodes (vmess, trojan).
+	rec := doJSONRequest(t, srv, http.MethodGet,
+		"/api/v1/nodes?protocol=ss,vmess,trojan&exclude_protocol=ss", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("include+exclude status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := decodeJSONMap(t, rec)
+	if body["total"] != float64(2) {
+		t.Fatalf("include+exclude total: got %v, want 2", body["total"])
+	}
+}
+
+func TestHandleListNodes_ProtocolFilterExclusionWins(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	addNodeForNodeListTest(t, cp, sub, `{"type":"ss","server":"1.1.1.1","port":443}`, "203.0.113.10")
+	addNodeForNodeListTest(t, cp, sub, `{"type":"vmess","server":"2.2.2.2","port":443,"uuid":"a"}`, "203.0.113.11")
+
+	// Include ss, exclude ss => exclusion wins, ss removed => 0 nodes.
+	rec := doJSONRequest(t, srv, http.MethodGet,
+		"/api/v1/nodes?protocol=ss&exclude_protocol=ss", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("exclusion-wins status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := decodeJSONMap(t, rec)
+	if body["total"] != float64(0) {
+		t.Fatalf("exclusion-wins total: got %v, want 0", body["total"])
+	}
+}
+
+func TestHandleListNodes_ExcludeProtocolFilterMissingType(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	addNodeForNodeListTest(t, cp, sub, `{"server":"1.1.1.1","port":443}`, "203.0.113.10")
+
+	// Exclude with missing type => node excluded (conservative).
+	rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?exclude_protocol=ss", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("exclude missing type status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := decodeJSONMap(t, rec)
+	if body["total"] != float64(0) {
+		t.Fatalf("exclude missing type total: got %v, want 0", body["total"])
+	}
+}
+
+func TestHandleListNodes_ProtocolFilterRepeatedQuery(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	addNodeForNodeListTest(t, cp, sub, `{"type":"ss","server":"1.1.1.1","port":443}`, "203.0.113.10")
+	addNodeForNodeListTest(t, cp, sub, `{"type":"vmess","server":"2.2.2.2","port":443,"uuid":"a"}`, "203.0.113.11")
+	addNodeForNodeListTest(t, cp, sub, `{"type":"trojan","server":"3.3.3.3","port":443,"password":"x"}`, "203.0.113.12")
+
+	// Repeated query values: ?protocol=ss&protocol=vmess => 2 nodes.
+	rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?protocol=ss&protocol=vmess", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("repeated protocol status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := decodeJSONMap(t, rec)
+	if body["total"] != float64(2) {
+		t.Fatalf("repeated protocol total: got %v, want 2", body["total"])
+	}
+}
+
+func TestHandleListNodes_ExcludeProtocolFilterRepeatedQuery(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	addNodeForNodeListTest(t, cp, sub, `{"type":"ss","server":"1.1.1.1","port":443}`, "203.0.113.10")
+	addNodeForNodeListTest(t, cp, sub, `{"type":"vmess","server":"2.2.2.2","port":443,"uuid":"a"}`, "203.0.113.11")
+	addNodeForNodeListTest(t, cp, sub, `{"type":"trojan","server":"3.3.3.3","port":443,"password":"x"}`, "203.0.113.12")
+
+	// Repeated exclude: ?exclude_protocol=ss&exclude_protocol=vmess => 1 node (trojan).
+	rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?exclude_protocol=ss&exclude_protocol=vmess", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("repeated exclude status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := decodeJSONMap(t, rec)
+	if body["total"] != float64(1) {
+		t.Fatalf("repeated exclude total: got %v, want 1", body["total"])
+	}
+}

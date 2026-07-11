@@ -102,6 +102,8 @@ var platformPatchAllowedFields = map[string]bool{
 	"sticky_ttl":                           true,
 	"regex_filters":                        true,
 	"region_filters":                       true,
+	"protocol_filters":                     true,
+	"exclude_protocol_filters":             true,
 	"reverse_proxy_miss_action":            true,
 	"reverse_proxy_empty_account_behavior": true,
 	"reverse_proxy_fixed_account_header":   true,

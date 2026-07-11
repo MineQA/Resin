@@ -208,6 +208,11 @@ func HandleNodePoolExport(cp *service.ControlPlaneService) http.HandlerFunc {
 		} else if protocols != nil {
 			filters.Protocols = protocols
 		}
+		if excludeProtocols, ok := parseExcludeProtocolQuery(w, q); !ok {
+			return
+		} else if excludeProtocols != nil {
+			filters.ExcludeProtocols = excludeProtocols
+		}
 
 		// --- Fetch nodes ---
 		nodes, err := cp.ListNodes(filters)

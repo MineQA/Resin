@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Resinat/Resin/internal/model"
+	"github.com/Resinat/Resin/internal/node"
 )
 
 func isLowerAlpha2(s string) bool {
@@ -44,10 +45,14 @@ func CompileRegexFilters(regexFilters []string) ([]*regexp.Regexp, error) {
 }
 
 // NewConfiguredPlatform builds a runtime platform with non-filter settings applied.
+// Protocol filter values are normalised to their canonical form defensively.
+// Unknown/unrecognised values are kept as-is (caller is expected to validate first).
 func NewConfiguredPlatform(
 	id, name string,
 	regexFilters []*regexp.Regexp,
 	regionFilters []string,
+	protocolFilters []string,
+	excludeProtocolFilters []string,
 	stickyTTLNs int64,
 	missAction string,
 	emptyAccountBehavior string,
@@ -61,6 +66,8 @@ func NewConfiguredPlatform(
 		fixedHeaders = nil
 	}
 	plat := NewPlatform(id, name, regexFilters, regionFilters)
+	plat.ProtocolFilters = normalizeProtocolSlice(protocolFilters)
+	plat.ExcludeProtocolFilters = normalizeProtocolSlice(excludeProtocolFilters)
 	plat.StickyTTLNs = stickyTTLNs
 	plat.ReverseProxyMissAction = missAction
 	plat.ReverseProxyEmptyAccountBehavior = emptyAccountBehavior
@@ -69,6 +76,45 @@ func NewConfiguredPlatform(
 	plat.AllocationPolicy = ParseAllocationPolicy(allocationPolicy)
 	plat.PassiveCircuitBreakerDisabled = passiveCircuitBreakerDisabled
 	return plat
+}
+
+// normalizeProtocolSlice normalises each entry to its canonical form and
+// deduplicates. Unknown entries are kept verbatim so callers that validate
+// first still get meaningful error positions.
+func normalizeProtocolSlice(s []string) []string {
+	if s == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(s))
+	out := make([]string, 0, len(s))
+	for _, f := range s {
+		c := node.NormalizeProtocol(f)
+		if c == "" {
+			c = f // keep original; caller should have validated
+		}
+		if _, dup := seen[c]; dup {
+			continue
+		}
+		seen[c] = struct{}{}
+		out = append(out, c)
+	}
+	return out
+}
+
+// ValidateProtocolFilters validates that each entry in include/exclude is a
+// recognised canonical protocol name. Empty slices are valid (no filtering).
+func ValidateProtocolFilters(include, exclude []string) error {
+	for i, f := range include {
+		if node.NormalizeProtocol(f) == "" {
+			return fmt.Errorf("protocol_filters[%d]: unsupported protocol %q", i, f)
+		}
+	}
+	for i, f := range exclude {
+		if node.NormalizeProtocol(f) == "" {
+			return fmt.Errorf("exclude_protocol_filters[%d]: unsupported protocol %q", i, f)
+		}
+	}
+	return nil
 }
 
 // CompileModelRegexFilters compiles regex filters from persisted model values.
@@ -87,6 +133,9 @@ func BuildFromModel(mp model.Platform) (*Platform, error) {
 		return nil, err
 	}
 	if err := ValidateRegionFilters(mp.RegionFilters); err != nil {
+		return nil, err
+	}
+	if err := ValidateProtocolFilters(mp.ProtocolFilters, mp.ExcludeProtocolFilters); err != nil {
 		return nil, err
 	}
 	emptyAccountBehavior := mp.ReverseProxyEmptyAccountBehavior
@@ -118,6 +167,8 @@ func BuildFromModel(mp model.Platform) (*Platform, error) {
 		mp.Name,
 		regexFilters,
 		append([]string(nil), mp.RegionFilters...),
+		append([]string(nil), mp.ProtocolFilters...),
+		append([]string(nil), mp.ExcludeProtocolFilters...),
 		mp.StickyTTLNs,
 		string(missAction),
 		emptyAccountBehavior,

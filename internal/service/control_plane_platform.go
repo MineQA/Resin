@@ -27,6 +27,8 @@ type PlatformResponse struct {
 	StickyTTL                        string   `json:"sticky_ttl"`
 	RegexFilters                     []string `json:"regex_filters"`
 	RegionFilters                    []string `json:"region_filters"`
+	ProtocolFilters                  []string `json:"protocol_filters"`
+	ExcludeProtocolFilters           []string `json:"exclude_protocol_filters"`
 	RoutableNodeCount                int      `json:"routable_node_count"`
 	ReverseProxyMissAction           string   `json:"reverse_proxy_miss_action"`
 	ReverseProxyEmptyAccountBehavior string   `json:"reverse_proxy_empty_account_behavior"`
@@ -45,6 +47,8 @@ func platformToResponse(p model.Platform) PlatformResponse {
 		StickyTTL:                        time.Duration(p.StickyTTLNs).String(),
 		RegexFilters:                     append([]string(nil), p.RegexFilters...),
 		RegionFilters:                    append([]string(nil), p.RegionFilters...),
+		ProtocolFilters:                  append([]string(nil), p.ProtocolFilters...),
+		ExcludeProtocolFilters:           append([]string(nil), p.ExcludeProtocolFilters...),
 		RoutableNodeCount:                0,
 		ReverseProxyMissAction:           p.ReverseProxyMissAction,
 		ReverseProxyEmptyAccountBehavior: behavior,
@@ -72,6 +76,8 @@ type platformConfig struct {
 	StickyTTLNs                      int64
 	RegexFilters                     []string
 	RegionFilters                    []string
+	ProtocolFilters                  []string
+	ExcludeProtocolFilters           []string
 	ReverseProxyMissAction           string
 	ReverseProxyEmptyAccountBehavior string
 	ReverseProxyFixedAccountHeader   string
@@ -100,6 +106,8 @@ func (s *ControlPlaneService) defaultPlatformConfig(name string) platformConfig 
 		StickyTTLNs:            int64(s.EnvCfg.DefaultPlatformStickyTTL),
 		RegexFilters:           append([]string(nil), s.EnvCfg.DefaultPlatformRegexFilters...),
 		RegionFilters:          append([]string(nil), s.EnvCfg.DefaultPlatformRegionFilters...),
+		ProtocolFilters:        []string{},
+		ExcludeProtocolFilters: []string{},
 		ReverseProxyMissAction: s.EnvCfg.DefaultPlatformReverseProxyMissAction,
 		ReverseProxyEmptyAccountBehavior: normalizePlatformEmptyAccountBehavior(
 			s.EnvCfg.DefaultPlatformReverseProxyEmptyAccountBehavior,
@@ -117,6 +125,8 @@ func platformConfigFromModel(mp model.Platform) platformConfig {
 		StickyTTLNs:                      mp.StickyTTLNs,
 		RegexFilters:                     append([]string(nil), mp.RegexFilters...),
 		RegionFilters:                    append([]string(nil), mp.RegionFilters...),
+		ProtocolFilters:                  append([]string(nil), mp.ProtocolFilters...),
+		ExcludeProtocolFilters:           append([]string(nil), mp.ExcludeProtocolFilters...),
 		ReverseProxyMissAction:           mp.ReverseProxyMissAction,
 		ReverseProxyEmptyAccountBehavior: normalizePlatformEmptyAccountBehavior(mp.ReverseProxyEmptyAccountBehavior),
 		ReverseProxyFixedAccountHeader:   normalizeHeaderFieldName(mp.ReverseProxyFixedAccountHeader),
@@ -132,6 +142,8 @@ func (cfg platformConfig) toModel(id string, updatedAtNs int64) model.Platform {
 		StickyTTLNs:                      cfg.StickyTTLNs,
 		RegexFilters:                     append([]string(nil), cfg.RegexFilters...),
 		RegionFilters:                    append([]string(nil), cfg.RegionFilters...),
+		ProtocolFilters:                  append([]string(nil), cfg.ProtocolFilters...),
+		ExcludeProtocolFilters:           append([]string(nil), cfg.ExcludeProtocolFilters...),
 		ReverseProxyMissAction:           cfg.ReverseProxyMissAction,
 		ReverseProxyEmptyAccountBehavior: cfg.ReverseProxyEmptyAccountBehavior,
 		ReverseProxyFixedAccountHeader:   cfg.ReverseProxyFixedAccountHeader,
@@ -151,6 +163,8 @@ func (cfg platformConfig) toRuntime(id string) (*platform.Platform, error) {
 		cfg.Name,
 		compiledRegexFilters,
 		cfg.RegionFilters,
+		cfg.ProtocolFilters,
+		cfg.ExcludeProtocolFilters,
 		cfg.StickyTTLNs,
 		cfg.ReverseProxyMissAction,
 		cfg.ReverseProxyEmptyAccountBehavior,
@@ -262,10 +276,54 @@ func validatePlatformConfig(cfg *platformConfig, validateRegionFilters bool) *Se
 			return invalidArg(err.Error())
 		}
 	}
+	if err := validatePlatformProtocolFilters(cfg.ProtocolFilters, cfg.ExcludeProtocolFilters); err != nil {
+		return err
+	}
 	if err := validatePlatformEmptyAccountConfig(cfg); err != nil {
 		return err
 	}
 	return nil
+}
+
+// validatePlatformProtocolFilters checks that every entry in include/exclude
+// is a recognised canonical protocol name. Overlap between include and exclude
+// is allowed — at evaluation time exclusion wins.
+func validatePlatformProtocolFilters(include, exclude []string) *ServiceError {
+	for i, f := range include {
+		if node.NormalizeProtocol(f) == "" {
+			return invalidArg(fmt.Sprintf("protocol_filters[%d]: unsupported protocol %q", i, f))
+		}
+	}
+	for i, f := range exclude {
+		if node.NormalizeProtocol(f) == "" {
+			return invalidArg(fmt.Sprintf("exclude_protocol_filters[%d]: unsupported protocol %q", i, f))
+		}
+	}
+	return nil
+}
+
+// normalizeProtocolFilterSlice normalizes each value in a protocol filter slice
+// to its canonical form and deduplicates. Invalid values are kept as-is (caller
+// must validate via validatePlatformProtocolFilters first, or the invalid entry
+// will survive into the slice for downstream rejection at evaluation time).
+func normalizeProtocolFilterSlice(filters []string) []string {
+	if filters == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(filters))
+	out := make([]string, 0, len(filters))
+	for _, f := range filters {
+		c := node.NormalizeProtocol(f)
+		if c == "" {
+			c = f // keep original for validation error messaging
+		}
+		if _, dup := seen[c]; dup {
+			continue
+		}
+		seen[c] = struct{}{}
+		out = append(out, c)
+	}
+	return out
 }
 
 func (s *ControlPlaneService) compileAndUpsertPlatform(id string, cfg platformConfig) (model.Platform, *platform.Platform, *ServiceError) {
@@ -330,6 +388,8 @@ type CreatePlatformRequest struct {
 	StickyTTL                        *string  `json:"sticky_ttl"`
 	RegexFilters                     []string `json:"regex_filters"`
 	RegionFilters                    []string `json:"region_filters"`
+	ProtocolFilters                  []string `json:"protocol_filters"`
+	ExcludeProtocolFilters           []string `json:"exclude_protocol_filters"`
 	ReverseProxyMissAction           *string  `json:"reverse_proxy_miss_action"`
 	ReverseProxyEmptyAccountBehavior *string  `json:"reverse_proxy_empty_account_behavior"`
 	ReverseProxyFixedAccountHeader   *string  `json:"reverse_proxy_fixed_account_header"`
@@ -370,6 +430,12 @@ func (s *ControlPlaneService) CreatePlatform(req CreatePlatformRequest) (*Platfo
 	}
 	if req.RegionFilters != nil {
 		cfg.RegionFilters = req.RegionFilters
+	}
+	if req.ProtocolFilters != nil {
+		cfg.ProtocolFilters = normalizeProtocolFilterSlice(req.ProtocolFilters)
+	}
+	if req.ExcludeProtocolFilters != nil {
+		cfg.ExcludeProtocolFilters = normalizeProtocolFilterSlice(req.ExcludeProtocolFilters)
 	}
 	if req.ReverseProxyMissAction != nil {
 		if err := setPlatformMissAction(&cfg, *req.ReverseProxyMissAction); err != nil {
@@ -475,6 +541,18 @@ func (s *ControlPlaneService) UpdatePlatform(id string, patchJSON json.RawMessag
 	} else if ok {
 		regionFiltersPatched = true
 		cfg.RegionFilters = filters
+	}
+
+	if filters, ok, err := patch.optionalStringSlice("protocol_filters"); err != nil {
+		return nil, err
+	} else if ok {
+		cfg.ProtocolFilters = normalizeProtocolFilterSlice(filters)
+	}
+
+	if filters, ok, err := patch.optionalStringSlice("exclude_protocol_filters"); err != nil {
+		return nil, err
+	} else if ok {
+		cfg.ExcludeProtocolFilters = normalizeProtocolFilterSlice(filters)
 	}
 
 	if ma, ok, err := patch.optionalString("reverse_proxy_miss_action"); err != nil {
@@ -584,8 +662,10 @@ type PreviewFilterRequest struct {
 }
 
 type PlatformSpecFilter struct {
-	RegexFilters  []string `json:"regex_filters"`
-	RegionFilters []string `json:"region_filters"`
+	RegexFilters           []string `json:"regex_filters"`
+	RegionFilters          []string `json:"region_filters"`
+	ProtocolFilters        []string `json:"protocol_filters"`
+	ExcludeProtocolFilters []string `json:"exclude_protocol_filters"`
 }
 
 // NodeSummary is the API response for a node.
@@ -626,7 +706,7 @@ func (s *ControlPlaneService) nodeEntryToSummary(h node.Hash, entry *node.NodeEn
 	ns := NodeSummary{
 		NodeHash:     h.Hex(),
 		CreatedAt:    entry.CreatedAt.UTC().Format(time.RFC3339Nano),
-		Protocol:     rawOptionsProtocol(entry.RawOptions),
+		Protocol:     node.RawOptionsProtocol(entry.RawOptions),
 		Enabled:      true,
 		HasOutbound:  entry.HasOutbound(),
 		LastError:    entry.GetLastError(),
@@ -699,16 +779,6 @@ func (s *ControlPlaneService) nodeEntryToSummary(h node.Hash, entry *node.NodeEn
 	return ns
 }
 
-func rawOptionsProtocol(raw json.RawMessage) string {
-	var outbound struct {
-		Type string `json:"type"`
-	}
-	if err := json.Unmarshal(raw, &outbound); err != nil {
-		return ""
-	}
-	return strings.TrimSpace(outbound.Type)
-}
-
 // PreviewFilter returns nodes matching the given filter spec.
 func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSummary, error) {
 	hasPlatformID := req.PlatformID != nil && *req.PlatformID != ""
@@ -720,6 +790,8 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 
 	var regexFilters []*regexp.Regexp
 	var regionFilters []string
+	var protocolFilters []string
+	var excludeProtocolFilters []string
 
 	if hasPlatformID {
 		plat, ok := s.Pool.GetPlatform(*req.PlatformID)
@@ -728,6 +800,8 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 		}
 		regexFilters = plat.RegexFilters
 		regionFilters = plat.RegionFilters
+		protocolFilters = plat.ProtocolFilters
+		excludeProtocolFilters = plat.ExcludeProtocolFilters
 	} else {
 		compiled, err := platform.CompileRegexFilters(req.PlatformSpec.RegexFilters)
 		if err != nil {
@@ -738,6 +812,15 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 		if err := platform.ValidateRegionFilters(regionFilters); err != nil {
 			return nil, invalidArg(err.Error())
 		}
+		// Validate and normalize protocol filters from spec.
+		if err := validatePlatformProtocolFilters(
+			req.PlatformSpec.ProtocolFilters,
+			req.PlatformSpec.ExcludeProtocolFilters,
+		); err != nil {
+			return nil, err
+		}
+		protocolFilters = normalizeProtocolFilterSlice(req.PlatformSpec.ProtocolFilters)
+		excludeProtocolFilters = normalizeProtocolFilterSlice(req.PlatformSpec.ExcludeProtocolFilters)
 	}
 
 	var subLookup node.SubLookupFunc
@@ -756,6 +839,32 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 			}
 			if !platform.MatchRegionFilter(region, regionFilters) {
 				return true
+			}
+		}
+		// Protocol filters.
+		if len(protocolFilters) > 0 || len(excludeProtocolFilters) > 0 {
+			canonical := node.RawOptionsProtocol(entry.RawOptions)
+			if canonical == "" {
+				return true
+			}
+			if len(protocolFilters) > 0 {
+				inInclude := false
+				for _, f := range protocolFilters {
+					if f == canonical {
+						inInclude = true
+						break
+					}
+				}
+				if !inInclude {
+					return true
+				}
+			}
+			if len(excludeProtocolFilters) > 0 {
+				for _, f := range excludeProtocolFilters {
+					if f == canonical {
+						return true
+					}
+				}
 			}
 		}
 		result = append(result, s.nodeEntryToSummary(h, entry))

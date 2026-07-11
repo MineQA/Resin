@@ -350,3 +350,110 @@ func TestPlatform_FullRebuild_ClearsOld(t *testing.T) {
 		t.Fatal("h2 should have been removed by rebuild")
 	}
 }
+
+func TestPlatform_EvaluateNode_ProtocolFilterInclude(t *testing.T) {
+	p := NewPlatform("p1", "Test", nil, nil)
+	p.ProtocolFilters = []string{"shadowsocks"}
+	h := makeHash(`{"type":"ss"}`)
+	entry := makeFullyRoutableEntry(h, "sub1")
+
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+
+	if p.View().Size() != 1 {
+		t.Fatal("shadowsocks node should be routable with protocol include filter")
+	}
+}
+
+func TestPlatform_EvaluateNode_ProtocolFilterIncludeReject(t *testing.T) {
+	p := NewPlatform("p1", "Test", nil, nil)
+	p.ProtocolFilters = []string{"vmess"}
+	h := makeHash(`{"type":"ss"}`)
+	entry := makeFullyRoutableEntry(h, "sub1")
+
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+
+	if p.View().Size() != 0 {
+		t.Fatal("shadowsocks node should be rejected by vmess-only include filter")
+	}
+}
+
+func TestPlatform_EvaluateNode_ProtocolFilterExclude(t *testing.T) {
+	p := NewPlatform("p1", "Test", nil, nil)
+	p.ExcludeProtocolFilters = []string{"shadowsocks"}
+	h := makeHash(`{"type":"ss"}`)
+	entry := makeFullyRoutableEntry(h, "sub1")
+
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+
+	if p.View().Size() != 0 {
+		t.Fatal("shadowsocks node should be excluded by protocol exclude filter")
+	}
+}
+
+func TestPlatform_EvaluateNode_ProtocolFilterExcludePassesOthers(t *testing.T) {
+	p := NewPlatform("p1", "Test", nil, nil)
+	p.ExcludeProtocolFilters = []string{"vmess"}
+	h := makeHash(`{"type":"ss"}`)
+	entry := makeFullyRoutableEntry(h, "sub1")
+
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+
+	if p.View().Size() != 1 {
+		t.Fatal("shadowsocks node should not be excluded by vmess exclude filter")
+	}
+}
+
+func TestPlatform_EvaluateNode_ProtocolFilterIncludeAndExclude(t *testing.T) {
+	// Include "shadowsocks" but exclude "ss" (same canonical) — exclude wins.
+	p := NewPlatform("p1", "Test", nil, nil)
+	p.ProtocolFilters = []string{"shadowsocks"}
+	p.ExcludeProtocolFilters = []string{"shadowsocks"}
+	h := makeHash(`{"type":"ss"}`)
+	entry := makeFullyRoutableEntry(h, "sub1")
+
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+
+	if p.View().Size() != 0 {
+		t.Fatal("exclude should win over include for the same protocol")
+	}
+}
+
+func TestPlatform_EvaluateNode_UnknownProtocolIncludeRejected(t *testing.T) {
+	p := NewPlatform("p1", "Test", nil, nil)
+	p.ProtocolFilters = []string{"shadowsocks"}
+	h := makeHash(`{"type":"unknown_proto"}`)
+	entry := makeFullyRoutableEntry(h, "sub1")
+
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+
+	if p.View().Size() != 0 {
+		t.Fatal("unknown protocol node should be rejected by include-only filter")
+	}
+}
+
+func TestPlatform_EvaluateNode_UnknownProtocolExcludeOnlyRejected(t *testing.T) {
+	p := NewPlatform("p1", "Test", nil, nil)
+	p.ExcludeProtocolFilters = []string{"vmess"}
+	h := makeHash(`{"type":"unknown_proto"}`)
+	entry := makeFullyRoutableEntry(h, "sub1")
+
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+
+	if p.View().Size() != 0 {
+		t.Fatal("unknown protocol node should be rejected when any protocol filter is active")
+	}
+}

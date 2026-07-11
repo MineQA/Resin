@@ -1,7 +1,6 @@
 package service
 
 import (
-	"encoding/json"
 	"strings"
 	"time"
 
@@ -11,52 +10,24 @@ import (
 	"github.com/Resinat/Resin/internal/subscription"
 )
 
-// protocolAliases maps lower-cased input protocol names to their canonical form.
-// All lookups should be done after lowercasing the input.
-var protocolAliases = map[string]string{
-	"shadowsocks": "shadowsocks",
-	"ss":          "shadowsocks",
-	"vmess":       "vmess",
-	"vmess1":      "vmess",
-	"trojan":      "trojan",
-	"vless":       "vless",
-	"hysteria2":   "hysteria2",
-	"hy2":         "hysteria2",
-	"http":        "http",
-	"socks":       "socks",
-	"socks5":      "socks",
-}
-
-// NormalizeProtocol returns the canonical protocol name for a given input,
-// or empty string if the protocol is not recognized.
-func NormalizeProtocol(input string) string {
-	if input == "" {
-		return ""
-	}
-	canonical, ok := protocolAliases[strings.ToLower(strings.TrimSpace(input))]
-	if !ok {
-		return ""
-	}
-	return canonical
-}
-
 // ------------------------------------------------------------------
 // Nodes
 // ------------------------------------------------------------------
 
 // NodeFilters holds query filters for listing nodes.
 type NodeFilters struct {
-	PlatformID     *string
-	SubscriptionID *string
-	Enabled        *bool
-	Region         *string
-	CircuitOpen    *bool
-	HasOutbound    *bool
-	EgressIP       *string
-	ProbedSince    *time.Time
-	TagKeyword     *string
-	Routable       *bool
-	Protocols      []string // canonical protocol names; empty/nil = no filter
+	PlatformID       *string
+	SubscriptionID   *string
+	Enabled          *bool
+	Region           *string
+	CircuitOpen      *bool
+	HasOutbound      *bool
+	EgressIP         *string
+	ProbedSince      *time.Time
+	TagKeyword       *string
+	Routable         *bool
+	Protocols        []string // include filter: canonical protocol names; empty/nil = no filter
+	ExcludeProtocols []string // exclude filter: canonical protocol names; empty/nil = no filter
 }
 
 // ListNodes returns nodes from the pool with optional filters.
@@ -261,32 +232,31 @@ func (s *ControlPlaneService) nodeEntryMatchesFilters(
 		}
 	}
 	// Protocol filter (cold path).
-	if len(filters.Protocols) > 0 {
-		matched := false
-		var rawMap map[string]any
-		if err := json.Unmarshal(entry.RawOptions, &rawMap); err != nil {
-			return false
-		}
-		typeVal, ok := rawMap["type"]
-		if !ok {
-			return false
-		}
-		typeStr, ok := typeVal.(string)
-		if !ok || typeStr == "" {
-			return false
-		}
-		canonical := NormalizeProtocol(typeStr)
+	if len(filters.Protocols) > 0 || len(filters.ExcludeProtocols) > 0 {
+		canonical := node.RawOptionsProtocol(entry.RawOptions)
 		if canonical == "" {
 			return false
 		}
-		for _, p := range filters.Protocols {
-			if p == canonical {
-				matched = true
-				break
+		// Include check.
+		if len(filters.Protocols) > 0 {
+			inInclude := false
+			for _, p := range filters.Protocols {
+				if p == canonical {
+					inInclude = true
+					break
+				}
+			}
+			if !inInclude {
+				return false
 			}
 		}
-		if !matched {
-			return false
+		// Exclude check (applied after include; exclusion wins).
+		if len(filters.ExcludeProtocols) > 0 {
+			for _, p := range filters.ExcludeProtocols {
+				if p == canonical {
+					return false
+				}
+			}
 		}
 	}
 	return true

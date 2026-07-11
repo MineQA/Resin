@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/service"
 )
 
@@ -101,36 +102,63 @@ func applySortOrder(order int, sortOrder string) int {
 }
 
 // parseProtocolQuery parses the "protocol" query parameter.
-// It accepts a comma-separated list of protocol names (case-insensitive).
+// It accepts comma-separated lists and/or repeated query values (case-insensitive).
 // Returns the canonical protocol names and a boolean indicating success.
 // On invalid protocol values, it writes an INVALID_ARGUMENT error and returns false.
 func parseProtocolQuery(w http.ResponseWriter, q url.Values) ([]string, bool) {
-	raw := q.Get("protocol")
-	if raw == "" {
+	rawValues, ok := q["protocol"]
+	if !ok || len(rawValues) == 0 {
 		return nil, true
 	}
-	parts := strings.Split(raw, ",")
-	canonical := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p == "" {
+	return parseProtocolValues(w, rawValues, "protocol")
+}
+
+// parseExcludeProtocolQuery parses the "exclude_protocol" (canonical) or
+// "protocol_exclude" (alias) query parameter.
+// It accepts comma-separated lists and/or repeated query values (case-insensitive).
+// Returns the canonical protocol names and a boolean indicating success.
+// On invalid protocol values, it writes an INVALID_ARGUMENT error and returns false.
+func parseExcludeProtocolQuery(w http.ResponseWriter, q url.Values) ([]string, bool) {
+	rawValues, ok := q["exclude_protocol"]
+	if !ok || len(rawValues) == 0 {
+		rawValues, ok = q["protocol_exclude"]
+	}
+	if !ok || len(rawValues) == 0 {
+		return nil, true
+	}
+	return parseProtocolValues(w, rawValues, "exclude_protocol")
+}
+
+// parseProtocolValues is the shared implementation for parsing protocol filter
+// query values. The paramName is used in error messages.
+func parseProtocolValues(w http.ResponseWriter, rawValues []string, paramName string) ([]string, bool) {
+	canonical := make([]string, 0, len(rawValues)*2)
+	for _, raw := range rawValues {
+		if raw == "" {
 			continue
 		}
-		c := service.NormalizeProtocol(p)
-		if c == "" {
-			writeInvalidArgument(w, "protocol: unsupported value '"+p+"'; supported: shadowsocks, ss, vmess, vmess1, trojan, vless, hysteria2, hy2, http, socks, socks5")
-			return nil, false
-		}
-		// Deduplicate.
-		seen := false
-		for _, existing := range canonical {
-			if existing == c {
-				seen = true
-				break
+		parts := strings.Split(raw, ",")
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
 			}
-		}
-		if !seen {
-			canonical = append(canonical, c)
+			c := node.NormalizeProtocol(p)
+			if c == "" {
+				writeInvalidArgument(w, fmt.Sprintf("%s: unsupported value '%s'; supported: %v", paramName, p, node.CanonicalProtocols))
+				return nil, false
+			}
+			// Deduplicate.
+			seen := false
+			for _, existing := range canonical {
+				if existing == c {
+					seen = true
+					break
+				}
+			}
+			if !seen {
+				canonical = append(canonical, c)
+			}
 		}
 	}
 	if len(canonical) == 0 {

@@ -29,8 +29,10 @@ type Platform struct {
 	Name string
 
 	// Filter configuration.
-	RegexFilters  []*regexp.Regexp
-	RegionFilters []string // lowercase ISO codes, supports negation "!xx"
+	RegexFilters           []*regexp.Regexp
+	RegionFilters          []string // lowercase ISO codes, supports negation "!xx"
+	ProtocolFilters        []string // canonical protocol names for include filtering
+	ExcludeProtocolFilters []string // canonical protocol names for exclude filtering
 
 	// Other config fields.
 	StickyTTLNs                      int64
@@ -129,13 +131,18 @@ func (p *Platform) evaluateNode(
 		return false
 	}
 
-	// 3. Egress IP must be known.
+	// 3. Protocol filter (include/exclude).
+	if !p.matchProtocolFilters(entry) {
+		return false
+	}
+
+	// 4. Egress IP must be known.
 	egressIP := entry.GetEgressIP()
 	if !egressIP.IsValid() {
 		return false
 	}
 
-	// 4. Region filter (when configured).
+	// 5. Region filter (when configured).
 	if len(p.RegionFilters) > 0 {
 		region := entry.GetRegion(geoLookup)
 		if !MatchRegionFilter(region, p.RegionFilters) {
@@ -143,11 +150,47 @@ func (p *Platform) evaluateNode(
 		}
 	}
 
-	// 5. Has at least one latency record.
+	// 6. Has at least one latency record.
 	if !entry.HasLatency() {
 		return false
 	}
 
+	return true
+}
+
+// matchProtocolFilters checks whether the node's protocol satisfies the
+// platform's include/exclude protocol filter rules.
+//
+//   - When ProtocolFilters is non-empty, the node's protocol must be in the set.
+//   - When ExcludeProtocolFilters is non-empty, the node's protocol must NOT be in the set.
+//   - Unknown/unparseable protocols fail any active protocol filter.
+func (p *Platform) matchProtocolFilters(entry *node.NodeEntry) bool {
+	if len(p.ProtocolFilters) == 0 && len(p.ExcludeProtocolFilters) == 0 {
+		return true
+	}
+	canonical := node.RawOptionsProtocol(entry.RawOptions)
+	if canonical == "" {
+		return false
+	}
+	if len(p.ProtocolFilters) > 0 {
+		found := false
+		for _, f := range p.ProtocolFilters {
+			if f == canonical {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	if len(p.ExcludeProtocolFilters) > 0 {
+		for _, f := range p.ExcludeProtocolFilters {
+			if f == canonical {
+				return false
+			}
+		}
+	}
 	return true
 }
 

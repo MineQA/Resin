@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { normalizeProtocolList } from "../../lib/protocolOptions";
 import { allocationPolicies, emptyAccountBehaviors, missActions } from "./constants";
 import { parseHeaderLines, parseLinesToList } from "./formParsers";
 import type { Platform, PlatformCreateInput, PlatformUpdateInput } from "./types";
@@ -33,6 +34,8 @@ export const platformFormSchema = z.object({
   sticky_ttl: z.string().optional(),
   regex_filters_text: z.string().optional(),
   region_filters_text: z.string().optional(),
+  protocol_filters: z.array(z.string()),
+  exclude_protocol_filters: z.array(z.string()),
   reverse_proxy_miss_action: z.enum(missActions),
   reverse_proxy_empty_account_behavior: z.enum(emptyAccountBehaviors),
   reverse_proxy_fixed_account_header: z.string().optional(),
@@ -58,6 +61,8 @@ export const defaultPlatformFormValues: PlatformFormValues = {
   sticky_ttl: "",
   regex_filters_text: "",
   region_filters_text: "",
+  protocol_filters: [],
+  exclude_protocol_filters: [],
   reverse_proxy_miss_action: "TREAT_AS_EMPTY",
   reverse_proxy_empty_account_behavior: "RANDOM",
   reverse_proxy_fixed_account_header: "Authorization",
@@ -74,6 +79,8 @@ export function platformToFormValues(platform: Platform): PlatformFormValues {
     sticky_ttl: platform.sticky_ttl,
     regex_filters_text: regexFilters.join("\n"),
     region_filters_text: regionFilters.join("\n"),
+    protocol_filters: normalizeProtocolList(platform.protocol_filters),
+    exclude_protocol_filters: normalizeProtocolList(platform.exclude_protocol_filters),
     reverse_proxy_miss_action: platform.reverse_proxy_miss_action,
     reverse_proxy_empty_account_behavior: platform.reverse_proxy_empty_account_behavior,
     reverse_proxy_fixed_account_header: platform.reverse_proxy_fixed_account_header,
@@ -87,6 +94,8 @@ function toPlatformPayloadBase(values: PlatformFormValues) {
     name: values.name.trim(),
     regex_filters: parseLinesToList(values.regex_filters_text),
     region_filters: parseLinesToList(values.region_filters_text, (value) => value.toLowerCase()),
+    protocol_filters: normalizeProtocolList(values.protocol_filters),
+    exclude_protocol_filters: normalizeProtocolList(values.exclude_protocol_filters),
     reverse_proxy_miss_action: values.reverse_proxy_miss_action,
     reverse_proxy_empty_account_behavior: values.reverse_proxy_empty_account_behavior,
     reverse_proxy_fixed_account_header: parseHeaderLines(values.reverse_proxy_fixed_account_header).join("\n"),

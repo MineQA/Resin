@@ -319,6 +319,16 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
   "每行一条，如 hk / us / !hk": "One per line, e.g. hk / us / !hk",
   "支持反选：以 ! 开头可排除地区（如 !hk）。可与正选混用，最终结果为“先正选再排除”。":
     "Supports exclusion: prefix a region with ! to exclude it, such as !hk. You can mix include and exclude rules; the final result is include first, then exclude.",
+  "协议过滤规则": "Protocol filters",
+  "排除协议过滤规则": "Exclude protocol filters",
+  "仅保留匹配所选协议的节点。留空表示不按协议限制。":
+    "Only nodes matching the selected protocols are kept. Empty means no protocol restriction.",
+  "留空表示不按协议限制；排除规则会移除匹配协议，与包含规则重叠时排除优先。":
+    "Empty means no protocol restriction. Exclude rules remove matching protocols and take precedence over include rules when they overlap.",
+  "排除所选协议的节点。留空表示不排除任何协议。":
+    "Exclude nodes of the selected protocols. Empty means no protocols are excluded.",
+  "留空表示不排除任何协议；与包含规则重叠时，排除规则优先。":
+    "Empty means no protocols are excluded. Exclude rules take precedence over include rules when they overlap.",
   "每行一个 header，例如 Authorization": "One header per line, e.g. Authorization",
   "输入地址查看命中规则和请求头。": "Enter URL to view matched rule and headers.",
   "命中前缀：": "Matched prefix:",
@@ -738,6 +748,8 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
   "等待": "Wait",
   "协议": "Protocol",
   "全部协议": "All Protocols",
+  "排除协议": "Exclude Protocol",
+  "覆盖列表筛选": "Override list filter",
 };
 
 export function translateDocumentTitle(locale: AppLocale): string {

@@ -615,6 +615,101 @@ func TestNodePoolExport_NoProtocolFilterByDefault(t *testing.T) {
 	}
 }
 
+func TestNodePoolExport_ExcludeProtocolFilter(t *testing.T) {
+	srv, cp, tokenValue := setupExportTest(t)
+	_ = cp
+
+	// Add vmess and trojan nodes.
+	sub := subscription.NewSubscription("22222222-2222-2222-2222-222222222222", "sub-b", "https://example.com/b", true, false)
+	cp.SubMgr.Register(sub)
+	addNodeForNodeListTest(t, cp, sub, `{"type":"vmess","server":"2.2.2.2","port":443,"uuid":"b"}`, "203.0.113.20")
+	addNodeForNodeListTest(t, cp, sub, `{"type":"trojan","server":"3.3.3.3","port":443,"password":"c"}`, "203.0.113.21")
+
+	// Exclude vmess => 2 outbounds (ss, trojan).
+	resp := doJSONRequest(t, srv, http.MethodGet,
+		"/api/v1/node-pool/export?format=sing-box&export_token="+tokenValue+"&exclude_protocol=vmess", nil, false)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("export exclude_protocol=vmess: got status %d, want 200, body=%s", resp.Code, resp.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	outbounds, ok := body["outbounds"].([]any)
+	if !ok {
+		t.Fatalf("export exclude_protocol=vmess: missing outbounds field")
+	}
+	if len(outbounds) != 2 {
+		t.Fatalf("export exclude_protocol=vmess: got %d outbounds, want 2", len(outbounds))
+	}
+}
+
+func TestNodePoolExport_ExcludeProtocolFilterInvalid(t *testing.T) {
+	srv, _, tokenValue := setupExportTest(t)
+
+	resp := doJSONRequest(t, srv, http.MethodGet,
+		"/api/v1/node-pool/export?format=sing-box&export_token="+tokenValue+"&exclude_protocol=badproto", nil, false)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("export exclude_protocol=badproto: got status %d, want 400, body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp, "INVALID_ARGUMENT")
+}
+
+func TestNodePoolExport_ProtocolFilterIncludeExclude(t *testing.T) {
+	srv, cp, tokenValue := setupExportTest(t)
+
+	// Add vmess and trojan nodes.
+	sub := subscription.NewSubscription("22222222-2222-2222-2222-222222222222", "sub-b", "https://example.com/b", true, false)
+	cp.SubMgr.Register(sub)
+	addNodeForNodeListTest(t, cp, sub, `{"type":"vmess","server":"2.2.2.2","port":443,"uuid":"b"}`, "203.0.113.20")
+	addNodeForNodeListTest(t, cp, sub, `{"type":"trojan","server":"3.3.3.3","port":443,"password":"c"}`, "203.0.113.21")
+
+	// Include ss,vmess,trojan but exclude vmess => 2 outbounds (ss, trojan).
+	resp := doJSONRequest(t, srv, http.MethodGet,
+		"/api/v1/node-pool/export?format=sing-box&export_token="+tokenValue+"&protocol=ss,vmess,trojan&exclude_protocol=vmess", nil, false)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("export include+exclude: got status %d, want 200, body=%s", resp.Code, resp.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	outbounds, ok := body["outbounds"].([]any)
+	if !ok {
+		t.Fatalf("export include+exclude: missing outbounds field")
+	}
+	if len(outbounds) != 2 {
+		t.Fatalf("export include+exclude: got %d outbounds, want 2", len(outbounds))
+	}
+}
+
+func TestNodePoolExport_ExcludeProtocolAlias(t *testing.T) {
+	srv, cp, tokenValue := setupExportTest(t)
+
+	// Add a vmess node.
+	sub := subscription.NewSubscription("22222222-2222-2222-2222-222222222222", "sub-b", "https://example.com/b", true, false)
+	cp.SubMgr.Register(sub)
+	addNodeForNodeListTest(t, cp, sub, `{"type":"vmess","server":"2.2.2.2","port":443,"uuid":"b"}`, "203.0.113.20")
+
+	// Use protocol_exclude alias to exclude ss => 1 outbound (vmess).
+	resp := doJSONRequest(t, srv, http.MethodGet,
+		"/api/v1/node-pool/export?format=sing-box&export_token="+tokenValue+"&protocol_exclude=ss", nil, false)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("export protocol_exclude=ss: got status %d, want 200, body=%s", resp.Code, resp.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	outbounds, ok := body["outbounds"].([]any)
+	if !ok {
+		t.Fatalf("export protocol_exclude=ss: missing outbounds field")
+	}
+	if len(outbounds) != 1 {
+		t.Fatalf("export protocol_exclude=ss: got %d outbounds, want 1", len(outbounds))
+	}
+}
+
 // --- Helpers ---
 
 func setupExportTest(t *testing.T) (*Server, *service.ControlPlaneService, string) {

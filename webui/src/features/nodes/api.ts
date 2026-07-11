@@ -88,6 +88,7 @@ export function buildNodeListSearchParams(filters: NodeListQuery): URLSearchPara
   appendIfNotEmpty("egress_ip", filters.egress_ip);
   appendIfNotEmpty("probed_since", filters.probed_since);
   appendIfNotEmpty("protocol", filters.protocol);
+  appendIfNotEmpty("exclude_protocol", filters.exclude_protocol);
 
   if (filters.circuit_open !== undefined) {
     query.set("circuit_open", String(filters.circuit_open));

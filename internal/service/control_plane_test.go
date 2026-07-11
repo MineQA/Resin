@@ -884,6 +884,8 @@ func TestDeletePlatform_DoesNotDecodeCorruptPersistedFiltersJSON(t *testing.T) {
 		platformRow.Name,
 		nil,
 		nil,
+		nil,
+		nil,
 		platformRow.StickyTTLNs,
 		platformRow.ReverseProxyMissAction,
 		string(platform.ReverseProxyEmptyAccountBehaviorAccountHeaderRule),
@@ -945,6 +947,8 @@ func TestResetPlatformToDefault_SupportsBuiltInDefaultPlatform(t *testing.T) {
 	pool.RegisterPlatform(platform.NewConfiguredPlatform(
 		defaultRow.ID,
 		defaultRow.Name,
+		nil,
+		nil,
 		nil,
 		nil,
 		defaultRow.StickyTTLNs,
@@ -1087,6 +1091,8 @@ func TestResetPlatformToDefault_DoesNotDecodeCorruptPersistedFiltersJSON(t *test
 	pool.RegisterPlatform(platform.NewConfiguredPlatform(
 		platformRow.ID,
 		platformRow.Name,
+		nil,
+		nil,
 		nil,
 		nil,
 		platformRow.StickyTTLNs,
@@ -1253,5 +1259,251 @@ func TestListAccountHeaderRules_FailsFastOnCorruptPersistedHeadersColumn(t *test
 	}
 	if serviceErr.Err == nil || !strings.Contains(serviceErr.Err.Error(), "decode account header rule") {
 		t.Fatalf("unexpected wrapped service error: %v", serviceErr.Err)
+	}
+}
+
+// --- Platform CRUD protocol filter tests ---
+
+func TestCreatePlatform_WithProtocolFilters(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	cp := &ControlPlaneService{
+		Engine: engine,
+		Pool:   pool,
+		SubMgr: subMgr,
+		EnvCfg: &config.EnvConfig{
+			DefaultPlatformStickyTTL:              30 * time.Minute,
+			DefaultPlatformRegexFilters:           []string{},
+			DefaultPlatformRegionFilters:          []string{},
+			DefaultPlatformReverseProxyMissAction: "TREAT_AS_EMPTY",
+			DefaultPlatformAllocationPolicy:       "BALANCED",
+		},
+	}
+
+	name := "proto-cfg"
+	created, err := cp.CreatePlatform(CreatePlatformRequest{
+		Name:               &name,
+		ProtocolFilters:    []string{"ss", "vmess"},       // aliases should be canonicalized
+		ExcludeProtocolFilters: []string{"hysteria2"},
+	})
+	if err != nil {
+		t.Fatalf("CreatePlatform: %v", err)
+	}
+
+	// Response should have canonical values.
+	if !reflect.DeepEqual(created.ProtocolFilters, []string{"shadowsocks", "vmess"}) {
+		t.Fatalf("response protocol_filters = %v, want [shadowsocks vmess]", created.ProtocolFilters)
+	}
+	if !reflect.DeepEqual(created.ExcludeProtocolFilters, []string{"hysteria2"}) {
+		t.Fatalf("response exclude_protocol_filters = %v, want [hysteria2]", created.ExcludeProtocolFilters)
+	}
+
+	// Persisted model should also be canonical.
+	stored, err := engine.GetPlatform(created.ID)
+	if err != nil {
+		t.Fatalf("GetPlatform: %v", err)
+	}
+	if !reflect.DeepEqual(stored.ProtocolFilters, []string{"shadowsocks", "vmess"}) {
+		t.Fatalf("stored protocol_filters = %v, want [shadowsocks vmess]", stored.ProtocolFilters)
+	}
+	if !reflect.DeepEqual(stored.ExcludeProtocolFilters, []string{"hysteria2"}) {
+		t.Fatalf("stored exclude_protocol_filters = %v, want [hysteria2]", stored.ExcludeProtocolFilters)
+	}
+
+	// Runtime platform should also be canonical.
+	plat, ok := pool.GetPlatform(created.ID)
+	if !ok {
+		t.Fatalf("platform %s not found in pool", created.ID)
+	}
+	if !reflect.DeepEqual(plat.ProtocolFilters, []string{"shadowsocks", "vmess"}) {
+		t.Fatalf("runtime protocol_filters = %v, want [shadowsocks vmess]", plat.ProtocolFilters)
+	}
+	if !reflect.DeepEqual(plat.ExcludeProtocolFilters, []string{"hysteria2"}) {
+		t.Fatalf("runtime exclude_protocol_filters = %v, want [hysteria2]", plat.ExcludeProtocolFilters)
+	}
+}
+
+func TestCreatePlatform_ProtocolFiltersDedup(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	cp := &ControlPlaneService{
+		Engine: engine,
+		Pool:   pool,
+		SubMgr: subMgr,
+		EnvCfg: &config.EnvConfig{
+			DefaultPlatformStickyTTL:              30 * time.Minute,
+			DefaultPlatformRegexFilters:           []string{},
+			DefaultPlatformRegionFilters:          []string{},
+			DefaultPlatformReverseProxyMissAction: "TREAT_AS_EMPTY",
+			DefaultPlatformAllocationPolicy:       "BALANCED",
+		},
+	}
+
+	name := "proto-dedup"
+	created, err := cp.CreatePlatform(CreatePlatformRequest{
+		Name:            &name,
+		ProtocolFilters: []string{"ss", "shadowsocks", "SS"}, // all normalise to shadowsocks
+	})
+	if err != nil {
+		t.Fatalf("CreatePlatform: %v", err)
+	}
+
+	if len(created.ProtocolFilters) != 1 || created.ProtocolFilters[0] != "shadowsocks" {
+		t.Fatalf("expected deduplicated [shadowsocks], got %v", created.ProtocolFilters)
+	}
+}
+
+func TestUpdatePlatform_PatchProtocolFiltersCanonicalizes(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	cp := &ControlPlaneService{
+		Engine: engine,
+		Pool:   pool,
+		SubMgr: subMgr,
+		EnvCfg: &config.EnvConfig{
+			DefaultPlatformStickyTTL:              30 * time.Minute,
+			DefaultPlatformRegexFilters:           []string{},
+			DefaultPlatformRegionFilters:          []string{},
+			DefaultPlatformReverseProxyMissAction: "TREAT_AS_EMPTY",
+			DefaultPlatformAllocationPolicy:       "BALANCED",
+		},
+	}
+
+	name := "patch-proto"
+	created, err := cp.CreatePlatform(CreatePlatformRequest{Name: &name})
+	if err != nil {
+		t.Fatalf("CreatePlatform: %v", err)
+	}
+
+	// PATCH protocol_filters with aliases.
+	updated, err := cp.UpdatePlatform(created.ID, []byte(`{"protocol_filters":["hy2","ss"]}`))
+	if err != nil {
+		t.Fatalf("UpdatePlatform: %v", err)
+	}
+
+	if !reflect.DeepEqual(updated.ProtocolFilters, []string{"hysteria2", "shadowsocks"}) {
+		t.Fatalf("patched protocol_filters = %v, want [hysteria2 shadowsocks]", updated.ProtocolFilters)
+	}
+
+	// PATCH exclude_protocol_filters with alias.
+	updated2, err := cp.UpdatePlatform(created.ID, []byte(`{"exclude_protocol_filters":["vmess1"]}`))
+	if err != nil {
+		t.Fatalf("UpdatePlatform (exclude): %v", err)
+	}
+	if !reflect.DeepEqual(updated2.ExcludeProtocolFilters, []string{"vmess"}) {
+		t.Fatalf("patched exclude_protocol_filters = %v, want [vmess]", updated2.ExcludeProtocolFilters)
+	}
+
+	// PATCH protocol_filters to empty (clear).
+	cleared, err := cp.UpdatePlatform(created.ID, []byte(`{"protocol_filters":[]}`))
+	if err != nil {
+		t.Fatalf("UpdatePlatform (clear): %v", err)
+	}
+	if len(cleared.ProtocolFilters) != 0 {
+		t.Fatalf("expected empty protocol_filters, got %v", cleared.ProtocolFilters)
+	}
+}
+
+func TestCreatePlatform_RejectsInvalidProtocolFilter(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	cp := &ControlPlaneService{
+		Engine: engine,
+		Pool:   pool,
+		SubMgr: subMgr,
+		EnvCfg: &config.EnvConfig{
+			DefaultPlatformStickyTTL:              30 * time.Minute,
+			DefaultPlatformRegexFilters:           []string{},
+			DefaultPlatformRegionFilters:          []string{},
+			DefaultPlatformReverseProxyMissAction: "TREAT_AS_EMPTY",
+			DefaultPlatformAllocationPolicy:       "BALANCED",
+		},
+	}
+
+	name := "bad-proto"
+	_, err = cp.CreatePlatform(CreatePlatformRequest{
+		Name:            &name,
+		ProtocolFilters: []string{"bogus_protocol"},
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid protocol filter")
+	}
+	var svcErr *ServiceError
+	if !errors.As(err, &svcErr) {
+		t.Fatalf("expected ServiceError, got %T", err)
+	}
+	if svcErr.Code != "INVALID_ARGUMENT" {
+		t.Fatalf("expected INVALID_ARGUMENT, got %s", svcErr.Code)
+	}
+	if !strings.Contains(svcErr.Message, "protocol_filters[0]") {
+		t.Fatalf("error message = %q, expected to mention protocol_filters[0]", svcErr.Message)
 	}
 }

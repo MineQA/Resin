@@ -485,6 +485,144 @@ func TestListNodes_EnabledFilter(t *testing.T) {
 	}
 }
 
+func TestListNodes_ProtocolIncludeFilter(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	pool := newNodeListTestPool(subMgr)
+
+	sub := subscription.NewSubscription("sub-a", "sub-a", "https://example.com/a", true, false)
+	subMgr.Register(sub)
+
+	ssHash := addRoutableNodeForSubscription(
+		t, pool, sub,
+		[]byte(`{"type":"ss","server":"1.1.1.1","port":443}`),
+		"203.0.113.10",
+	)
+	addRoutableNodeForSubscription(
+		t, pool, sub,
+		[]byte(`{"type":"vmess","server":"2.2.2.2","port":443,"uuid":"a"}`),
+		"203.0.113.11",
+	)
+
+	cp := &ControlPlaneService{Pool: pool, SubMgr: subMgr, GeoIP: &geoip.Service{}}
+
+	// Include ss only → 1 node.
+	nodes, err := cp.ListNodes(NodeFilters{Protocols: []string{"shadowsocks"}})
+	if err != nil {
+		t.Fatalf("ListNodes(protocols=shadowsocks): %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].NodeHash != ssHash.Hex() {
+		t.Fatalf("protocols=shadowsocks: got %d nodes, want 1 (hash=%s)", len(nodes), ssHash.Hex())
+	}
+}
+
+func TestListNodes_ProtocolExcludeFilter(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	pool := newNodeListTestPool(subMgr)
+
+	sub := subscription.NewSubscription("sub-a", "sub-a", "https://example.com/a", true, false)
+	subMgr.Register(sub)
+
+	ssHash := addRoutableNodeForSubscription(
+		t, pool, sub,
+		[]byte(`{"type":"ss","server":"1.1.1.1","port":443}`),
+		"203.0.113.10",
+	)
+	vmessHash := addRoutableNodeForSubscription(
+		t, pool, sub,
+		[]byte(`{"type":"vmess","server":"2.2.2.2","port":443,"uuid":"a"}`),
+		"203.0.113.11",
+	)
+
+	cp := &ControlPlaneService{Pool: pool, SubMgr: subMgr, GeoIP: &geoip.Service{}}
+
+	// Exclude ss → 1 node (vmess).
+	nodes, err := cp.ListNodes(NodeFilters{ExcludeProtocols: []string{"shadowsocks"}})
+	if err != nil {
+		t.Fatalf("ListNodes(exclude=shadowsocks): %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].NodeHash != vmessHash.Hex() {
+		t.Fatalf("exclude=shadowsocks: got %d nodes, want 1 (hash=%s)", len(nodes), vmessHash.Hex())
+	}
+
+	// Exclude both → 0 nodes.
+	nodes, err = cp.ListNodes(NodeFilters{ExcludeProtocols: []string{"shadowsocks", "vmess"}})
+	if err != nil {
+		t.Fatalf("ListNodes(exclude=both): %v", err)
+	}
+	if len(nodes) != 0 {
+		t.Fatalf("exclude=both: got %d nodes, want 0", len(nodes))
+	}
+
+	// ss hash is unused beyond marking; keep compiler happy.
+	_ = ssHash
+}
+
+func TestListNodes_ProtocolIncludeExcludeExclusionWins(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	pool := newNodeListTestPool(subMgr)
+
+	sub := subscription.NewSubscription("sub-a", "sub-a", "https://example.com/a", true, false)
+	subMgr.Register(sub)
+
+	addRoutableNodeForSubscription(
+		t, pool, sub,
+		[]byte(`{"type":"ss","server":"1.1.1.1","port":443}`),
+		"203.0.113.10",
+	)
+	addRoutableNodeForSubscription(
+		t, pool, sub,
+		[]byte(`{"type":"vmess","server":"2.2.2.2","port":443,"uuid":"a"}`),
+		"203.0.113.11",
+	)
+
+	cp := &ControlPlaneService{Pool: pool, SubMgr: subMgr, GeoIP: &geoip.Service{}}
+
+	// Include both but exclude ss → exclusion wins → 1 node (vmess).
+	nodes, err := cp.ListNodes(NodeFilters{
+		Protocols:        []string{"shadowsocks", "vmess"},
+		ExcludeProtocols: []string{"shadowsocks"},
+	})
+	if err != nil {
+		t.Fatalf("ListNodes(include+exclude): %v", err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("include+exclude: got %d nodes, want 1", len(nodes))
+	}
+}
+
+func TestListNodes_ProtocolFilterMissingTypeExcluded(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	pool := newNodeListTestPool(subMgr)
+
+	sub := subscription.NewSubscription("sub-a", "sub-a", "https://example.com/a", true, false)
+	subMgr.Register(sub)
+
+	// Node with no type field.
+	hashNoType := node.HashFromRawOptions([]byte(`{"server":"1.1.1.1","port":443}`))
+	pool.AddNodeFromSub(hashNoType, []byte(`{"server":"1.1.1.1","port":443}`), sub.ID)
+	sub.ManagedNodes().StoreNode(hashNoType, subscription.ManagedNode{Tags: []string{"no-type"}})
+
+	cp := &ControlPlaneService{Pool: pool, SubMgr: subMgr, GeoIP: &geoip.Service{}}
+
+	// Include filter active → no-type node excluded.
+	nodes, err := cp.ListNodes(NodeFilters{Protocols: []string{"shadowsocks"}})
+	if err != nil {
+		t.Fatalf("ListNodes(protocols=ss) with missing type: %v", err)
+	}
+	if len(nodes) != 0 {
+		t.Fatalf("missing-type with include filter: got %d nodes, want 0", len(nodes))
+	}
+
+	// Exclude filter active → no-type node excluded (conservative).
+	nodes, err = cp.ListNodes(NodeFilters{ExcludeProtocols: []string{"vmess"}})
+	if err != nil {
+		t.Fatalf("ListNodes(exclude=vmess) with missing type: %v", err)
+	}
+	if len(nodes) != 0 {
+		t.Fatalf("missing-type with exclude filter: got %d nodes, want 0", len(nodes))
+	}
+}
+
 func TestProbeEgress_ReturnsRegion(t *testing.T) {
 	subMgr := topology.NewSubscriptionManager()
 	pool := newNodeListTestPool(subMgr)
