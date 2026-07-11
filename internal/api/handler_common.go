@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/Resinat/Resin/internal/node"
-	"github.com/Resinat/Resin/internal/service"
 )
 
 func parsePaginationOrWriteInvalid(w http.ResponseWriter, r *http.Request) (Pagination, bool) {
