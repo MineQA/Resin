@@ -114,11 +114,24 @@ func NewServerWithAddress(
 		authed.Handle("GET /api/v1/nodes/{hash}", HandleGetNode(cp))
 		authed.Handle("POST /api/v1/nodes/{hash}/actions/probe-egress", HandleProbeEgress(cp))
 		authed.Handle("POST /api/v1/nodes/{hash}/actions/probe-latency", HandleProbeLatency(cp))
+		authed.Handle("POST /api/v1/nodes/{hash}/actions/proxy-check", HandleNodeActionProxyCheck(cp))
+
+		// Proxy check batch tasks.
+		authed.Handle("POST /api/v1/proxy-check/tasks", HandleCreateProxyCheckTask(cp))
+		authed.Handle("GET /api/v1/proxy-check/tasks/{id}", HandleGetProxyCheckTask(cp))
 
 		// Export tokens (admin management).
 		authed.Handle("GET /api/v1/export-tokens", HandleListExportTokens(cp))
 		authed.Handle("POST /api/v1/export-tokens", HandleCreateExportToken(cp))
 		authed.Handle("DELETE /api/v1/export-tokens/{id}", HandleDeleteExportToken(cp))
+
+		// Proxy sources (built-in safe list).
+		authed.Handle("GET /api/v1/proxy-sources", HandleListProxySources())
+		authed.Handle("POST /api/v1/proxy-sources/fetch", HandleFetchProxySources(cp))
+
+	// Proxy check import (caller-provided proxies, no proxy checks).
+		// Requires confirm_checked=true in request body.
+		authed.Handle("POST /api/v1/proxy-check/import", HandleProxyCheckImport(cp))
 
 		// GeoIP.
 		authed.Handle("GET /api/v1/geoip/status", HandleGeoIPStatus(cp))

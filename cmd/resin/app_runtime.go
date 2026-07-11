@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -22,6 +24,7 @@ import (
 	"github.com/Resinat/Resin/internal/metrics"
 	"github.com/Resinat/Resin/internal/netutil"
 	"github.com/Resinat/Resin/internal/node"
+	"github.com/Resinat/Resin/internal/probe"
 	"github.com/Resinat/Resin/internal/proxy"
 	"github.com/Resinat/Resin/internal/requestlog"
 	"github.com/Resinat/Resin/internal/routing"
@@ -391,6 +394,34 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 		ProbeMgr:       a.topoRuntime.probeMgr,
 		GeoIP:          a.geoSvc,
 		MatcherRuntime: a.accountMatcher,
+		RawProxyChecker: func(raw json.RawMessage, profile probe.TargetProfile, opts probe.ProxyCheckOptions) (*probe.ProxyScore, error) {
+			ob, err := a.topoRuntime.singboxBuilder.Build(raw)
+			if err != nil {
+				return nil, fmt.Errorf("build outbound: %w", err)
+			}
+			defer func() {
+				if c, ok := ob.(io.Closer); ok {
+					_ = c.Close()
+				}
+			}()
+
+			fetcher := func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+				timeout := a.envCfg.ProbeTimeout
+				if timeout <= 0 {
+					timeout = 12 * time.Second
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), timeout)
+				defer cancel()
+				return netutil.HTTPGetViaOutbound(ctx, ob, url, netutil.OutboundHTTPOptions{
+					RequireStatusOK: false,
+					OnConnLifecycle: func(op netutil.ConnLifecycleOp) {
+						a.onProbeConnectionLifecycle(op)
+					},
+				})
+			}
+
+			return probe.CheckProxy(fetcher, node.Zero, profile, opts)
+		},
 	}
 
 	apiSrv := api.NewServerWithAddress(

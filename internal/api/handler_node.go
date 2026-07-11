@@ -152,6 +152,12 @@ func HandleListNodes(cp *service.ControlPlaneService) http.HandlerFunc {
 			filters.ProbedSince = &t
 		}
 
+		if protocols, ok := parseProtocolQuery(w, q); !ok {
+			return
+		} else if protocols != nil {
+			filters.Protocols = protocols
+		}
+
 		nodes, err := cp.ListNodes(filters)
 		if err != nil {
 			writeServiceError(w, err)

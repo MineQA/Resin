@@ -38,6 +38,7 @@ type NodeExportSettings = {
   enabled: ExportBooleanMode;
   hasOutbound: ExportBooleanMode;
   tagKeyword: string;
+  protocol: string;
 };
 
 type NodeListSettings = {
@@ -54,6 +55,7 @@ type NodeFilterDraft = {
   egress_ip: string;
   status: NodeStatusFilter;
   routable: NodeRoutableFilter;
+  protocol: string;
 };
 
 const defaultFilterDraft: NodeFilterDraft = {
@@ -64,6 +66,7 @@ const defaultFilterDraft: NodeFilterDraft = {
   egress_ip: "",
   status: "all",
   routable: "all",
+  protocol: "",
 };
 
 const NODE_LIST_SETTINGS_KEY = "resin_node_list_settings";
@@ -74,6 +77,7 @@ const DEFAULT_EXPORT_SETTINGS: NodeExportSettings = {
   enabled: "any",
   hasOutbound: "any",
   tagKeyword: "",
+  protocol: "",
 };
 const DEFAULT_NODE_LIST_SETTINGS: NodeListSettings = {
   pageSize: 200,
@@ -246,9 +250,9 @@ function draftFromQuery(search: string, settings: NodeListSettings = DEFAULT_NOD
     egress_ip: trimQueryValue(params, "egress_ip"),
     status: statusFromQuery(params),
     routable,
+    protocol: trimQueryValue(params, "protocol").toLowerCase(),
   };
 }
-
 
 
 function draftToActiveFilters(draft: NodeFilterDraft): NodeListFilters {
@@ -289,6 +293,7 @@ function draftToActiveFilters(draft: NodeFilterDraft): NodeListFilters {
     circuit_open,
     has_outbound,
     routable: draft.routable === "all" ? undefined : draft.routable === "routable",
+    protocol: draft.protocol || undefined,
   };
 }
 
@@ -372,6 +377,35 @@ function regionToFlag(region: string | undefined): string {
   const flag = String.fromCodePoint(...[...code].map((c) => c.charCodeAt(0) + 127397));
   const name = getRegionName(code);
   return name ? `${flag} ${code} (${name})` : `${flag} ${code}`;
+}
+
+function formatNodeProtocol(protocol?: string): string {
+  const value = protocol?.trim();
+  if (!value) {
+    return "-";
+  }
+  switch (value.toLowerCase()) {
+    case "ss":
+    case "shadowsocks":
+      return "Shadowsocks";
+    case "vmess":
+    case "vmess1":
+      return "VMess";
+    case "trojan":
+      return "Trojan";
+    case "vless":
+      return "VLess";
+    case "hysteria2":
+    case "hy2":
+      return "Hysteria2";
+    case "http":
+      return "HTTP";
+    case "socks":
+    case "socks5":
+      return "SOCKS";
+    default:
+      return value;
+  }
 }
 
 export function NodesPage() {
@@ -698,6 +732,11 @@ export function NodesPage() {
 
     applyExportBooleanFilter(filters, "enabled", exportSettings.enabled);
     applyExportBooleanFilter(filters, "has_outbound", exportSettings.hasOutbound);
+    if (exportSettings.protocol === "__all") {
+      delete filters.protocol;
+    } else if (exportSettings.protocol) {
+      filters.protocol = exportSettings.protocol;
+    }
     return filters;
   };
 
@@ -829,6 +868,13 @@ export function NodesPage() {
             {val}
           </div>
         );
+      },
+    }),
+    col.accessor("protocol", {
+      header: t("协议"),
+      cell: (info) => {
+        const label = formatNodeProtocol(info.getValue());
+        return label === "-" ? "-" : <Badge variant="info">{label}</Badge>;
       },
     }),
     col.display({
@@ -1073,6 +1119,27 @@ export function NodesPage() {
               </Select>
             </div>
 
+            <div style={NODE_FILTER_ITEM_STYLE}>
+              <label htmlFor="node-protocol" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                {t("协议")}
+              </label>
+              <Select
+                id="node-protocol"
+                value={draftFilters.protocol}
+                onChange={(event) => handleFilterChange("protocol", event.target.value)}
+                style={NODE_FILTER_CONTROL_STYLE}
+              >
+                <option value="">{t("全部协议")}</option>
+                <option value="shadowsocks">Shadowsocks</option>
+                <option value="vmess">VMess</option>
+                <option value="trojan">Trojan</option>
+                <option value="vless">VLess</option>
+                <option value="hysteria2">Hysteria2</option>
+                <option value="http">HTTP</option>
+                <option value="socks">SOCKS</option>
+              </Select>
+            </div>
+
             <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.125rem", marginLeft: "auto" }}>
               <Button size="sm" variant="secondary" onClick={() => setSettingsOpen((open) => !open)} style={{ minHeight: "32px", height: "32px", padding: "0 0.75rem", display: "flex", alignItems: "center", gap: "0.25rem" }}>
                 <Settings size={16} />
@@ -1210,6 +1277,27 @@ export function NodesPage() {
                       <option value="false">{t("仅缺配置")}</option>
                     </Select>
                   </div>
+                  <div style={{ ...NODE_FILTER_ITEM_STYLE, flex: "1 1 130px" }}>
+                    <label htmlFor="node-export-protocol" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                      {t("协议")}
+                    </label>
+                    <Select
+                      id="node-export-protocol"
+                      value={exportSettings.protocol}
+                      onChange={(event) => updateExportSettings({ protocol: event.target.value })}
+                      style={NODE_FILTER_CONTROL_STYLE}
+                    >
+                      <option value="">{t("跟随列表")}</option>
+                      <option value="__all">{t("全部协议")}</option>
+                      <option value="shadowsocks">Shadowsocks</option>
+                      <option value="vmess">VMess</option>
+                      <option value="trojan">Trojan</option>
+                      <option value="vless">VLess</option>
+                      <option value="hysteria2">Hysteria2</option>
+                      <option value="http">HTTP</option>
+                      <option value="socks">SOCKS</option>
+                    </Select>
+                  </div>
                   <div style={{ ...NODE_FILTER_ITEM_STYLE, flex: "1 1 180px" }}>
                     <label htmlFor="node-export-tag" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
                       {t("导出标签关键词")}
@@ -1225,7 +1313,7 @@ export function NodesPage() {
                 </div>
                 <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
                   {t(
-                    "导出默认跟随当前列表筛选；上方选项可覆盖可路由、启用状态、Outbound 和标签条件。转换器建议使用 URL query token。",
+                    "导出默认跟随当前列表筛选；上方选项可覆盖可路由、启用状态、Outbound、协议和标签条件。转换器建议使用 URL query token。",
                   )}
                 </span>
               </div>
@@ -1346,6 +1434,10 @@ export function NodesPage() {
                         );
                       })()}
                     </div>
+                  </div>
+                  <div>
+                    <span>{t("协议")}</span>
+                    <p>{formatNodeProtocol(detailNode.protocol)}</p>
                   </div>
                   <div>
                     <span>{t("出口 / 区域")}</span>

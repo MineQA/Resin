@@ -213,6 +213,9 @@ func TestHandleListNodes_IncludesReferenceLatencyMs(t *testing.T) {
 	if item["reference_latency_ms"] != float64(60) {
 		t.Fatalf("reference_latency_ms: got %v, want 60", item["reference_latency_ms"])
 	}
+	if item["protocol"] != "ss" {
+		t.Fatalf("protocol: got %v, want ss", item["protocol"])
+	}
 }
 
 func TestHandleProbeEgress_ReturnsRegion(t *testing.T) {
@@ -452,4 +455,135 @@ func TestHandleListNodes_NodePoolAliasRouteUnauthorized(t *testing.T) {
 		t.Fatalf("alias route unauthenticated status: got %d, want %d, body=%s", rec.Code, http.StatusUnauthorized, rec.Body.String())
 	}
 	assertErrorCode(t, rec, "UNAUTHORIZED")
+}
+
+func TestHandleListNodes_ProtocolFilter(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	addNodeForNodeListTest(t, cp, sub, `{"type":"ss","server":"1.1.1.1","port":443}`, "203.0.113.10")
+	addNodeForNodeListTest(t, cp, sub, `{"type":"vmess","server":"2.2.2.2","port":443,"uuid":"a"}`, "203.0.113.11")
+	addNodeForNodeListTest(t, cp, sub, `{"type":"trojan","server":"3.3.3.3","port":443,"password":"x"}`, "203.0.113.12")
+
+	// Single protocol filter: ss should match 1 node.
+	rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?protocol=ss", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("protocol=ss status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := decodeJSONMap(t, rec)
+	if body["total"] != float64(1) {
+		t.Fatalf("protocol=ss total: got %v, want 1", body["total"])
+	}
+
+	// Single protocol filter with alias: shadowsocks should also match the ss node.
+	rec = doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?protocol=shadowsocks", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("protocol=shadowsocks status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body = decodeJSONMap(t, rec)
+	if body["total"] != float64(1) {
+		t.Fatalf("protocol=shadowsocks total: got %v, want 1", body["total"])
+	}
+}
+
+func TestHandleListNodes_ProtocolFilterMulti(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	addNodeForNodeListTest(t, cp, sub, `{"type":"ss","server":"1.1.1.1","port":443}`, "203.0.113.10")
+	addNodeForNodeListTest(t, cp, sub, `{"type":"vmess","server":"2.2.2.2","port":443,"uuid":"a"}`, "203.0.113.11")
+	addNodeForNodeListTest(t, cp, sub, `{"type":"trojan","server":"3.3.3.3","port":443,"password":"x"}`, "203.0.113.12")
+
+	// Multi-protocol filter: ss,vmess should match 2 nodes.
+	rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?protocol=ss,vmess", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("protocol=ss,vmess status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := decodeJSONMap(t, rec)
+	if body["total"] != float64(2) {
+		t.Fatalf("protocol=ss,vmess total: got %v, want 2", body["total"])
+	}
+}
+
+func TestHandleListNodes_ProtocolFilterCaseInsensitive(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	addNodeForNodeListTest(t, cp, sub, `{"type":"ss","server":"1.1.1.1","port":443}`, "203.0.113.10")
+
+	// Uppercase protocol param.
+	rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?protocol=SS", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("protocol=SS status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := decodeJSONMap(t, rec)
+	if body["total"] != float64(1) {
+		t.Fatalf("protocol=SS total: got %v, want 1", body["total"])
+	}
+
+	// Mixed case canonical.
+	rec = doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?protocol=Shadowsocks", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("protocol=Shadowsocks status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body = decodeJSONMap(t, rec)
+	if body["total"] != float64(1) {
+		t.Fatalf("protocol=Shadowsocks total: got %v, want 1", body["total"])
+	}
+}
+
+func TestHandleListNodes_ProtocolFilterEmpty(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	addNodeForNodeListTest(t, cp, sub, `{"type":"ss","server":"1.1.1.1","port":443}`, "203.0.113.10")
+	addNodeForNodeListTest(t, cp, sub, `{"type":"vmess","server":"2.2.2.2","port":443,"uuid":"a"}`, "203.0.113.11")
+
+	// No protocol param -> no filter, all nodes returned.
+	rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("no protocol filter status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := decodeJSONMap(t, rec)
+	if body["total"] != float64(2) {
+		t.Fatalf("no protocol filter total: got %v, want 2", body["total"])
+	}
+}
+
+func TestHandleListNodes_ProtocolFilterMissingType(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	// Node with invalid JSON (missing type field effectively).
+	addNodeForNodeListTest(t, cp, sub, `{"server":"1.1.1.1","port":443}`, "203.0.113.10")
+
+	// protocol=ss should not match the node without type.
+	rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?protocol=ss", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("protocol=ss missing type status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := decodeJSONMap(t, rec)
+	if body["total"] != float64(0) {
+		t.Fatalf("protocol=ss missing type total: got %v, want 0", body["total"])
+	}
+}
+
+func TestHandleListNodes_ProtocolFilterInvalid(t *testing.T) {
+	srv, _, _ := newControlPlaneTestServer(t)
+
+	rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?protocol=invalidproto", nil, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("protocol=invalid status: got %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	assertErrorCode(t, rec, "INVALID_ARGUMENT")
 }

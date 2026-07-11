@@ -824,3 +824,27 @@ func (m *ProbeManager) currentLatencyTestURL() string {
 	}
 	return testURL
 }
+
+// CheckProxySync validates node state (existence, outbound readiness, manager
+// liveness) then delegates to the package-level CheckProxy function for the
+// actual proxy check. It is synchronous and does not enqueue or schedule.
+func (m *ProbeManager) CheckProxySync(hash node.Hash, profile TargetProfile, opts ProxyCheckOptions) (*ProxyScore, error) {
+	if m.fetcher == nil {
+		return nil, fmt.Errorf("no probe fetcher configured")
+	}
+	select {
+	case <-m.stopCh:
+		return nil, fmt.Errorf("probe manager stopped")
+	default:
+	}
+
+	entry, ok := m.pool.GetEntry(hash)
+	if !ok {
+		return nil, fmt.Errorf("node not found")
+	}
+	if entry.Outbound.Load() == nil {
+		return nil, fmt.Errorf("node outbound not ready")
+	}
+
+	return CheckProxy(m.fetcher, hash, profile, opts)
+}

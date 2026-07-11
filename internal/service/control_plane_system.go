@@ -61,8 +61,16 @@ type ControlPlaneService struct {
 	RuntimeCfg     *atomic.Pointer[config.RuntimeConfig]
 	EnvCfg         *config.EnvConfig
 
-	configMu      sync.Mutex
-	configVersion int
+	configMu              sync.Mutex
+	configVersion         int
+	proxyCheckTaskMgr     *ProxyCheckTaskManager // lazy init for batch tasks
+	proxyCheckTaskMgrOnce sync.Once
+
+	// RawProxyChecker executes proxy checks for ad-hoc (non-pool) outbound
+	// configurations. Must be set for raw proxy batch tasks; may be nil
+	// otherwise. The closure is wired in cmd/resin/app_runtime.go and is
+	// responsible for building/using/closing the outbound.
+	RawProxyChecker RawProxyChecker
 }
 
 // ------------------------------------------------------------------

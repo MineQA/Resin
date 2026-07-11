@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -9,6 +10,35 @@ import (
 	"github.com/Resinat/Resin/internal/probe"
 	"github.com/Resinat/Resin/internal/subscription"
 )
+
+// protocolAliases maps lower-cased input protocol names to their canonical form.
+// All lookups should be done after lowercasing the input.
+var protocolAliases = map[string]string{
+	"shadowsocks": "shadowsocks",
+	"ss":          "shadowsocks",
+	"vmess":       "vmess",
+	"vmess1":      "vmess",
+	"trojan":      "trojan",
+	"vless":       "vless",
+	"hysteria2":   "hysteria2",
+	"hy2":         "hysteria2",
+	"http":        "http",
+	"socks":       "socks",
+	"socks5":      "socks",
+}
+
+// NormalizeProtocol returns the canonical protocol name for a given input,
+// or empty string if the protocol is not recognized.
+func NormalizeProtocol(input string) string {
+	if input == "" {
+		return ""
+	}
+	canonical, ok := protocolAliases[strings.ToLower(strings.TrimSpace(input))]
+	if !ok {
+		return ""
+	}
+	return canonical
+}
 
 // ------------------------------------------------------------------
 // Nodes
@@ -26,6 +56,7 @@ type NodeFilters struct {
 	ProbedSince    *time.Time
 	TagKeyword     *string
 	Routable       *bool
+	Protocols      []string // canonical protocol names; empty/nil = no filter
 }
 
 // ListNodes returns nodes from the pool with optional filters.
@@ -226,6 +257,35 @@ func (s *ControlPlaneService) nodeEntryMatchesFilters(
 	if filters.ProbedSince != nil {
 		lastUpdate := entry.LastLatencyProbeAttempt.Load()
 		if lastUpdate < filters.ProbedSince.UnixNano() {
+			return false
+		}
+	}
+	// Protocol filter (cold path).
+	if len(filters.Protocols) > 0 {
+		matched := false
+		var rawMap map[string]any
+		if err := json.Unmarshal(entry.RawOptions, &rawMap); err != nil {
+			return false
+		}
+		typeVal, ok := rawMap["type"]
+		if !ok {
+			return false
+		}
+		typeStr, ok := typeVal.(string)
+		if !ok || typeStr == "" {
+			return false
+		}
+		canonical := NormalizeProtocol(typeStr)
+		if canonical == "" {
+			return false
+		}
+		for _, p := range filters.Protocols {
+			if p == canonical {
+				matched = true
+				break
+			}
+		}
+		if !matched {
 			return false
 		}
 	}

@@ -592,6 +592,7 @@ type PlatformSpecFilter struct {
 type NodeSummary struct {
 	NodeHash                         string    `json:"node_hash"`
 	CreatedAt                        string    `json:"created_at"`
+	Protocol                         string    `json:"protocol,omitempty"`
 	Enabled                          bool      `json:"enabled"`
 	DisplayTag                       string    `json:"display_tag,omitempty"`
 	HasOutbound                      bool      `json:"has_outbound"`
@@ -625,6 +626,7 @@ func (s *ControlPlaneService) nodeEntryToSummary(h node.Hash, entry *node.NodeEn
 	ns := NodeSummary{
 		NodeHash:     h.Hex(),
 		CreatedAt:    entry.CreatedAt.UTC().Format(time.RFC3339Nano),
+		Protocol:     rawOptionsProtocol(entry.RawOptions),
 		Enabled:      true,
 		HasOutbound:  entry.HasOutbound(),
 		LastError:    entry.GetLastError(),
@@ -695,6 +697,16 @@ func (s *ControlPlaneService) nodeEntryToSummary(h node.Hash, entry *node.NodeEn
 		ns.Tags = []NodeTag{}
 	}
 	return ns
+}
+
+func rawOptionsProtocol(raw json.RawMessage) string {
+	var outbound struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &outbound); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(outbound.Type)
 }
 
 // PreviewFilter returns nodes matching the given filter spec.

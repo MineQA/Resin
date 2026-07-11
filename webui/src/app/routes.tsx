@@ -10,6 +10,7 @@ import { PlatformPage } from "../features/platforms/PlatformPage";
 import { RequestLogsPage } from "../features/requestLogs/RequestLogsPage";
 import { RulesPage } from "../features/rules/RulesPage";
 import { SubscriptionPage } from "../features/subscriptions/SubscriptionPage";
+import { ProxyCheckPage } from "../features/proxyCheck/ProxyCheckPage";
 import { SystemConfigPage } from "../features/systemConfig/SystemConfigPage";
 
 function NodesRoute() {
@@ -35,6 +36,7 @@ export function AppRoutes() {
         <Route path="/platforms/:platformId" element={<PlatformDetailPage />} />
         <Route path="/subscriptions" element={<SubscriptionPage />} />
         <Route path="/nodes" element={<NodesRoute />} />
+        <Route path="/proxy-check" element={<ProxyCheckPage />} />
         <Route path="/rules" element={<RulesPage />} />
         <Route path="/request-logs" element={<RequestLogsPage />} />
         <Route path="/resources" element={<GeoIPPage />} />

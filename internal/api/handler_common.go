@@ -5,6 +5,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
+
+	"github.com/Resinat/Resin/internal/service"
 )
 
 func parsePaginationOrWriteInvalid(w http.ResponseWriter, r *http.Request) (Pagination, bool) {
@@ -94,4 +98,43 @@ func applySortOrder(order int, sortOrder string) int {
 		return -order
 	}
 	return order
+}
+
+// parseProtocolQuery parses the "protocol" query parameter.
+// It accepts a comma-separated list of protocol names (case-insensitive).
+// Returns the canonical protocol names and a boolean indicating success.
+// On invalid protocol values, it writes an INVALID_ARGUMENT error and returns false.
+func parseProtocolQuery(w http.ResponseWriter, q url.Values) ([]string, bool) {
+	raw := q.Get("protocol")
+	if raw == "" {
+		return nil, true
+	}
+	parts := strings.Split(raw, ",")
+	canonical := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		c := service.NormalizeProtocol(p)
+		if c == "" {
+			writeInvalidArgument(w, "protocol: unsupported value '"+p+"'; supported: shadowsocks, ss, vmess, vmess1, trojan, vless, hysteria2, hy2, http, socks, socks5")
+			return nil, false
+		}
+		// Deduplicate.
+		seen := false
+		for _, existing := range canonical {
+			if existing == c {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			canonical = append(canonical, c)
+		}
+	}
+	if len(canonical) == 0 {
+		return nil, true
+	}
+	return canonical, true
 }

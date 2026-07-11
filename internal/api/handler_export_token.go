@@ -203,6 +203,12 @@ func HandleNodePoolExport(cp *service.ControlPlaneService) http.HandlerFunc {
 			filters.ProbedSince = &parsedTime
 		}
 
+		if protocols, ok := parseProtocolQuery(w, q); !ok {
+			return
+		} else if protocols != nil {
+			filters.Protocols = protocols
+		}
+
 		// --- Fetch nodes ---
 		nodes, err := cp.ListNodes(filters)
 		if err != nil {

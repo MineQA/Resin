@@ -527,6 +527,94 @@ func TestNodePoolExport_FormatClash_HTTP_SOCKS(t *testing.T) {
 	}
 }
 
+func TestNodePoolExport_ProtocolFilter(t *testing.T) {
+	srv, cp, tokenValue := setupExportTest(t)
+	_ = cp
+
+	// Only one SS node exists from setupExportTest.
+	// Add a vmess node.
+	sub := subscription.NewSubscription("22222222-2222-2222-2222-222222222222", "sub-b", "https://example.com/b", true, false)
+	cp.SubMgr.Register(sub)
+	addNodeForNodeListTest(t, cp, sub, `{"type":"vmess","server":"2.2.2.2","port":443,"uuid":"b"}`, "203.0.113.20")
+
+	// Filter for ss only -> 1 outbound.
+	resp := doJSONRequest(t, srv, http.MethodGet,
+		"/api/v1/node-pool/export?format=sing-box&export_token="+tokenValue+"&protocol=ss", nil, false)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("export protocol=ss: got status %d, want 200, body=%s", resp.Code, resp.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	outbounds, ok := body["outbounds"].([]any)
+	if !ok {
+		t.Fatalf("export protocol=ss: missing outbounds field")
+	}
+	if len(outbounds) != 1 {
+		t.Fatalf("export protocol=ss: got %d outbounds, want 1", len(outbounds))
+	}
+	ob := outbounds[0].(map[string]any)
+	if ob["type"] != "ss" {
+		t.Fatalf("export protocol=ss: outbound type=%v, want ss", ob["type"])
+	}
+
+	// Filter for ss,vmess -> 2 outbounds.
+	resp = doJSONRequest(t, srv, http.MethodGet,
+		"/api/v1/node-pool/export?format=sing-box&export_token="+tokenValue+"&protocol=ss,vmess", nil, false)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("export protocol=ss,vmess: got status %d, want 200, body=%s", resp.Code, resp.Body.String())
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	outbounds, ok = body["outbounds"].([]any)
+	if !ok {
+		t.Fatalf("export protocol=ss,vmess: missing outbounds field")
+	}
+	if len(outbounds) != 2 {
+		t.Fatalf("export protocol=ss,vmess: got %d outbounds, want 2", len(outbounds))
+	}
+}
+
+func TestNodePoolExport_ProtocolFilterInvalid(t *testing.T) {
+	srv, _, tokenValue := setupExportTest(t)
+
+	resp := doJSONRequest(t, srv, http.MethodGet,
+		"/api/v1/node-pool/export?format=sing-box&export_token="+tokenValue+"&protocol=invalidproto", nil, false)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("export protocol=invalid: got status %d, want 400, body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp, "INVALID_ARGUMENT")
+}
+
+func TestNodePoolExport_NoProtocolFilterByDefault(t *testing.T) {
+	srv, cp, tokenValue := setupExportTest(t)
+
+	// Add another node.
+	sub := subscription.NewSubscription("22222222-2222-2222-2222-222222222222", "sub-b", "https://example.com/b", true, false)
+	cp.SubMgr.Register(sub)
+	addNodeForNodeListTest(t, cp, sub, `{"type":"vmess","server":"2.2.2.2","port":443,"uuid":"b"}`, "203.0.113.20")
+
+	// No protocol param -> all nodes.
+	resp := doJSONRequest(t, srv, http.MethodGet,
+		"/api/v1/node-pool/export?format=sing-box&export_token="+tokenValue, nil, false)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("export no protocol: got status %d, want 200, body=%s", resp.Code, resp.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	outbounds, ok := body["outbounds"].([]any)
+	if !ok {
+		t.Fatalf("export no protocol: missing outbounds field")
+	}
+	if len(outbounds) != 2 {
+		t.Fatalf("export no protocol: got %d outbounds, want 2", len(outbounds))
+	}
+}
+
 // --- Helpers ---
 
 func setupExportTest(t *testing.T) (*Server, *service.ControlPlaneService, string) {
