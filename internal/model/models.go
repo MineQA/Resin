@@ -77,6 +77,29 @@ type NodeLatencyKey struct {
 	Domain   string
 }
 
+// NodeQualityKey is the composite primary key for node_quality.
+type NodeQualityKey struct {
+	NodeHash string
+	Profile  string
+}
+
+// NodeQuality holds quality check aggregate results for a node+profile.
+// This stores the aggregate summary only, not individual round results.
+type NodeQuality struct {
+	NodeHash                string  `json:"node_hash"`
+	Profile                 string  `json:"profile"`
+	Grade                   string  `json:"grade"`
+	Score                   float64 `json:"score"`
+	Unstable                bool    `json:"unstable"`
+	ServiceReachable        bool    `json:"service_reachable"`
+	APIReachable            bool    `json:"api_reachable"`
+	CloudflareChallenged    bool    `json:"cloudflare_challenged"`
+	CloudflareChallengeType string  `json:"cloudflare_challenge_type"`
+	AvgLatencyMs            float64 `json:"avg_latency_ms"`
+	LastCheckedNs           int64   `json:"last_checked_ns"`
+	LastError               string  `json:"last_error"`
+}
+
 // Lease represents a sticky routing lease.
 type Lease struct {
 	PlatformID     string `json:"platform_id"`

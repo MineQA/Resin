@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +34,39 @@ func nodeTagSortKey(n service.NodeSummary) string {
 	return bestTag
 }
 
+func qualityScoreCompare(a, b service.NodeSummary) int {
+	// Nodes without quality data sort with a sentinel score of -1.
+	// Ascending order places nil-quality nodes before score 0; descending
+	// order places them after all checked nodes.
+	aScore := float64(-1)
+	if a.Quality != nil {
+		aScore = a.Quality.Score
+	}
+	bScore := float64(-1)
+	if b.Quality != nil {
+		bScore = b.Quality.Score
+	}
+	return cmp.Compare(aScore, bScore)
+}
+
+func qualityLastCheckedCompare(a, b service.NodeSummary) int {
+	aNs := int64(0)
+	if a.Quality != nil && a.Quality.LastChecked != "" {
+		t, err := time.Parse(time.RFC3339Nano, a.Quality.LastChecked)
+		if err == nil {
+			aNs = t.UnixNano()
+		}
+	}
+	bNs := int64(0)
+	if b.Quality != nil && b.Quality.LastChecked != "" {
+		t, err := time.Parse(time.RFC3339Nano, b.Quality.LastChecked)
+		if err == nil {
+			bNs = t.UnixNano()
+		}
+	}
+	return cmp.Compare(aNs, bNs)
+}
+
 func compareNodeSummaries(sortBy string, a, b service.NodeSummary) int {
 	order := 0
 	switch sortBy {
@@ -42,6 +76,10 @@ func compareNodeSummaries(sortBy string, a, b service.NodeSummary) int {
 		order = cmp.Compare(a.FailureCount, b.FailureCount)
 	case "region":
 		order = strings.Compare(a.Region, b.Region)
+	case "quality_score":
+		order = qualityScoreCompare(a, b)
+	case "quality_last_checked":
+		order = qualityLastCheckedCompare(a, b)
 	default:
 		order = strings.Compare(nodeTagSortKey(a), nodeTagSortKey(b))
 	}
@@ -163,13 +201,45 @@ func HandleListNodes(cp *service.ControlPlaneService) http.HandlerFunc {
 			filters.ExcludeProtocols = excludeProtocols
 		}
 
+		// Quality filters.
+		if v := q.Get("quality_grade"); v != "" {
+			filters.QualityGrade = &v
+		}
+		if v := q.Get("quality_profile"); v != "" {
+			filters.QualityProfile = &v
+		}
+		if v := q.Get("quality_min_score"); v != "" {
+			minScore, err := strconv.ParseFloat(v, 64)
+			if err != nil || minScore < 0 || minScore > 100 {
+				writeInvalidArgument(w, "quality_min_score: must be a number between 0 and 100")
+				return
+			}
+			filters.QualityMinScore = &minScore
+		}
+		if v := q.Get("quality_cloudflare_challenged"); v != "" {
+			b, err := strconv.ParseBool(v)
+			if err != nil {
+				writeInvalidArgument(w, "quality_cloudflare_challenged: must be true or false")
+				return
+			}
+			filters.QualityCloudflareChallenged = &b
+		}
+		if v := q.Get("quality_checked_since"); v != "" {
+			t, err := time.Parse(time.RFC3339Nano, v)
+			if err != nil {
+				writeInvalidArgument(w, "quality_checked_since: invalid RFC3339 timestamp")
+				return
+			}
+			filters.QualityCheckedSince = &t
+		}
+
 		nodes, err := cp.ListNodes(filters)
 		if err != nil {
 			writeServiceError(w, err)
 			return
 		}
 
-		sorting, ok := parseSortingOrWriteInvalid(w, r, []string{"tag", "created_at", "failure_count", "region"}, "tag", "asc")
+		sorting, ok := parseSortingOrWriteInvalid(w, r, []string{"tag", "created_at", "failure_count", "region", "quality_score", "quality_last_checked"}, "tag", "asc")
 		if !ok {
 			return
 		}

@@ -1,3 +1,5 @@
+export type ProxyCheckProfile = "generic" | "openai" | "grok" | "gemini" | "claude";
+
 export type RuntimeConfig = {
   request_log_enabled: boolean;
   reverse_proxy_log_detail_enabled: boolean;
@@ -15,6 +17,15 @@ export type RuntimeConfig = {
   latency_decay_window: string;
   cache_flush_interval: string;
   cache_flush_dirty_threshold: number;
+  proxy_check_enabled: boolean;
+  proxy_check_interval: string;
+  proxy_check_profile: ProxyCheckProfile;
+  proxy_check_service_reachability: boolean;
+  proxy_check_api_reachability: boolean;
+  proxy_check_cloudflare_detection: boolean;
+  proxy_check_multi_round: boolean;
+  proxy_check_rounds: number;
+  proxy_check_trigger_on_new_node: boolean;
 };
 
 export type EnvConfig = {

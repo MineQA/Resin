@@ -405,6 +405,132 @@ func TestPatchRuntimeConfig_DistributesToConfigAwareEventEmitter(t *testing.T) {
 	}
 }
 
+func TestPatchRuntimeConfig_ProxyCheckFields(t *testing.T) {
+	h := newPatchHarness(t)
+
+	// Initial state: quality disabled (default).
+	initial := h.runtimeCfg.Load()
+	if initial.ProxyCheckEnabled {
+		t.Fatal("default should have proxy_check_enabled=false")
+	}
+
+	// Enabling with invalid profile should fail.
+	_, err := h.cp.PatchRuntimeConfig([]byte(`{
+		"proxy_check_enabled": true,
+		"proxy_check_profile": "invalid-profile"
+	}`))
+	if err == nil {
+		t.Fatal("expected error for invalid proxy_check_profile")
+	}
+
+	// Enabling with no checks should fail.
+	_, err = h.cp.PatchRuntimeConfig([]byte(`{
+		"proxy_check_enabled": true,
+		"proxy_check_service_reachability": false,
+		"proxy_check_api_reachability": false,
+		"proxy_check_cloudflare_detection": false
+	}`))
+	if err == nil {
+		t.Fatal("expected error when no quality checks enabled")
+	}
+
+	// Enabling with interval < 5m should fail.
+	_, err = h.cp.PatchRuntimeConfig([]byte(`{
+		"proxy_check_enabled": true,
+		"proxy_check_interval": "1m"
+	}`))
+	if err == nil {
+		t.Fatal("expected error for proxy_check_interval < 5m")
+	}
+
+	// Rounds out of range should fail.
+	_, err = h.cp.PatchRuntimeConfig([]byte(`{"proxy_check_rounds": 0}`))
+	if err == nil {
+		t.Fatal("expected error for proxy_check_rounds < 1")
+	}
+	_, err = h.cp.PatchRuntimeConfig([]byte(`{"proxy_check_rounds": 5}`))
+	if err == nil {
+		t.Fatal("expected error for proxy_check_rounds > 3")
+	}
+
+	// Valid patch should succeed.
+	updated, err := h.cp.PatchRuntimeConfig([]byte(`{
+		"proxy_check_enabled": true,
+		"proxy_check_interval": "10m",
+		"proxy_check_profile": "openai",
+		"proxy_check_rounds": 2,
+		"proxy_check_service_reachability": true,
+		"proxy_check_api_reachability": true,
+		"proxy_check_cloudflare_detection": false
+	}`))
+	if err != nil {
+		t.Fatalf("valid proxy check patch failed: %v", err)
+	}
+	if !updated.ProxyCheckEnabled {
+		t.Fatal("proxy_check_enabled should be true")
+	}
+	if time.Duration(updated.ProxyCheckInterval) != 10*time.Minute {
+		t.Fatalf("interval: got %v, want 10m", time.Duration(updated.ProxyCheckInterval))
+	}
+	if updated.ProxyCheckProfile != "openai" {
+		t.Fatalf("profile: got %q, want %q", updated.ProxyCheckProfile, "openai")
+	}
+	if updated.ProxyCheckRounds != 2 {
+		t.Fatalf("rounds: got %d, want 2", updated.ProxyCheckRounds)
+	}
+	if !updated.ProxyCheckAPIReachability {
+		t.Fatal("api_reachability should be true")
+	}
+	if updated.ProxyCheckCloudflareDetection {
+		t.Fatal("cloudflare_detection should be false")
+	}
+
+	// Profile normalization (empty -> generic).
+	updated, err = h.cp.PatchRuntimeConfig([]byte(`{"proxy_check_profile": ""}`))
+	if err != nil {
+		t.Fatalf("patch empty profile: %v", err)
+	}
+	if updated.ProxyCheckProfile != "generic" {
+		t.Fatalf("empty profile should be normalized to generic: got %q", updated.ProxyCheckProfile)
+	}
+}
+
+func TestPatchRuntimeConfig_ProxyCheckProfile_Normalization(t *testing.T) {
+	h := newPatchHarness(t)
+
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"GENERIC", "generic"},
+		{"OpenAI", "openai"},
+		{"GROK", "grok"},
+		{"GEMINI", "gemini"},
+		{"Claude", "claude"},
+		{"", "generic"},
+	}
+	for _, tc := range tests {
+		updated, err := h.cp.PatchRuntimeConfig([]byte(`{"proxy_check_profile":"` + tc.input + `"}`))
+		if err != nil {
+			t.Fatalf("profile %q should be accepted: %v", tc.input, err)
+		}
+		if updated.ProxyCheckProfile != tc.want {
+			t.Fatalf("profile normalization: input %q, got %q, want %q", tc.input, updated.ProxyCheckProfile, tc.want)
+		}
+	}
+}
+
+func TestPatchRuntimeConfig_ProxyCheckInterval_NonZeroAlwaysValidated(t *testing.T) {
+	h := newPatchHarness(t)
+
+	// Setting interval to 1m without enabling should still fail because
+	// interval is non-zero and < 5m.
+	_, err := h.cp.PatchRuntimeConfig([]byte(`{"proxy_check_interval": "1m"}`))
+	if err == nil {
+		t.Fatal("expected error for non-zero interval < 5m even when disabled")
+	}
+}
+
 func TestPatchRuntimeConfig_LatencyTestURLAutoAddsAuthority(t *testing.T) {
 	h := newPatchHarness(t)
 

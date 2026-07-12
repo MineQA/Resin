@@ -758,3 +758,172 @@ func TestProxyCheckTaskManager_RawProxiesPreservesInputOrder(t *testing.T) {
 		}
 	}
 }
+
+// --- Manual CheckProxyCheck writeback tests ---
+
+func TestCheckProxyCheck_WritesBackQualityOnSuccess(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	pool, hash := newNodeAndProbeTestPool(t, subMgr)
+	entry, ok := pool.GetEntry(hash)
+	if !ok {
+		t.Fatal("entry not found")
+	}
+
+	mockFetcher := newMockFetcher(
+		[]byte("ok"),
+		50*time.Millisecond,
+		nil,
+	)
+
+	cp := &ControlPlaneService{
+		Pool:   pool,
+		SubMgr: subMgr,
+		ProbeMgr: probe.NewProbeManager(probe.ProbeConfig{
+			Pool:    pool,
+			Fetcher: mockFetcher,
+		}),
+	}
+
+	result, err := cp.CheckProxyCheck(hash.Hex(), ProxyCheckRequest{
+		Profile: "generic",
+		Options: &probe.ProxyCheckOptions{
+			ServiceReachability: true,
+			Rounds:              1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CheckProxyCheck: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+
+	// Verify quality was written back.
+	q := entry.GetQuality()
+	if q == nil {
+		t.Fatal("expected quality to be written back via RecordNodeQuality")
+	}
+	if q.Profile != "generic" {
+		t.Fatalf("quality profile = %q, want generic", q.Profile)
+	}
+	if q.Grade != result.Grade {
+		t.Fatalf("quality grade = %q, want %q", q.Grade, result.Grade)
+	}
+	if q.Score != result.Score {
+		t.Fatalf("quality score = %f, want %f", q.Score, result.Score)
+	}
+	if q.ServiceReachable != result.ServiceReachable {
+		t.Fatalf("quality ServiceReachable = %v, want %v", q.ServiceReachable, result.ServiceReachable)
+	}
+	if q.LastCheckedNs == 0 {
+		t.Fatal("expected LastCheckedNs to be set")
+	}
+	if q.NodeHash == "" {
+		t.Fatal("expected NodeHash to be set")
+	}
+}
+
+func TestCheckProxyCheck_WritesBackQualityOnError(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	pool, hash := newNodeAndProbeTestPool(t, subMgr)
+	entry, ok := pool.GetEntry(hash)
+	if !ok {
+		t.Fatal("entry not found")
+	}
+
+	mockFetcher := newMockFetcher(
+		nil,
+		0,
+		fmt.Errorf("connection timeout"),
+	)
+
+	cp := &ControlPlaneService{
+		Pool:   pool,
+		SubMgr: subMgr,
+		ProbeMgr: probe.NewProbeManager(probe.ProbeConfig{
+			Pool:    pool,
+			Fetcher: mockFetcher,
+		}),
+	}
+
+	_, err := cp.CheckProxyCheck(hash.Hex(), ProxyCheckRequest{
+		Profile: "openai",
+		Options: &probe.ProxyCheckOptions{
+			ServiceReachability: true,
+			Rounds:              1,
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error from CheckProxyCheck")
+	}
+
+	// Verify quality was written back even on error.
+	q := entry.GetQuality()
+	if q == nil {
+		t.Fatal("expected quality to be written back via RecordNodeQuality on error")
+	}
+	if q.Profile != "openai" {
+		t.Fatalf("quality profile = %q, want openai", q.Profile)
+	}
+	if q.Grade != "F" {
+		t.Fatalf("quality grade = %q, want F for error case", q.Grade)
+	}
+	if q.LastError == "" {
+		t.Fatal("expected LastError to be set on check error")
+	}
+	if q.NodeHash == "" {
+		t.Fatal("expected NodeHash to be set")
+	}
+}
+
+// TestCheckProxyCheck_BatchNodeHashesDoesNotWriteQuality verifies that the
+// batch node-hash path does not write back quality. The batch executeTask
+// only stores results in the task's items slice and does not call
+// RecordNodeQuality.
+func TestCheckProxyCheck_BatchNodeHashesDoesNotWriteQuality(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	pool, hash := newNodeAndProbeTestPool(t, subMgr)
+
+	mockFetcher := newMockFetcher(
+		[]byte("ok"),
+		50*time.Millisecond,
+		nil,
+	)
+
+	cp := &ControlPlaneService{
+		Pool:   pool,
+		SubMgr: subMgr,
+		ProbeMgr: probe.NewProbeManager(probe.ProbeConfig{
+			Pool:    pool,
+			Fetcher: mockFetcher,
+		}),
+	}
+
+	// Create a batch task with the node hash.
+	mgr := NewProxyCheckTaskManager()
+	task, err := mgr.CreateTask(ProxyCheckBatchRequest{
+		NodeHashes: []string{hash.Hex()},
+		Profile:    "generic",
+		Options: &probe.ProxyCheckOptions{
+			ServiceReachability: true,
+			Rounds:              1,
+		},
+	}, cp.ProbeMgr, nil)
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	completed := pollTask(t, mgr, task.ID)
+	if completed.Status != "completed" {
+		t.Fatalf("status = %q, want completed", completed.Status)
+	}
+	if len(completed.Result.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(completed.Result.Results))
+	}
+
+	// Verify quality was NOT written back for the node.
+	entry, _ := pool.GetEntry(hash)
+	if entryQuality := entry.GetQuality(); entryQuality != nil {
+		t.Fatal("batch task should NOT write back quality to node entry")
+	}
+}

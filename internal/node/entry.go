@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Resinat/Resin/internal/model"
 	"github.com/sagernet/sing-box/adapter"
 )
 
@@ -42,6 +43,9 @@ type NodeEntry struct {
 	LastAuthorityLatencyProbeAttempt atomic.Int64
 	LastEgressUpdateAttempt          atomic.Int64
 	LatencyTable                     *LatencyTable // per-domain latency stats; nil if not initialized
+
+	// Quality holds the latest proxy quality check result for this node.
+	Quality atomic.Pointer[model.NodeQuality]
 
 	// Outbound instance for this node.
 	Outbound atomic.Pointer[adapter.Outbound]
@@ -283,4 +287,20 @@ func (e *NodeEntry) GetLastError() string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.LastError
+}
+
+// GetQuality returns the current proxy quality check result, or nil.
+func (e *NodeEntry) GetQuality() *model.NodeQuality {
+	return e.Quality.Load()
+}
+
+// SetQuality stores a copy of the quality check result.
+// The caller's pointer is not retained; a shallow copy is made.
+func (e *NodeEntry) SetQuality(q *model.NodeQuality) {
+	if q == nil {
+		e.Quality.Store(nil)
+		return
+	}
+	cp := *q
+	e.Quality.Store(&cp)
 }

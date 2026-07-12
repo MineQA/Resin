@@ -5,6 +5,7 @@ import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { Input } from "../../components/ui/Input";
+import { Select } from "../../components/ui/Select";
 import { Switch } from "../../components/ui/Switch";
 import { Textarea } from "../../components/ui/Textarea";
 import { ToastContainer } from "../../components/ui/Toast";
@@ -13,7 +14,7 @@ import i18next, { useI18n } from "../../i18n";
 import { formatApiErrorMessage } from "../../lib/error-message";
 import { formatDateTime, formatRelativeTime } from "../../lib/time";
 import { createExportToken, deleteExportToken, getDefaultSystemConfig, getEnvConfig, getSystemConfig, listExportTokens, patchSystemConfig } from "./api";
-import type { RuntimeConfig, RuntimeConfigPatch } from "./types";
+import type { ProxyCheckProfile, RuntimeConfig, RuntimeConfigPatch } from "./types";
 
 type RuntimeConfigForm = {
   request_log_enabled: boolean;
@@ -32,6 +33,15 @@ type RuntimeConfigForm = {
   latency_decay_window: string;
   cache_flush_interval: string;
   cache_flush_dirty_threshold: string;
+  proxy_check_enabled: boolean;
+  proxy_check_interval: string;
+  proxy_check_profile: ProxyCheckProfile;
+  proxy_check_service_reachability: boolean;
+  proxy_check_api_reachability: boolean;
+  proxy_check_cloudflare_detection: boolean;
+  proxy_check_multi_round: boolean;
+  proxy_check_rounds: string;
+  proxy_check_trigger_on_new_node: boolean;
 };
 
 const EDITABLE_FIELDS: Array<keyof RuntimeConfig> = [
@@ -51,6 +61,15 @@ const EDITABLE_FIELDS: Array<keyof RuntimeConfig> = [
   "latency_decay_window",
   "cache_flush_interval",
   "cache_flush_dirty_threshold",
+  "proxy_check_enabled",
+  "proxy_check_interval",
+  "proxy_check_profile",
+  "proxy_check_service_reachability",
+  "proxy_check_api_reachability",
+  "proxy_check_cloudflare_detection",
+  "proxy_check_multi_round",
+  "proxy_check_rounds",
+  "proxy_check_trigger_on_new_node",
 ];
 
 const FIELD_LABELS: Record<keyof RuntimeConfig, string> = {
@@ -70,7 +89,18 @@ const FIELD_LABELS: Record<keyof RuntimeConfig, string> = {
   latency_decay_window: "历史延迟衰减窗口",
   cache_flush_interval: "缓存异步刷盘间隔",
   cache_flush_dirty_threshold: "缓存刷盘脏阈值",
+  proxy_check_enabled: "启用后台质量检测",
+  proxy_check_interval: "质量检测间隔",
+  proxy_check_profile: "质量检测 Profile",
+  proxy_check_service_reachability: "检测服务可达性",
+  proxy_check_api_reachability: "检测 API 可达性",
+  proxy_check_cloudflare_detection: "检测 Cloudflare 拦截",
+  proxy_check_multi_round: "多轮检测",
+  proxy_check_rounds: "检测轮数",
+  proxy_check_trigger_on_new_node: "新节点触发质量检测",
 };
+
+const PROXY_CHECK_PROFILES: ProxyCheckProfile[] = ["generic", "openai", "grok", "gemini", "claude"];
 
 const ALLOCATION_POLICY_LABELS: Record<string, string> = {
   BALANCED: "均衡",
@@ -107,6 +137,15 @@ function configToForm(config: RuntimeConfig): RuntimeConfigForm {
     latency_decay_window: config.latency_decay_window,
     cache_flush_interval: config.cache_flush_interval,
     cache_flush_dirty_threshold: String(config.cache_flush_dirty_threshold),
+    proxy_check_enabled: config.proxy_check_enabled,
+    proxy_check_interval: config.proxy_check_interval,
+    proxy_check_profile: config.proxy_check_profile,
+    proxy_check_service_reachability: config.proxy_check_service_reachability,
+    proxy_check_api_reachability: config.proxy_check_api_reachability,
+    proxy_check_cloudflare_detection: config.proxy_check_cloudflare_detection,
+    proxy_check_multi_round: config.proxy_check_multi_round,
+    proxy_check_rounds: String(config.proxy_check_rounds),
+    proxy_check_trigger_on_new_node: config.proxy_check_trigger_on_new_node,
   };
 }
 
@@ -152,6 +191,9 @@ function parseForm(form: RuntimeConfigForm): RuntimeConfig {
     throw new Error("延迟测试目标 URL 必须是 http/https 地址");
   }
 
+  const proxyCheckRounds = parseRoundsField(form.proxy_check_rounds);
+  const proxyCheckProfile = form.proxy_check_profile;
+
   return {
     request_log_enabled: form.request_log_enabled,
     reverse_proxy_log_detail_enabled: form.reverse_proxy_log_detail_enabled,
@@ -181,7 +223,28 @@ function parseForm(form: RuntimeConfigForm): RuntimeConfig {
     latency_decay_window: parseDurationField("历史延迟衰减窗口", form.latency_decay_window),
     cache_flush_interval: parseDurationField("缓存异步刷盘间隔", form.cache_flush_interval),
     cache_flush_dirty_threshold: parseNonNegativeInt("缓存刷盘脏阈值", form.cache_flush_dirty_threshold),
+    proxy_check_enabled: form.proxy_check_enabled,
+    proxy_check_interval: parseDurationField("质量检测间隔", form.proxy_check_interval),
+    proxy_check_profile: proxyCheckProfile,
+    proxy_check_service_reachability: form.proxy_check_service_reachability,
+    proxy_check_api_reachability: form.proxy_check_api_reachability,
+    proxy_check_cloudflare_detection: form.proxy_check_cloudflare_detection,
+    proxy_check_multi_round: form.proxy_check_multi_round,
+    proxy_check_rounds: proxyCheckRounds,
+    proxy_check_trigger_on_new_node: form.proxy_check_trigger_on_new_node,
   };
+}
+
+function parseRoundsField(raw: string): number {
+  const value = raw.trim();
+  if (!value) {
+    throw new Error(i18next.t("{{field}} 不能为空", { field: requiredFieldLabel("检测轮数") }));
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 3) {
+    throw new Error(i18next.t("{{field}} 必须是 1 到 3 的整数", { field: requiredFieldLabel("检测轮数") }));
+  }
+  return parsed;
 }
 
 function displayAllocationPolicy(value: string): string {
@@ -731,6 +794,141 @@ export function SystemConfigPage() {
                       value={form.latency_authorities_raw}
                       onChange={(event) => setFormField("latency_authorities_raw", event.target.value)}
                     />
+                  </div>
+                </div>
+              </section>
+
+              <section className="syscfg-section">
+                <h4>{t("后台质量检测")}</h4>
+                <p className="muted" style={{ marginTop: 6, marginBottom: 0 }}>
+                  {t("质量检测会向目标服务发起额外出站请求并产生流量。结果仅用于评级展示与筛选，不影响节点健康、熔断或路由可用性。")}
+                </p>
+                <div className="syscfg-checkbox-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px", marginTop: 12 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "var(--surface-sunken, rgba(0,0,0,0.02))", padding: "12px 16px", borderRadius: "8px", border: "1px solid var(--border)" }}>
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <span className="field-label" style={{ margin: 0, fontWeight: 500 }}>{t("启用后台质量检测")}</span>
+                      {renderRestoreButton("proxy_check_enabled")}
+                    </div>
+                    <Switch
+                      checked={form.proxy_check_enabled}
+                      onChange={(event) => setFormField("proxy_check_enabled", event.target.checked)}
+                    />
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "var(--surface-sunken, rgba(0,0,0,0.02))", padding: "12px 16px", borderRadius: "8px", border: "1px solid var(--border)" }}>
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <span className="field-label" style={{ margin: 0, fontWeight: 500 }}>{t("新节点触发质量检测")}</span>
+                      {renderRestoreButton("proxy_check_trigger_on_new_node")}
+                    </div>
+                    <Switch
+                      checked={form.proxy_check_trigger_on_new_node}
+                      onChange={(event) => setFormField("proxy_check_trigger_on_new_node", event.target.checked)}
+                    />
+                  </div>
+                </div>
+
+                <div className="form-grid" style={{ marginTop: 16 }}>
+                  <div className="field-group">
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <label className="field-label" htmlFor="sys-pc-interval" style={{ margin: 0 }}>
+                        {t("质量检测间隔")}
+                      </label>
+                      {renderRestoreButton("proxy_check_interval")}
+                    </div>
+                    <Input
+                      id="sys-pc-interval"
+                      value={form.proxy_check_interval}
+                      placeholder="30m"
+                      onChange={(event) => setFormField("proxy_check_interval", event.target.value)}
+                    />
+                    <small style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("开启后最小 5m")}</small>
+                  </div>
+
+                  <div className="field-group">
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <label className="field-label" htmlFor="sys-pc-profile" style={{ margin: 0 }}>
+                        {t("质量检测 Profile")}
+                      </label>
+                      {renderRestoreButton("proxy_check_profile")}
+                    </div>
+                    <Select
+                      id="sys-pc-profile"
+                      value={form.proxy_check_profile}
+                      onChange={(event) => setFormField("proxy_check_profile", event.target.value as ProxyCheckProfile)}
+                    >
+                      {PROXY_CHECK_PROFILES.map((p) => (
+                        <option key={p} value={p}>{p}</option>
+                      ))}
+                    </Select>
+                  </div>
+                </div>
+
+                <div className="syscfg-checkbox-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "12px", marginTop: 16 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "var(--surface-sunken, rgba(0,0,0,0.02))", padding: "10px 14px", borderRadius: "8px", border: "1px solid var(--border)" }}>
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <span className="field-label" style={{ margin: 0, fontWeight: 500, fontSize: 13 }}>{t("检测服务可达性")}</span>
+                      {renderRestoreButton("proxy_check_service_reachability")}
+                    </div>
+                    <Switch
+                      checked={form.proxy_check_service_reachability}
+                      onChange={(event) => setFormField("proxy_check_service_reachability", event.target.checked)}
+                    />
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "var(--surface-sunken, rgba(0,0,0,0.02))", padding: "10px 14px", borderRadius: "8px", border: "1px solid var(--border)" }}>
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <span className="field-label" style={{ margin: 0, fontWeight: 500, fontSize: 13 }}>{t("检测 API 可达性")}</span>
+                      {renderRestoreButton("proxy_check_api_reachability")}
+                    </div>
+                    <Switch
+                      checked={form.proxy_check_api_reachability}
+                      onChange={(event) => setFormField("proxy_check_api_reachability", event.target.checked)}
+                    />
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "var(--surface-sunken, rgba(0,0,0,0.02))", padding: "10px 14px", borderRadius: "8px", border: "1px solid var(--border)" }}>
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <span className="field-label" style={{ margin: 0, fontWeight: 500, fontSize: 13 }}>{t("检测 Cloudflare 拦截")}</span>
+                      {renderRestoreButton("proxy_check_cloudflare_detection")}
+                    </div>
+                    <Switch
+                      checked={form.proxy_check_cloudflare_detection}
+                      onChange={(event) => setFormField("proxy_check_cloudflare_detection", event.target.checked)}
+                    />
+                  </div>
+                </div>
+
+                <div className="form-grid" style={{ marginTop: 16 }}>
+                  <div className="field-group">
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <label className="field-label" htmlFor="sys-pc-multi-round" style={{ margin: 0 }}>
+                        {t("多轮检测")}
+                      </label>
+                      {renderRestoreButton("proxy_check_multi_round")}
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "var(--surface-sunken, rgba(0,0,0,0.02))", padding: "10px 14px", borderRadius: "8px", border: "1px solid var(--border)" }}>
+                      <span className="field-label" style={{ margin: 0, fontWeight: 500, fontSize: 13 }}>{t("开启后按多轮平均评分")}</span>
+                      <Switch
+                        checked={form.proxy_check_multi_round}
+                        onChange={(event) => setFormField("proxy_check_multi_round", event.target.checked)}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="field-group">
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <label className="field-label" htmlFor="sys-pc-rounds" style={{ margin: 0 }}>
+                        {t("检测轮数")}
+                      </label>
+                      {renderRestoreButton("proxy_check_rounds")}
+                    </div>
+                    <Select
+                      id="sys-pc-rounds"
+                      value={form.proxy_check_rounds}
+                      onChange={(event) => setFormField("proxy_check_rounds", event.target.value)}
+                    >
+                      <option value="1">1</option>
+                      <option value="2">2</option>
+                      <option value="3">3</option>
+                    </Select>
+                    <small style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("范围 1 到 3")}</small>
                   </div>
                 </div>
               </section>

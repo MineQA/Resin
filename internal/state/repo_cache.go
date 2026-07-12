@@ -184,6 +184,88 @@ func (r *CacheRepo) LoadAllNodeLatency() ([]model.NodeLatency, error) {
 	return result, rows.Err()
 }
 
+// --- node_quality ---
+
+// BulkUpsertNodeQuality batch-inserts or updates node quality records.
+func (r *CacheRepo) BulkUpsertNodeQuality(entries []model.NodeQuality) error {
+	return bulkExecRows(
+		r,
+		upsertNodeQualitySQL,
+		entries,
+		func(stmt *sql.Stmt, e model.NodeQuality) error {
+			_, err := stmt.Exec(
+				e.NodeHash,
+				e.Profile,
+				e.Grade,
+				e.Score,
+				boolToInt(e.Unstable),
+				boolToInt(e.ServiceReachable),
+				boolToInt(e.APIReachable),
+				boolToInt(e.CloudflareChallenged),
+				e.CloudflareChallengeType,
+				e.AvgLatencyMs,
+				e.LastCheckedNs,
+				e.LastError,
+			)
+			return err
+		},
+	)
+}
+
+// BulkDeleteNodeQuality batch-deletes node quality records by composite key.
+func (r *CacheRepo) BulkDeleteNodeQuality(keys []model.NodeQualityKey) error {
+	return bulkExecRows(
+		r,
+		deleteNodeQualitySQL,
+		keys,
+		func(stmt *sql.Stmt, key model.NodeQualityKey) error {
+			_, err := stmt.Exec(key.NodeHash, key.Profile)
+			return err
+		},
+	)
+}
+
+// LoadAllNodeQuality reads all node quality records.
+func (r *CacheRepo) LoadAllNodeQuality() ([]model.NodeQuality, error) {
+	rows, err := r.db.Query(`
+		SELECT node_hash, profile, grade, score, unstable, service_reachable, api_reachable,
+		       cloudflare_challenged, cloudflare_challenge_type, avg_latency_ms,
+		       last_checked_ns, last_error
+		FROM node_quality`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []model.NodeQuality
+	for rows.Next() {
+		var e model.NodeQuality
+		var unstableInt, serviceInt, apiInt, cfInt int
+		if err := rows.Scan(
+			&e.NodeHash,
+			&e.Profile,
+			&e.Grade,
+			&e.Score,
+			&unstableInt,
+			&serviceInt,
+			&apiInt,
+			&cfInt,
+			&e.CloudflareChallengeType,
+			&e.AvgLatencyMs,
+			&e.LastCheckedNs,
+			&e.LastError,
+		); err != nil {
+			return nil, err
+		}
+		e.Unstable = intToBool(unstableInt)
+		e.ServiceReachable = intToBool(serviceInt)
+		e.APIReachable = intToBool(apiInt)
+		e.CloudflareChallenged = intToBool(cfInt)
+		result = append(result, e)
+	}
+	return result, rows.Err()
+}
+
 // --- leases ---
 
 // BulkUpsertLeases batch-inserts or updates lease records.
@@ -288,6 +370,19 @@ func (r *CacheRepo) LoadAllSubscriptionNodes() ([]model.SubscriptionNode, error)
 	return result, rows.Err()
 }
 
+// boolToInt converts a bool to 0/1 for SQLite INTEGER columns.
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// intToBool converts a 0/1 SQLite INTEGER to bool.
+func intToBool(i int) bool {
+	return i != 0
+}
+
 // --- internal helpers ---
 
 // bulkExecTx runs a prepared statement within an existing transaction for n rows.
@@ -350,14 +445,16 @@ type FlushOps struct {
 	DeleteNodesDynamic      []string
 	UpsertNodeLatency       []model.NodeLatency
 	DeleteNodeLatency       []model.NodeLatencyKey
+	UpsertNodeQuality       []model.NodeQuality
+	DeleteNodeQuality       []model.NodeQualityKey
 	UpsertLeases            []model.Lease
 	DeleteLeases            []model.LeaseKey
 }
 
 // FlushTx executes all upserts and deletes in a single transaction.
 //
-// Upsert order: nodes_static → subscription_nodes → nodes_dynamic → node_latency → leases
-// Delete order: leases → node_latency → nodes_dynamic → subscription_nodes → nodes_static
+// Upsert order: nodes_static → subscription_nodes → nodes_dynamic → node_latency → node_quality → leases
+// Delete order: leases → node_latency → node_quality → nodes_dynamic → subscription_nodes → nodes_static
 func (r *CacheRepo) FlushTx(ops FlushOps) error {
 	tx, err := r.db.Begin()
 	if err != nil {
@@ -406,6 +503,24 @@ func (r *CacheRepo) FlushTx(ops FlushOps) error {
 			_, err := s.Exec(e.NodeHash, e.Domain, e.EwmaNs, e.LastUpdatedNs)
 			return err
 		}},
+		{"upsert_node_quality", upsertNodeQualitySQL, len(ops.UpsertNodeQuality), func(s *sql.Stmt, i int) error {
+			e := ops.UpsertNodeQuality[i]
+			_, err := s.Exec(
+				e.NodeHash,
+				e.Profile,
+				e.Grade,
+				e.Score,
+				boolToInt(e.Unstable),
+				boolToInt(e.ServiceReachable),
+				boolToInt(e.APIReachable),
+				boolToInt(e.CloudflareChallenged),
+				e.CloudflareChallengeType,
+				e.AvgLatencyMs,
+				e.LastCheckedNs,
+				e.LastError,
+			)
+			return err
+		}},
 		{"upsert_leases", upsertLeasesSQL, len(ops.UpsertLeases), func(s *sql.Stmt, i int) error {
 			l := ops.UpsertLeases[i]
 			_, err := s.Exec(l.PlatformID, l.Account, l.NodeHash, l.EgressIP, l.CreatedAtNs, l.ExpiryNs, l.LastAccessedNs)
@@ -418,6 +533,10 @@ func (r *CacheRepo) FlushTx(ops FlushOps) error {
 		}},
 		{"delete_node_latency", deleteNodeLatencySQL, len(ops.DeleteNodeLatency), func(s *sql.Stmt, i int) error {
 			_, err := s.Exec(ops.DeleteNodeLatency[i].NodeHash, ops.DeleteNodeLatency[i].Domain)
+			return err
+		}},
+		{"delete_node_quality", deleteNodeQualitySQL, len(ops.DeleteNodeQuality), func(s *sql.Stmt, i int) error {
+			_, err := s.Exec(ops.DeleteNodeQuality[i].NodeHash, ops.DeleteNodeQuality[i].Profile)
 			return err
 		}},
 		{"delete_nodes_dynamic", deleteNodesDynamicSQL, len(ops.DeleteNodesDynamic), func(s *sql.Stmt, i int) error {
@@ -487,9 +606,28 @@ const (
 			tags_json = excluded.tags_json,
 			evicted = excluded.evicted`
 
+	upsertNodeQualitySQL = `INSERT INTO node_quality (
+			node_hash, profile, grade, score,
+			unstable, service_reachable, api_reachable, cloudflare_challenged,
+			cloudflare_challenge_type, avg_latency_ms, last_checked_ns, last_error
+		)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(node_hash, profile) DO UPDATE SET
+			grade                  = excluded.grade,
+			score                  = excluded.score,
+			unstable               = excluded.unstable,
+			service_reachable      = excluded.service_reachable,
+			api_reachable          = excluded.api_reachable,
+			cloudflare_challenged  = excluded.cloudflare_challenged,
+			cloudflare_challenge_type = excluded.cloudflare_challenge_type,
+			avg_latency_ms         = excluded.avg_latency_ms,
+			last_checked_ns        = excluded.last_checked_ns,
+			last_error             = excluded.last_error`
+
 	deleteNodesStaticSQL       = "DELETE FROM nodes_static WHERE hash = ?"
 	deleteNodesDynamicSQL      = "DELETE FROM nodes_dynamic WHERE hash = ?"
 	deleteNodeLatencySQL       = "DELETE FROM node_latency WHERE node_hash = ? AND domain = ?"
+	deleteNodeQualitySQL       = "DELETE FROM node_quality WHERE node_hash = ? AND profile = ?"
 	deleteLeasesSQL            = "DELETE FROM leases WHERE platform_id = ? AND account = ?"
 	deleteSubscriptionNodesSQL = "DELETE FROM subscription_nodes WHERE subscription_id = ? AND node_hash = ?"
 )

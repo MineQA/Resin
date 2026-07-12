@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Resinat/Resin/internal/model"
 	"github.com/Resinat/Resin/internal/netutil"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/platform"
@@ -45,6 +46,9 @@ type GlobalNodePool struct {
 	onNodeDynamicChanged func(hash node.Hash)                // fired on circuit/failure/egress changes
 	onNodeLatencyChanged func(hash node.Hash, domain string) // fired on latency upserts and evictions
 
+	// Quality callback (optional).
+	onNodeQualityChanged func(key model.NodeQualityKey) // fired when quality result is stored
+
 	// Health config
 	maxLatencyTableEntries int
 	maxConsecutiveFailures func() int
@@ -61,6 +65,7 @@ type PoolConfig struct {
 	OnSubNodeChanged       func(subID string, hash node.Hash, added bool)
 	OnNodeDynamicChanged   func(hash node.Hash)
 	OnNodeLatencyChanged   func(hash node.Hash, domain string)
+	OnNodeQualityChanged   func(key model.NodeQualityKey)
 	MaxLatencyTableEntries int
 	MaxConsecutiveFailures func() int
 	LatencyDecayWindow     func() time.Duration
@@ -90,6 +95,7 @@ func NewGlobalNodePool(cfg PoolConfig) *GlobalNodePool {
 		onSubNodeChanged:       cfg.OnSubNodeChanged,
 		onNodeDynamicChanged:   cfg.OnNodeDynamicChanged,
 		onNodeLatencyChanged:   cfg.OnNodeLatencyChanged,
+		onNodeQualityChanged:   cfg.OnNodeQualityChanged,
 		maxLatencyTableEntries: cfg.MaxLatencyTableEntries,
 		maxConsecutiveFailures: maxConsecutiveFailuresFn,
 		latencyDecayWindow:     cfg.LatencyDecayWindow,
@@ -566,6 +572,40 @@ func (p *GlobalNodePool) RecordPassiveResult(platformID string, hash node.Hash, 
 	if success || !p.passiveCircuitBreakerDisabled(platformID) {
 		p.RecordResult(hash, success)
 	}
+}
+
+// RecordNodeQuality records a proxy quality check result for a node.
+// This maps the aggregate quality fields into the entry's Quality field.
+//
+// IMPORTANT: This method must NOT call RecordResult, must NOT affect
+// failure count, circuit breaker, or routing health. Quality probes check
+// service/API reachability and are independent from node health tracking.
+// Target-service failure (e.g., OpenAI API returning 401) is not a node
+// health failure and must not open circuits by default.
+//
+// Returns true if the quality was recorded. Returns false when quality is nil
+// or the node is not currently present in the pool.
+func (p *GlobalNodePool) RecordNodeQuality(hash node.Hash, quality *model.NodeQuality) bool {
+	if quality == nil {
+		return false
+	}
+	entry, ok := p.nodes.Load(hash)
+	if !ok {
+		return false
+	}
+
+	cp := *quality // shallow copy before mutation
+	cp.NodeHash = hash.Hex()
+	cp.LastCheckedNs = time.Now().UnixNano()
+	entry.SetQuality(&cp)
+
+	if p.onNodeQualityChanged != nil {
+		p.onNodeQualityChanged(model.NodeQualityKey{
+			NodeHash: cp.NodeHash,
+			Profile:  cp.Profile,
+		})
+	}
+	return true
 }
 
 func (p *GlobalNodePool) passiveCircuitBreakerDisabled(platformID string) bool {

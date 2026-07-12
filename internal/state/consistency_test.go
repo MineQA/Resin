@@ -72,6 +72,10 @@ func TestRepairConsistency_RemovesOrphans(t *testing.T) {
 		{NodeHash: "valid-node", Domain: "google.com", EwmaNs: 100, LastUpdatedNs: 1},
 		{NodeHash: "orphan-latency-node", Domain: "google.com", EwmaNs: 200, LastUpdatedNs: 1}, // no static ref
 	})
+	cacheRepo.BulkUpsertNodeQuality([]model.NodeQuality{
+		{NodeHash: "valid-node", Profile: "generic", Grade: "A", LastCheckedNs: 100},
+		{NodeHash: "orphan-quality-node", Profile: "generic", Grade: "B", LastCheckedNs: 200}, // no static ref
+	})
 	cacheRepo.BulkUpsertLeases([]model.Lease{
 		{PlatformID: "p1", Account: "user1", NodeHash: "valid-node", ExpiryNs: 9999, LastAccessedNs: 1},        // valid
 		{PlatformID: "p-missing", Account: "user2", NodeHash: "valid-node", ExpiryNs: 9999, LastAccessedNs: 1}, // orphan: platform missing
@@ -121,6 +125,12 @@ func TestRepairConsistency_RemovesOrphans(t *testing.T) {
 	lat, _ := cacheRepo.LoadAllNodeLatency()
 	if len(lat) != 1 || lat[0].NodeHash != "valid-node" {
 		t.Fatalf("expected only valid-node latency, got %+v", lat)
+	}
+
+	// Verify node_quality: only valid-node's quality survives.
+	qual, _ := cacheRepo.LoadAllNodeQuality()
+	if len(qual) != 1 || qual[0].NodeHash != "valid-node" {
+		t.Fatalf("expected only valid-node quality, got %+v", qual)
 	}
 
 	// Verify leases: only (p1, user1) survives.
@@ -175,6 +185,9 @@ func TestRepairConsistency_ValidRecordsSurvive(t *testing.T) {
 	cacheRepo.BulkUpsertNodeLatency([]model.NodeLatency{
 		{NodeHash: "n1", Domain: "example.com", EwmaNs: 500, LastUpdatedNs: 1},
 	})
+	cacheRepo.BulkUpsertNodeQuality([]model.NodeQuality{
+		{NodeHash: "n1", Profile: "generic", Grade: "A", LastCheckedNs: 100},
+	})
 	cacheRepo.BulkUpsertLeases([]model.Lease{
 		{PlatformID: "p1", Account: "a1", NodeHash: "n1", ExpiryNs: 9999, LastAccessedNs: 1},
 	})
@@ -186,10 +199,11 @@ func TestRepairConsistency_ValidRecordsSurvive(t *testing.T) {
 	sns, _ := cacheRepo.LoadAllSubscriptionNodes()
 	dyn, _ := cacheRepo.LoadAllNodesDynamic()
 	lat, _ := cacheRepo.LoadAllNodeLatency()
+	qual, _ := cacheRepo.LoadAllNodeQuality()
 	leases, _ := cacheRepo.LoadAllLeases()
 
-	if len(nodes) != 1 || len(sns) != 1 || len(dyn) != 1 || len(lat) != 1 || len(leases) != 1 {
-		t.Fatalf("valid records should survive: nodes=%d sns=%d dyn=%d lat=%d leases=%d",
-			len(nodes), len(sns), len(dyn), len(lat), len(leases))
+	if len(nodes) != 1 || len(sns) != 1 || len(dyn) != 1 || len(lat) != 1 || len(qual) != 1 || len(leases) != 1 {
+		t.Fatalf("valid records should survive: nodes=%d sns=%d dyn=%d lat=%d qual=%d leases=%d",
+			len(nodes), len(sns), len(dyn), len(lat), len(qual), len(leases))
 	}
 }

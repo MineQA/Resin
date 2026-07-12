@@ -969,6 +969,7 @@ func TestMarkNodeRemovedDirty_DeletesStaticDynamicAndLatency(t *testing.T) {
 	entry.LastAuthorityLatencyProbeAttempt.Store(time.Now().UnixNano())
 	entry.LatencyTable.Update("example.com", 55*time.Millisecond, 5*time.Minute)
 	entry.LatencyTable.Update("cloudflare.com", 65*time.Millisecond, 5*time.Minute)
+	entry.SetQuality(&model.NodeQuality{NodeHash: hashHex, Profile: "generic", Grade: "A", LastCheckedNs: 1000})
 
 	readers := state.CacheReaders{
 		ReadNodeStatic: func(h string) *model.NodeStatic {
@@ -1011,6 +1012,12 @@ func TestMarkNodeRemovedDirty_DeletesStaticDynamicAndLatency(t *testing.T) {
 				LastUpdatedNs: stats.LastUpdated.UnixNano(),
 			}
 		},
+		ReadNodeQuality: func(key model.NodeQualityKey) *model.NodeQuality {
+			if key.NodeHash != hashHex {
+				return nil
+			}
+			return entry.GetQuality()
+		},
 	}
 
 	// Seed cache rows for this node.
@@ -1018,6 +1025,7 @@ func TestMarkNodeRemovedDirty_DeletesStaticDynamicAndLatency(t *testing.T) {
 	engine.MarkNodeDynamic(hashHex)
 	engine.MarkNodeLatency(hashHex, "example.com")
 	engine.MarkNodeLatency(hashHex, "cloudflare.com")
+	engine.MarkNodeQuality(model.NodeQualityKey{NodeHash: hashHex, Profile: "generic"})
 	if err := engine.FlushDirtySets(readers); err != nil {
 		t.Fatalf("seed FlushDirtySets: %v", err)
 	}
@@ -1050,5 +1058,13 @@ func TestMarkNodeRemovedDirty_DeletesStaticDynamicAndLatency(t *testing.T) {
 	}
 	if len(latencies) != 0 {
 		t.Fatalf("node_latency not deleted: %+v", latencies)
+	}
+
+	qualities, err := engine.LoadAllNodeQuality()
+	if err != nil {
+		t.Fatalf("LoadAllNodeQuality: %v", err)
+	}
+	if len(qualities) != 0 {
+		t.Fatalf("node_quality not deleted: %+v", qualities)
 	}
 }

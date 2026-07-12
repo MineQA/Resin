@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createColumnHelper } from "@tanstack/react-table";
-import { AlertTriangle, Copy, Download, Eraser, Globe, RefreshCw, Settings, Sparkles, X, Zap } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Copy, Download, Eraser, Globe, RefreshCw, Settings, Sparkles, X, XCircle, Zap } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useLocation } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge";
+import type { BadgeVariant } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { DataTable } from "../../components/ui/DataTable";
 import { Card } from "../../components/ui/Card";
@@ -26,9 +27,9 @@ import { listPlatforms } from "../platforms/api";
 import type { Platform } from "../platforms/types";
 import { listSubscriptions } from "../subscriptions/api";
 import { buildNodePoolExportURL, exportNodePoolText, getNode, listNodes, probeEgress, probeLatency } from "./api";
-import type { NodeSummary } from "./types";
+import type { NodeQuality, NodeSummary } from "./types";
 import { getAllRegions, getRegionName } from "./regions";
-import type { NodeListFilters, NodeSortBy, SortOrder } from "./types";
+import type { NodeListFilters, NodeSortBy, QualityGradeFilter, SortOrder } from "./types";
 
 type NodeStatusFilter = "all" | "healthy" | "circuit_open" | "error" | "disabled";
 type NodeRoutableFilter = "all" | "routable" | "unroutable";
@@ -64,6 +65,11 @@ type NodeFilterDraft = {
   routable: NodeRoutableFilter;
   protocolInclude: string[];
   protocolExclude: string[];
+  quality_grade: string;
+  quality_min_score: string;
+  quality_cloudflare_challenged: string;
+  quality_checked_since: string;
+  quality_profile: string;
 };
 
 const defaultFilterDraft: NodeFilterDraft = {
@@ -76,6 +82,11 @@ const defaultFilterDraft: NodeFilterDraft = {
   routable: "all",
   protocolInclude: [],
   protocolExclude: [],
+  quality_grade: "",
+  quality_min_score: "",
+  quality_cloudflare_challenged: "any",
+  quality_checked_since: "",
+  quality_profile: "",
 };
 
 const NODE_LIST_SETTINGS_KEY = "resin_node_list_settings";
@@ -255,10 +266,38 @@ function parseProtocolList(raw: string): string[] {
     .filter(Boolean);
 }
 
+/** Convert an RFC3339 timestamp to a value usable in <input type="datetime-local">. */
+function toDatetimeLocalValue(rfc3339: string): string {
+  if (!rfc3339) return "";
+  try {
+    const d = new Date(rfc3339);
+    if (Number.isNaN(d.getTime())) return "";
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  } catch {
+    return "";
+  }
+}
+
+/** Convert a datetime-local input value back to an RFC3339 string. Empty returns "". */
+function fromDatetimeLocalValue(localValue: string): string {
+  if (!localValue) return "";
+  try {
+    const d = new Date(localValue);
+    if (Number.isNaN(d.getTime())) return "";
+    return d.toISOString();
+  } catch {
+    return "";
+  }
+}
+
 function draftFromQuery(search: string, settings: NodeListSettings = DEFAULT_NODE_LIST_SETTINGS): NodeFilterDraft {
   const params = new URLSearchParams(search);
   const tagKeyword = trimQueryValue(params, "tag_keyword") || trimQueryValue(params, "tag");
   const routable = parseRoutableParam(params.get("routable")) ?? (settings.defaultRoutableOnly ? "routable" : "all");
+
+  const qualityCloudflare = params.get("quality_cloudflare_challenged");
+  const qualityCloudflareVal = qualityCloudflare === null ? "any" : (parseBoolParam(qualityCloudflare) === undefined ? "any" : String(parseBoolParam(qualityCloudflare)));
 
   return {
     platform_id: trimQueryValue(params, "platform_id"),
@@ -270,6 +309,11 @@ function draftFromQuery(search: string, settings: NodeListSettings = DEFAULT_NOD
     routable,
     protocolInclude: parseProtocolList(params.get("protocol") ?? ""),
     protocolExclude: parseProtocolList(params.get("exclude_protocol") ?? ""),
+    quality_grade: trimQueryValue(params, "quality_grade").toUpperCase(),
+    quality_min_score: trimQueryValue(params, "quality_min_score"),
+    quality_cloudflare_challenged: qualityCloudflareVal,
+    quality_checked_since: trimQueryValue(params, "quality_checked_since"),
+    quality_profile: trimQueryValue(params, "quality_profile"),
   };
 }
 
@@ -303,7 +347,7 @@ function draftToActiveFilters(draft: NodeFilterDraft): NodeListFilters {
       break;
   }
 
-  return {
+  const filters: NodeListFilters = {
     platform_id: draft.platform_id,
     subscription_id: draft.subscription_id,
     tag_keyword: draft.tag_keyword,
@@ -316,6 +360,36 @@ function draftToActiveFilters(draft: NodeFilterDraft): NodeListFilters {
     protocol: draft.protocolInclude.length > 0 ? draft.protocolInclude.join(",") : undefined,
     exclude_protocol: draft.protocolExclude.length > 0 ? draft.protocolExclude.join(",") : undefined,
   };
+
+  // Quality filters
+  const grade = draft.quality_grade.trim().toUpperCase();
+  if (grade && (QUALITY_GRADE_OPTIONS as string[]).includes(grade)) {
+    filters.quality_grade = grade as QualityGradeFilter;
+  }
+
+  const minScoreRaw = draft.quality_min_score.trim();
+  if (minScoreRaw) {
+    const minScore = Number(minScoreRaw);
+    if (Number.isFinite(minScore)) {
+      filters.quality_min_score = Math.max(0, Math.min(100, Math.round(minScore)));
+    }
+  }
+
+  if (draft.quality_cloudflare_challenged === "true" || draft.quality_cloudflare_challenged === "false") {
+    filters.quality_cloudflare_challenged = draft.quality_cloudflare_challenged === "true";
+  }
+
+  const checkedSince = draft.quality_checked_since.trim();
+  if (checkedSince) {
+    filters.quality_checked_since = checkedSince;
+  }
+
+  const profile = draft.quality_profile.trim().toLowerCase();
+  if (profile && (QUALITY_PROFILE_OPTIONS as string[]).includes(profile)) {
+    filters.quality_profile = profile;
+  }
+
+  return filters;
 }
 
 function firstTag(node: { display_tag?: string; tags: { tag: string }[] }): string {
@@ -428,6 +502,42 @@ function formatNodeProtocol(protocol?: string): string {
       return value;
   }
 }
+
+/** Grade badge variant consistent with ProxyCheckPage grade colors. */
+function gradeBadgeVariant(grade: string): BadgeVariant {
+  switch (grade) {
+    case "A":
+      return "success";
+    case "B":
+      return "info";
+    case "C":
+      return "warning";
+    case "D":
+    case "F":
+      return "danger";
+    default:
+      return "neutral";
+  }
+}
+
+function formatQualityLatency(value: number | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "-";
+  }
+  return `${value.toFixed(0)} ms`;
+}
+
+function qualityScoreColor(score: number): string {
+  if (!Number.isFinite(score)) {
+    return "var(--text-secondary)";
+  }
+  if (score >= 80) return "var(--success)";
+  if (score >= 60) return "var(--warning)";
+  return "var(--danger)";
+}
+
+const QUALITY_GRADE_OPTIONS: QualityGradeFilter[] = ["A", "B", "C", "D", "F"];
+const QUALITY_PROFILE_OPTIONS: string[] = ["generic", "openai", "grok", "gemini", "claude"];
 
 export function NodesPage() {
   const { t } = useI18n();
@@ -954,6 +1064,33 @@ export function NodesPage() {
         );
       },
     }),
+    col.display({
+      id: "quality",
+      header: () => (
+        <button type="button" className="table-sort-btn" onClick={() => changeSort("quality_score")}>
+          {t("质量")}
+          <span>{sortIndicator(sortBy === "quality_score", sortOrder)}</span>
+        </button>
+      ),
+      cell: (info) => {
+        const node = info.row.original;
+        const q = node.quality;
+        if (!q) {
+          return <span style={{ color: "var(--text-muted)" }}>-</span>;
+        }
+        return (
+          <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "nowrap" }}>
+            <Badge variant={gradeBadgeVariant(q.quality_grade)}>{q.quality_grade}</Badge>
+            <span style={{ color: qualityScoreColor(q.quality_score), fontWeight: 600, fontSize: "0.8rem" }}>
+              {Math.round(q.quality_score)}
+            </span>
+            {q.quality_cloudflare_challenged ? (
+              <Badge variant="warning" style={{ fontSize: "0.65rem", padding: "2px 5px" }}>CF</Badge>
+            ) : null}
+          </div>
+        );
+      },
+    }),
     col.accessor("last_latency_probe_attempt", {
       header: t("上次探测"),
       cell: (info) => formatRelativeTime(info.getValue()),
@@ -1223,6 +1360,85 @@ export function NodesPage() {
                   );
                 })}
               </div>
+            </div>
+
+            <div style={NODE_FILTER_ITEM_STYLE}>
+              <label htmlFor="node-quality-grade" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                {t("质量等级")}
+              </label>
+              <Select
+                id="node-quality-grade"
+                value={draftFilters.quality_grade}
+                onChange={(event) => handleFilterChange("quality_grade", event.target.value)}
+                style={NODE_FILTER_CONTROL_STYLE}
+              >
+                <option value="">{t("不限")}</option>
+                {QUALITY_GRADE_OPTIONS.map((g) => (
+                  <option key={g} value={g}>{g}</option>
+                ))}
+              </Select>
+            </div>
+
+            <div style={NODE_FILTER_ITEM_STYLE}>
+              <label htmlFor="node-quality-min-score" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                {t("最低质量分")}
+              </label>
+              <Input
+                id="node-quality-min-score"
+                type="number"
+                min={0}
+                max={100}
+                value={draftFilters.quality_min_score}
+                onChange={(event) => handleFilterChange("quality_min_score", event.target.value)}
+                placeholder="0-100"
+                style={NODE_FILTER_CONTROL_STYLE}
+              />
+            </div>
+
+            <div style={NODE_FILTER_ITEM_STYLE}>
+              <label htmlFor="node-quality-cf" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                {t("Cloudflare 拦截")}
+              </label>
+              <Select
+                id="node-quality-cf"
+                value={draftFilters.quality_cloudflare_challenged}
+                onChange={(event) => handleFilterChange("quality_cloudflare_challenged", event.target.value)}
+                style={NODE_FILTER_CONTROL_STYLE}
+              >
+                <option value="any">{t("不限")}</option>
+                <option value="true">{t("被拦截")}</option>
+                <option value="false">{t("未拦截")}</option>
+              </Select>
+            </div>
+
+            <div style={NODE_FILTER_ITEM_STYLE}>
+              <label htmlFor="node-quality-profile" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                {t("质量 Profile")}
+              </label>
+              <Select
+                id="node-quality-profile"
+                value={draftFilters.quality_profile}
+                onChange={(event) => handleFilterChange("quality_profile", event.target.value)}
+                style={NODE_FILTER_CONTROL_STYLE}
+              >
+                <option value="">{t("不限")}</option>
+                {QUALITY_PROFILE_OPTIONS.map((p) => (
+                  <option key={p} value={p}>{p}</option>
+                ))}
+              </Select>
+            </div>
+
+            <div style={{ ...NODE_FILTER_ITEM_STYLE, flex: "1 1 180px" }}>
+              <label htmlFor="node-quality-checked-since" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                {t("检测时间起")}
+              </label>
+              <Input
+                id="node-quality-checked-since"
+                type="datetime-local"
+                value={draftFilters.quality_checked_since ? toDatetimeLocalValue(draftFilters.quality_checked_since) : ""}
+                onChange={(event) => handleFilterChange("quality_checked_since", fromDatetimeLocalValue(event.target.value))}
+                style={NODE_FILTER_CONTROL_STYLE}
+              />
             </div>
 
             <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.125rem", marginLeft: "auto" }}>
@@ -1599,6 +1815,97 @@ export function NodesPage() {
                 {detailNode.last_error ? (
                   <div className="callout callout-error">{t("最近错误：{{message}}", { message: detailNode.last_error })}</div>
                 ) : null}
+              </section>
+
+              <section className="platform-drawer-section">
+                <div className="platform-drawer-section-head">
+                  <h4>{t("质量检测")}</h4>
+                  <p>{t("后台质量检测对目标服务的评级，与节点健康/熔断相互独立。")}</p>
+                </div>
+                {(() => {
+                  const q: NodeQuality | undefined = detailNode.quality;
+                  if (!q) {
+                    return <p className="muted">{t("尚未记录质量检测结果。")}</p>;
+                  }
+                  return (
+                    <>
+                      <div className="stats-grid">
+                        <div>
+                          <span>{t("质量等级")}</span>
+                          <p>
+                            <Badge variant={gradeBadgeVariant(q.quality_grade)}>{q.quality_grade}</Badge>
+                          </p>
+                        </div>
+                        <div>
+                          <span>{t("质量分")}</span>
+                          <p style={{ color: qualityScoreColor(q.quality_score) }}>{Math.round(q.quality_score)}</p>
+                        </div>
+                        <div>
+                          <span>{t("质量 Profile")}</span>
+                          <p>{q.quality_profile || "-"}</p>
+                        </div>
+                        <div>
+                          <span>{t("服务可达")}</span>
+                          <p>
+                            {q.quality_service_reachable ? (
+                              <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "var(--success)" }}>
+                                <CheckCircle2 size={14} /> {t("可达")}
+                              </span>
+                            ) : (
+                              <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "var(--danger)" }}>
+                                <XCircle size={14} /> {t("不可达")}
+                              </span>
+                            )}
+                          </p>
+                        </div>
+                        <div>
+                          <span>{t("API 可达")}</span>
+                          <p>
+                            {q.quality_api_reachable ? (
+                              <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "var(--success)" }}>
+                                <CheckCircle2 size={14} /> {t("可达")}
+                              </span>
+                            ) : (
+                              <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "var(--danger)" }}>
+                                <XCircle size={14} /> {t("不可达")}
+                              </span>
+                            )}
+                          </p>
+                        </div>
+                        <div>
+                          <span>{t("Cloudflare 拦截")}</span>
+                          <p>
+                            {q.quality_cloudflare_challenged ? (
+                              <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "var(--warning)" }}>
+                                <Badge variant="warning">CF</Badge>
+                                {q.quality_cloudflare_challenge_type ? (
+                                  <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{q.quality_cloudflare_challenge_type}</span>
+                                ) : null}
+                              </span>
+                            ) : (
+                              <span style={{ color: "var(--text-muted)" }}>{t("未拦截")}</span>
+                            )}
+                          </p>
+                        </div>
+                        <div>
+                          <span>{t("平均延迟")}</span>
+                          <p>{formatQualityLatency(q.quality_avg_latency_ms)}</p>
+                        </div>
+                        <div>
+                          <span>{t("不稳定")}</span>
+                          <p>{q.quality_unstable ? <Badge variant="warning">{t("是")}</Badge> : <Badge variant="muted">{t("否")}</Badge>}</p>
+                        </div>
+                        <div>
+                          <span>{t("上次质量检测")}</span>
+                          <p>{q.quality_last_checked ? formatDateTime(q.quality_last_checked) : "-"}</p>
+                        </div>
+                      </div>
+                      {q.quality_last_error ? (
+                        <div className="callout callout-error">{t("质量检测错误：{{message}}", { message: q.quality_last_error })}</div>
+                      ) : null}
+                    </>
+                  );
+                })()}
               </section>
 
               <section className="platform-drawer-section">

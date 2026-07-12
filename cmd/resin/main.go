@@ -256,6 +256,9 @@ func newTopologyRuntime(
 		OnNodeLatencyChanged: func(hash node.Hash, domain string) {
 			engine.MarkNodeLatency(hash.Hex(), domain)
 		},
+		OnNodeQualityChanged: func(key model.NodeQualityKey) {
+			engine.MarkNodeQuality(key)
+		},
 		MaxLatencyTableEntries: envCfg.MaxLatencyTableEntries,
 		MaxConsecutiveFailures: func() int {
 			return runtimeConfigSnapshot(runtimeCfg).MaxConsecutiveFailures
@@ -315,6 +318,32 @@ func newTopologyRuntime(
 		LatencyAuthorities: func() []string {
 			return runtimeConfigSnapshot(runtimeCfg).LatencyAuthorities
 		},
+		QualityCfg: &probe.QualityProbeConfig{
+			Enabled: func() bool {
+				return runtimeConfigSnapshot(runtimeCfg).ProxyCheckEnabled
+			},
+			Interval: func() time.Duration {
+				return time.Duration(runtimeConfigSnapshot(runtimeCfg).ProxyCheckInterval)
+			},
+			Profile: func() string {
+				return runtimeConfigSnapshot(runtimeCfg).ProxyCheckProfile
+			},
+			Opts: func() probe.ProxyCheckOptions {
+				cfg := runtimeConfigSnapshot(runtimeCfg)
+				return probe.ProxyCheckOptions{
+					ServiceReachability: cfg.ProxyCheckServiceReachability,
+					APIReachability:     cfg.ProxyCheckAPIReachability,
+					CloudflareDetection: cfg.ProxyCheckCloudflareDetection,
+					ProtocolDiscovery:   false, // placeholder, reserved
+					MultiRound:          cfg.ProxyCheckMultiRound,
+					Rounds:              cfg.ProxyCheckRounds,
+					IPInfoEnrichment:    false, // placeholder, reserved
+				}
+			},
+			TriggerOnNewNode: func() bool {
+				return runtimeConfigSnapshot(runtimeCfg).ProxyCheckTriggerOnNewNode
+			},
+		},
 	})
 
 	pool.SetOnNodeAdded(func(hash node.Hash) {
@@ -322,6 +351,11 @@ func newTopologyRuntime(
 		outboundMgr.EnsureNodeOutbound(hash)
 		// No NotifyNodeDirty here — AddNodeFromSub already notifies all platforms.
 		probeMgr.TriggerImmediateEgressProbe(hash)
+		// Trigger quality check on new node if enabled.
+		cfg := runtimeConfigSnapshot(runtimeCfg)
+		if cfg.ProxyCheckEnabled && cfg.ProxyCheckTriggerOnNewNode {
+			probeMgr.TriggerImmediateQualityProbe(hash)
+		}
 	})
 	pool.SetOnNodeRemoved(func(hash node.Hash, entry *node.NodeEntry) {
 		markNodeRemovedDirty(engine, hash, entry)
@@ -343,6 +377,11 @@ func newTopologyRuntime(
 			outboundMgr.EnsureNodeOutbound(hash)
 			probeMgr.TriggerImmediateEgressProbe(hash)
 			probeMgr.TriggerImmediateLatencyProbe(hash)
+			// Trigger quality check on re-enabled node if enabled.
+			cfg := runtimeConfigSnapshot(runtimeCfg)
+			if cfg.ProxyCheckEnabled && cfg.ProxyCheckTriggerOnNewNode {
+				probeMgr.TriggerImmediateQualityProbe(hash)
+			}
 		},
 	})
 	ephemeralCleaner := topology.NewEphemeralCleaner(
@@ -369,13 +408,26 @@ func markNodeRemovedDirty(engine *state.StateEngine, hash node.Hash, entry *node
 	engine.MarkNodeStaticDelete(hashHex)
 	engine.MarkNodeDynamicDelete(hashHex)
 
-	if entry == nil || entry.LatencyTable == nil {
+	if entry == nil {
 		return
 	}
-	entry.LatencyTable.Range(func(domain string, _ node.DomainLatencyStats) bool {
-		engine.MarkNodeLatencyDelete(hashHex, domain)
-		return true
-	})
+
+	// Mark current quality profile for deletion.
+	// Stale old-profile rows remain as weak cache residue until consistency
+	// cleanup runs; we do not maintain multi-profile runtime storage.
+	if q := entry.GetQuality(); q != nil {
+		engine.MarkNodeQualityDelete(model.NodeQualityKey{
+			NodeHash: hashHex,
+			Profile:  q.Profile,
+		})
+	}
+
+	if entry.LatencyTable != nil {
+		entry.LatencyTable.Range(func(domain string, _ node.DomainLatencyStats) bool {
+			engine.MarkNodeLatencyDelete(hashHex, domain)
+			return true
+		})
+	}
 }
 
 func bootstrapTopology(
@@ -564,6 +616,24 @@ func newFlushReaders(
 				EwmaNs:        int64(stats.Ewma),
 				LastUpdatedNs: stats.LastUpdated.UnixNano(),
 			}
+		},
+		ReadNodeQuality: func(key model.NodeQualityKey) *model.NodeQuality {
+			h, err := node.ParseHex(key.NodeHash)
+			if err != nil {
+				return nil
+			}
+			entry, ok := pool.GetEntry(h)
+			if !ok {
+				return nil
+			}
+			q := entry.GetQuality()
+			if q == nil || q.Profile != key.Profile {
+				// In-memory stores only the latest profile; return nil when profile
+				// does not match so the flush treats this upsert mark as a delete,
+				// preventing stale old-profile rows from being re-asserted.
+				return nil
+			}
+			return q
 		},
 		ReadLease: func(key model.LeaseKey) *model.Lease {
 			return router.ReadLease(key)
@@ -974,8 +1044,44 @@ func restoreBootstrapNodeLatencies(
 	return nil
 }
 
+func restoreBootstrapNodeQuality(
+	engine *state.StateEngine,
+	pool *topology.GlobalNodePool,
+) error {
+	qualities, err := engine.LoadAllNodeQuality()
+	if err != nil {
+		return fmt.Errorf("load node_quality: %w", err)
+	}
+
+	loadedCount := 0
+	for _, nq := range qualities {
+		hash, err := node.ParseHex(nq.NodeHash)
+		if err != nil {
+			continue
+		}
+		entry, ok := pool.GetEntry(hash)
+		if !ok {
+			continue
+		}
+		// In-memory stores only the latest profile. Bootstrap the most recently
+		// checked quality row. If multiple profiles exist for the same node in
+		// the DB, the row with the highest last_checked_ns wins.
+		existing := entry.GetQuality()
+		if existing != nil && existing.LastCheckedNs >= nq.LastCheckedNs {
+			continue
+		}
+		cp := nq
+		entry.SetQuality(&cp)
+		if existing == nil {
+			loadedCount++
+		}
+	}
+	log.Printf("Loaded %d node quality entries from cache.db", loadedCount)
+	return nil
+}
+
 // bootstrapNodes loads cached node data from persistence for bootstrap recovery.
-// Steps: static nodes → subscription bindings → dynamic state → latency tables.
+// Steps: static nodes → subscription bindings → dynamic state → latency tables → node quality.
 func bootstrapNodes(
 	engine *state.StateEngine,
 	pool *topology.GlobalNodePool,
@@ -1003,6 +1109,9 @@ func bootstrapNodes(
 		envCfg.MaxLatencyTableEntries,
 		latencyAuthorities,
 	); err != nil {
+		return err
+	}
+	if err := restoreBootstrapNodeQuality(engine, pool); err != nil {
 		return err
 	}
 	return nil

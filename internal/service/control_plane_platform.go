@@ -687,6 +687,24 @@ type NodeSummary struct {
 	ReferenceLatencyMs               *float64  `json:"reference_latency_ms,omitempty"`
 	LastEgressUpdateAttempt          string    `json:"last_egress_update_attempt,omitempty"`
 	Tags                             []NodeTag `json:"tags"`
+
+	Quality *NodeQualitySummary `json:"quality,omitempty"`
+}
+
+// NodeQualitySummary is the API response summary for active proxy quality checks.
+// Field names keep the quality_* prefix for compatibility with list/filter UI naming.
+type NodeQualitySummary struct {
+	Profile                 string  `json:"quality_profile,omitempty"`
+	Grade                   string  `json:"quality_grade"`
+	Score                   float64 `json:"quality_score"`
+	Unstable                bool    `json:"quality_unstable"`
+	ServiceReachable        bool    `json:"quality_service_reachable"`
+	APIReachable            bool    `json:"quality_api_reachable"`
+	CloudflareChallenged    bool    `json:"quality_cloudflare_challenged"`
+	CloudflareChallengeType string  `json:"quality_cloudflare_challenge_type,omitempty"`
+	AvgLatencyMs            float64 `json:"quality_avg_latency_ms,omitempty"`
+	LastChecked             string  `json:"quality_last_checked,omitempty"`
+	LastError               string  `json:"quality_last_error,omitempty"`
 }
 
 // IsHealthyAndEnabled follows the node-summary health rule used by API/UI
@@ -773,6 +791,26 @@ func (s *ControlPlaneService) nodeEntryToSummary(h node.Hash, entry *node.NodeEn
 			})
 		}
 	}
+	// Quality check summary.
+	if q := entry.GetQuality(); q != nil {
+		quality := &NodeQualitySummary{
+			Profile:                 q.Profile,
+			Grade:                   q.Grade,
+			Score:                   q.Score,
+			Unstable:                q.Unstable,
+			ServiceReachable:        q.ServiceReachable,
+			APIReachable:            q.APIReachable,
+			CloudflareChallenged:    q.CloudflareChallenged,
+			CloudflareChallengeType: q.CloudflareChallengeType,
+			AvgLatencyMs:            q.AvgLatencyMs,
+			LastError:               q.LastError,
+		}
+		if q.LastCheckedNs > 0 {
+			quality.LastChecked = time.Unix(0, q.LastCheckedNs).UTC().Format(time.RFC3339Nano)
+		}
+		ns.Quality = quality
+	}
+
 	if ns.Tags == nil {
 		ns.Tags = []NodeTag{}
 	}

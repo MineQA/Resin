@@ -10,6 +10,9 @@ import (
 // NodeLatencyDirtyKey is the composite key for the node_latency dirty set.
 type NodeLatencyDirtyKey = model.NodeLatencyKey
 
+// NodeQualityDirtyKey is the composite key for the node_quality dirty set.
+type NodeQualityDirtyKey = model.NodeQualityKey
+
 // LeaseDirtyKey is the composite key for the leases dirty set.
 type LeaseDirtyKey = model.LeaseKey
 
@@ -23,6 +26,7 @@ type CacheReaders struct {
 	ReadNodeStatic       func(hash string) *model.NodeStatic
 	ReadNodeDynamic      func(hash string) *model.NodeDynamic
 	ReadNodeLatency      func(key NodeLatencyDirtyKey) *model.NodeLatency
+	ReadNodeQuality      func(key NodeQualityDirtyKey) *model.NodeQuality
 	ReadLease            func(key LeaseDirtyKey) *model.Lease
 	ReadSubscriptionNode func(key SubscriptionNodeDirtyKey) *model.SubscriptionNode
 }
@@ -38,6 +42,7 @@ type StateEngine struct {
 	dirtyNodesStatic       *DirtySet[string]
 	dirtyNodesDynamic      *DirtySet[string]
 	dirtyNodeLatency       *DirtySet[NodeLatencyDirtyKey]
+	dirtyNodeQuality       *DirtySet[NodeQualityDirtyKey]
 	dirtyLeases            *DirtySet[LeaseDirtyKey]
 	dirtySubscriptionNodes *DirtySet[SubscriptionNodeDirtyKey]
 }
@@ -50,6 +55,7 @@ func newStateEngine(stateRepo *StateRepo, cacheRepo *CacheRepo) *StateEngine {
 		dirtyNodesStatic:       NewDirtySet[string](),
 		dirtyNodesDynamic:      NewDirtySet[string](),
 		dirtyNodeLatency:       NewDirtySet[NodeLatencyDirtyKey](),
+		dirtyNodeQuality:       NewDirtySet[NodeQualityDirtyKey](),
 		dirtyLeases:            NewDirtySet[LeaseDirtyKey](),
 		dirtySubscriptionNodes: NewDirtySet[SubscriptionNodeDirtyKey](),
 	}
@@ -67,6 +73,13 @@ func (e *StateEngine) MarkNodeLatency(nodeHash, domain string) {
 }
 func (e *StateEngine) MarkNodeLatencyDelete(nodeHash, domain string) {
 	e.dirtyNodeLatency.MarkDelete(NodeLatencyDirtyKey{NodeHash: nodeHash, Domain: domain})
+}
+
+func (e *StateEngine) MarkNodeQuality(key NodeQualityDirtyKey) {
+	e.dirtyNodeQuality.MarkUpsert(key)
+}
+func (e *StateEngine) MarkNodeQualityDelete(key NodeQualityDirtyKey) {
+	e.dirtyNodeQuality.MarkDelete(key)
 }
 
 func (e *StateEngine) MarkLease(platformID, account string) {
@@ -88,6 +101,7 @@ func (e *StateEngine) DirtyCount() int {
 	return e.dirtyNodesStatic.Len() +
 		e.dirtyNodesDynamic.Len() +
 		e.dirtyNodeLatency.Len() +
+		e.dirtyNodeQuality.Len() +
 		e.dirtyLeases.Len() +
 		e.dirtySubscriptionNodes.Len()
 }
@@ -123,6 +137,7 @@ func (e *StateEngine) FlushDirtySets(readers CacheReaders) error {
 	drainedSubNodes := e.dirtySubscriptionNodes.Drain()
 	drainedDynamic := e.dirtyNodesDynamic.Drain()
 	drainedLatency := e.dirtyNodeLatency.Drain()
+	drainedQuality := e.dirtyNodeQuality.Drain()
 	drainedLeases := e.dirtyLeases.Drain()
 
 	// Re-merge helper on failure.
@@ -131,14 +146,20 @@ func (e *StateEngine) FlushDirtySets(readers CacheReaders) error {
 		e.dirtySubscriptionNodes.Merge(drainedSubNodes)
 		e.dirtyNodesDynamic.Merge(drainedDynamic)
 		e.dirtyNodeLatency.Merge(drainedLatency)
+		e.dirtyNodeQuality.Merge(drainedQuality)
 		e.dirtyLeases.Merge(drainedLeases)
 	}
 
 	// Classify each dirty set into upsert values and delete keys.
+	qualityReader := readers.ReadNodeQuality
+	if qualityReader == nil {
+		qualityReader = func(NodeQualityDirtyKey) *model.NodeQuality { return nil }
+	}
 	upsertStatic, deleteStatic := classifyDirtySet(drainedStatic, readers.ReadNodeStatic)
 	upsertSubNodes, deleteSubNodes := classifyDirtySet(drainedSubNodes, readers.ReadSubscriptionNode)
 	upsertDynamic, deleteDynamic := classifyDirtySet(drainedDynamic, readers.ReadNodeDynamic)
 	upsertLatency, deleteLatency := classifyDirtySet(drainedLatency, readers.ReadNodeLatency)
+	upsertQuality, deleteQuality := classifyDirtySet(drainedQuality, qualityReader)
 	upsertLeases, deleteLeases := classifyDirtySet(drainedLeases, readers.ReadLease)
 
 	// Execute all writes in a single transaction.
@@ -151,6 +172,8 @@ func (e *StateEngine) FlushDirtySets(readers CacheReaders) error {
 		DeleteNodesDynamic:      deleteDynamic,
 		UpsertNodeLatency:       upsertLatency,
 		DeleteNodeLatency:       deleteLatency,
+		UpsertNodeQuality:       upsertQuality,
+		DeleteNodeQuality:       deleteQuality,
 		UpsertLeases:            upsertLeases,
 		DeleteLeases:            deleteLeases,
 	}); err != nil {
@@ -158,7 +181,7 @@ func (e *StateEngine) FlushDirtySets(readers CacheReaders) error {
 		return fmt.Errorf("flush: %w", err)
 	}
 
-	log.Printf("[state] flushed dirty sets: static=%d, sub_nodes=%d, dynamic=%d, latency=%d, leases=%d",
-		len(drainedStatic), len(drainedSubNodes), len(drainedDynamic), len(drainedLatency), len(drainedLeases))
+	log.Printf("[state] flushed dirty sets: static=%d, sub_nodes=%d, dynamic=%d, latency=%d, quality=%d, leases=%d",
+		len(drainedStatic), len(drainedSubNodes), len(drainedDynamic), len(drainedLatency), len(drainedQuality), len(drainedLeases))
 	return nil
 }

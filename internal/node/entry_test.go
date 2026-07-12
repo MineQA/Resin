@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Resinat/Resin/internal/model"
 	"github.com/Resinat/Resin/internal/testutil"
 )
 
@@ -308,6 +309,45 @@ func TestNodeEntry_EgressRegion(t *testing.T) {
 	e.SetEgressRegion("")
 	if got := e.GetEgressRegion(); got != "" {
 		t.Fatalf("cleared egress region: got %q, want empty", got)
+	}
+}
+
+func TestNodeEntry_Quality_GetSet(t *testing.T) {
+	e := NewNodeEntry(Hash{}, nil, time.Now(), 0)
+
+	if q := e.GetQuality(); q != nil {
+		t.Fatal("expected nil quality by default")
+	}
+
+	q := &model.NodeQuality{
+		Grade:            "A",
+		Score:            95.0,
+		ServiceReachable: true,
+		Profile:          "generic",
+	}
+	e.SetQuality(q)
+
+	got := e.GetQuality()
+	if got == nil {
+		t.Fatal("expected non-nil quality after SetQuality")
+	}
+	if got.Grade != "A" || got.Score != 95.0 || !got.ServiceReachable {
+		t.Fatalf("unexpected quality: %+v", got)
+	}
+	if got.Profile != "generic" {
+		t.Fatalf("profile: got %q, want %q", got.Profile, "generic")
+	}
+
+	// Modify original — should not affect stored copy.
+	q.Grade = "F"
+	if e.GetQuality().Grade != "A" {
+		t.Fatal("SetQuality must copy the struct, not retain the pointer")
+	}
+
+	// Set nil should clear.
+	e.SetQuality(nil)
+	if e.GetQuality() != nil {
+		t.Fatal("expected nil after SetQuality(nil)")
 	}
 }
 

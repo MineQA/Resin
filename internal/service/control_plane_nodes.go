@@ -28,6 +28,13 @@ type NodeFilters struct {
 	Routable         *bool
 	Protocols        []string // include filter: canonical protocol names; empty/nil = no filter
 	ExcludeProtocols []string // exclude filter: canonical protocol names; empty/nil = no filter
+
+	// Quality check filters (nil/zero means no filter).
+	QualityGrade                *string
+	QualityMinScore             *float64
+	QualityCloudflareChallenged *bool
+	QualityCheckedSince         *time.Time
+	QualityProfile              *string
 }
 
 // ListNodes returns nodes from the pool with optional filters.
@@ -231,6 +238,11 @@ func (s *ControlPlaneService) nodeEntryMatchesFilters(
 			return false
 		}
 	}
+	// Quality filters.
+	if !nodeEntryMatchesQualityFilters(entry, filters) {
+		return false
+	}
+
 	// Protocol filter (cold path).
 	if len(filters.Protocols) > 0 || len(filters.ExcludeProtocols) > 0 {
 		canonical := node.RawOptionsProtocol(entry.RawOptions)
@@ -259,6 +271,50 @@ func (s *ControlPlaneService) nodeEntryMatchesFilters(
 			}
 		}
 	}
+	return true
+}
+
+// nodeEntryMatchesQualityFilters checks whether a node entry matches the
+// quality-related filters. Returns true when no quality filters are set
+// or when the entry matches all set quality filters.
+func nodeEntryMatchesQualityFilters(entry *node.NodeEntry, filters NodeFilters) bool {
+	q := entry.GetQuality()
+
+	// quality_profile: check if quality exists with matching profile name.
+	if filters.QualityProfile != nil {
+		if q == nil || q.Profile != *filters.QualityProfile {
+			return false
+		}
+	}
+
+	// quality_grade: check if quality exists with matching grade string.
+	if filters.QualityGrade != nil {
+		if q == nil || q.Grade != *filters.QualityGrade {
+			return false
+		}
+	}
+
+	// quality_min_score: quality must exist and score must be >= min.
+	if filters.QualityMinScore != nil {
+		if q == nil || q.Score < *filters.QualityMinScore {
+			return false
+		}
+	}
+
+	// quality_cloudflare_challenged: check the challenged flag.
+	if filters.QualityCloudflareChallenged != nil {
+		if q == nil || q.CloudflareChallenged != *filters.QualityCloudflareChallenged {
+			return false
+		}
+	}
+
+	// quality_checked_since: LastCheckedNs must be >= the given timestamp.
+	if filters.QualityCheckedSince != nil {
+		if q == nil || q.LastCheckedNs < filters.QualityCheckedSince.UnixNano() {
+			return false
+		}
+	}
+
 	return true
 }
 

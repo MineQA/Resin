@@ -214,6 +214,38 @@ func HandleNodePoolExport(cp *service.ControlPlaneService) http.HandlerFunc {
 			filters.ExcludeProtocols = excludeProtocols
 		}
 
+		// Quality filters (reuse same field names as /api/v1/nodes).
+		if v := q.Get("quality_grade"); v != "" {
+			filters.QualityGrade = &v
+		}
+		if v := q.Get("quality_profile"); v != "" {
+			filters.QualityProfile = &v
+		}
+		if v := q.Get("quality_min_score"); v != "" {
+			minScore, err := strconv.ParseFloat(v, 64)
+			if err != nil || minScore < 0 || minScore > 100 {
+				writeInvalidArgument(w, "quality_min_score: must be a number between 0 and 100")
+				return
+			}
+			filters.QualityMinScore = &minScore
+		}
+		if v := q.Get("quality_cloudflare_challenged"); v != "" {
+			b, err := strconv.ParseBool(v)
+			if err != nil {
+				writeInvalidArgument(w, "quality_cloudflare_challenged: must be true or false")
+				return
+			}
+			filters.QualityCloudflareChallenged = &b
+		}
+		if v := q.Get("quality_checked_since"); v != "" {
+			parsedTime, err := time.Parse(time.RFC3339Nano, v)
+			if err != nil {
+				writeInvalidArgument(w, "quality_checked_since: invalid RFC3339 timestamp")
+				return
+			}
+			filters.QualityCheckedSince = &parsedTime
+		}
+
 		// --- Fetch nodes ---
 		nodes, err := cp.ListNodes(filters)
 		if err != nil {

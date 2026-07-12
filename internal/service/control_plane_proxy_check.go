@@ -38,6 +38,7 @@ type ProxyCheckRequest struct {
 
 // CheckProxyCheck performs a synchronous proxy check for a single node.
 // It validates the node hash and existence, then delegates to CheckProxySync.
+// On completion, it writes back the quality state via RecordNodeQuality.
 // This is called by the node action endpoint POST /api/v1/nodes/{hash}/actions/proxy-check.
 func (s *ControlPlaneService) CheckProxyCheck(hashStr string, req ProxyCheckRequest) (*probe.ProxyScore, error) {
 	h, err := node.ParseHex(hashStr)
@@ -60,8 +61,17 @@ func (s *ControlPlaneService) CheckProxyCheck(hashStr string, req ProxyCheckRequ
 
 	result, err := s.ProbeMgr.CheckProxySync(h, profile, opts)
 	if err != nil {
+		// Check failed with an error but no score — record a quality entry
+		// with the error so the node's quality state reflects the attempt.
+		nq := probe.ProxyScoreToNodeQuality(profile.Name, nil, err)
+		s.Pool.RecordNodeQuality(h, nq)
 		return nil, internal("proxy check failed", err)
 	}
+
+	// Successful check — map ProxyScore to NodeQuality and record.
+	nq := probe.ProxyScoreToNodeQuality(profile.Name, result, nil)
+	s.Pool.RecordNodeQuality(h, nq)
+
 	return result, nil
 }
 

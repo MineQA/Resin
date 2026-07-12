@@ -170,6 +170,72 @@ func TestCacheRepo_NodeLatency_BulkDelete(t *testing.T) {
 	}
 }
 
+// --- node_quality ---
+
+func TestCacheRepo_NodeQuality_BulkUpsertAndLoad(t *testing.T) {
+	repo := newTestCacheRepo(t)
+
+	entries := []model.NodeQuality{
+		{NodeHash: "aaa", Profile: "generic", Grade: "A", Score: 95.5, Unstable: false, ServiceReachable: true, APIReachable: true, CloudflareChallenged: false, AvgLatencyMs: 120.0, LastCheckedNs: 1000, LastError: ""},
+		{NodeHash: "aaa", Profile: "openai", Grade: "B", Score: 80.0, Unstable: true, ServiceReachable: true, APIReachable: false, CloudflareChallenged: true, CloudflareChallengeType: "turnstile", AvgLatencyMs: 250.5, LastCheckedNs: 2000, LastError: "rate limited"},
+	}
+	if err := repo.BulkUpsertNodeQuality(entries); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := repo.LoadAllNodeQuality()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded) != 2 {
+		t.Fatalf("expected 2, got %d", len(loaded))
+	}
+
+	// Verify bool field round-trip.
+	for _, e := range loaded {
+		if e.NodeHash == "aaa" && e.Profile == "generic" {
+			if e.Grade != "A" || e.Score != 95.5 || e.Unstable || !e.ServiceReachable || !e.APIReachable || e.CloudflareChallenged {
+				t.Fatalf("unexpected quality values for generic: %+v", e)
+			}
+			if e.AvgLatencyMs != 120.0 {
+				t.Fatalf("avg_latency_ms: got %f, want 120.0", e.AvgLatencyMs)
+			}
+		}
+		if e.NodeHash == "aaa" && e.Profile == "openai" {
+			if !e.Unstable || e.CloudflareChallengeType != "turnstile" || e.LastError != "rate limited" {
+				t.Fatalf("unexpected quality values for openai: %+v", e)
+			}
+		}
+	}
+
+	// Idempotent upsert: update existing.
+	entries[0].Score = 97.0
+	if err := repo.BulkUpsertNodeQuality(entries[:1]); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _ = repo.LoadAllNodeQuality()
+	for _, e := range loaded {
+		if e.NodeHash == "aaa" && e.Profile == "generic" && e.Score != 97.0 {
+			t.Fatalf("expected updated score 97.0, got %f", e.Score)
+		}
+	}
+}
+
+func TestCacheRepo_NodeQuality_BulkDelete(t *testing.T) {
+	repo := newTestCacheRepo(t)
+
+	repo.BulkUpsertNodeQuality([]model.NodeQuality{
+		{NodeHash: "aaa", Profile: "generic", Grade: "A", LastCheckedNs: 100},
+		{NodeHash: "aaa", Profile: "openai", Grade: "B", LastCheckedNs: 200},
+	})
+
+	repo.BulkDeleteNodeQuality([]model.NodeQualityKey{{NodeHash: "aaa", Profile: "generic"}})
+	loaded, _ := repo.LoadAllNodeQuality()
+	if len(loaded) != 1 || loaded[0].Profile != "openai" {
+		t.Fatalf("expected only openai, got %+v", loaded)
+	}
+}
+
 // --- leases ---
 
 func TestCacheRepo_Leases_BulkUpsertAndLoad(t *testing.T) {
@@ -296,6 +362,12 @@ func TestCacheRepo_BulkEmpty(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := repo.BulkDeleteSubscriptionNodes(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.BulkUpsertNodeQuality(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.BulkDeleteNodeQuality(nil); err != nil {
 		t.Fatal(err)
 	}
 }

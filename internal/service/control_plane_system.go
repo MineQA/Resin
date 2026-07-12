@@ -95,6 +95,17 @@ var runtimeConfigAllowedFields = map[string]bool{
 	"latency_decay_window":                     true,
 	"cache_flush_interval":                     true,
 	"cache_flush_dirty_threshold":              true,
+
+	// Proxy check
+	"proxy_check_enabled":                     true,
+	"proxy_check_interval":                    true,
+	"proxy_check_profile":                     true,
+	"proxy_check_service_reachability":        true,
+	"proxy_check_api_reachability":            true,
+	"proxy_check_cloudflare_detection":        true,
+	"proxy_check_multi_round":                 true,
+	"proxy_check_rounds":                      true,
+	"proxy_check_trigger_on_new_node":         true,
 }
 
 var platformPatchAllowedFields = map[string]bool{
@@ -262,5 +273,43 @@ func validateRuntimeConfig(cfg *config.RuntimeConfig) *ServiceError {
 			cfg.LatencyAuthorities = append(cfg.LatencyAuthorities, latencyDomain)
 		}
 	}
+
+	// --- Proxy check (quality) validation ---
+
+	// Interval: must be >= 5m when set explicitly (non-zero) or when enabled.
+	minQualityInterval := 5 * time.Minute
+	if cfg.ProxyCheckEnabled && time.Duration(cfg.ProxyCheckInterval) < minQualityInterval {
+		return invalidArg("proxy_check_interval: must be >= 5m when proxy check is enabled")
+	}
+	// Reject sub-5m intervals even when disabled, to prevent an accidental
+	// misconfiguration that would fail only later when proxy checks are enabled.
+	if cfg.ProxyCheckInterval != 0 && time.Duration(cfg.ProxyCheckInterval) < minQualityInterval {
+		return invalidArg("proxy_check_interval: must be >= 5m")
+	}
+
+	// Profile: must be one of the built-in profiles.
+	profile := strings.ToLower(strings.TrimSpace(cfg.ProxyCheckProfile))
+	switch profile {
+	case "":
+		cfg.ProxyCheckProfile = "generic"
+	case "generic", "openai", "grok", "gemini", "claude":
+		cfg.ProxyCheckProfile = profile
+	default:
+		return invalidArg(fmt.Sprintf("proxy_check_profile: must be one of: generic, openai, grok, gemini, claude (got %q)", profile))
+	}
+
+	// Rounds: clamped to 1..3.
+	if cfg.ProxyCheckRounds < 1 || cfg.ProxyCheckRounds > 3 {
+		return invalidArg("proxy_check_rounds: must be between 1 and 3")
+	}
+
+	// When enabled, at least one check type must be active.
+	if cfg.ProxyCheckEnabled &&
+		!cfg.ProxyCheckServiceReachability &&
+		!cfg.ProxyCheckAPIReachability &&
+		!cfg.ProxyCheckCloudflareDetection {
+		return invalidArg("proxy_check: at least one of service_reachability, api_reachability, or cloudflare_detection must be enabled")
+	}
+
 	return nil
 }

@@ -140,6 +140,9 @@ func TestEngine_WeakPersist_CacheDataSurvivesRestart(t *testing.T) {
 	latencyStore := map[model.NodeLatencyKey]*model.NodeLatency{
 		{NodeHash: "n1", Domain: "google.com"}: {NodeHash: "n1", Domain: "google.com", EwmaNs: 42000, LastUpdatedNs: 999},
 	}
+	qualityStore := map[model.NodeQualityKey]*model.NodeQuality{
+		{NodeHash: "n1", Profile: "generic"}: {NodeHash: "n1", Profile: "generic", Grade: "A", Score: 99.0, Unstable: false, ServiceReachable: true, APIReachable: true, CloudflareChallenged: false, AvgLatencyMs: 50.0, LastCheckedNs: 8888},
+	}
 	leaseStore := map[model.LeaseKey]*model.Lease{
 		{PlatformID: "p1", Account: "user1"}: {PlatformID: "p1", Account: "user1", NodeHash: "n1", CreatedAtNs: 777, ExpiryNs: 99999, LastAccessedNs: 888},
 	}
@@ -148,6 +151,7 @@ func TestEngine_WeakPersist_CacheDataSurvivesRestart(t *testing.T) {
 		ReadNodeStatic:       func(h string) *model.NodeStatic { return nodeStore[h] },
 		ReadNodeDynamic:      func(h string) *model.NodeDynamic { return dynamicStore[h] },
 		ReadNodeLatency:      func(k NodeLatencyDirtyKey) *model.NodeLatency { return latencyStore[k] },
+		ReadNodeQuality:      func(k NodeQualityDirtyKey) *model.NodeQuality { return qualityStore[k] },
 		ReadLease:            func(k LeaseDirtyKey) *model.Lease { return leaseStore[k] },
 		ReadSubscriptionNode: func(k SubscriptionNodeDirtyKey) *model.SubscriptionNode { return subNodeStore[k] },
 	}
@@ -156,6 +160,7 @@ func TestEngine_WeakPersist_CacheDataSurvivesRestart(t *testing.T) {
 	engine1.MarkSubscriptionNode("s1", "n1")
 	engine1.MarkNodeDynamic("n1")
 	engine1.MarkNodeLatency("n1", "google.com")
+	engine1.MarkNodeQuality(NodeQualityDirtyKey{NodeHash: "n1", Profile: "generic"})
 	engine1.MarkLease("p1", "user1")
 	engine1.FlushDirtySets(readers)
 	closer1.Close()
@@ -187,6 +192,11 @@ func TestEngine_WeakPersist_CacheDataSurvivesRestart(t *testing.T) {
 		t.Fatalf("node_latency did not survive restart: %+v", lat)
 	}
 
+	qual, _ := engine2.LoadAllNodeQuality()
+	if len(qual) != 1 || qual[0].Grade != "A" || qual[0].Score != 99.0 {
+		t.Fatalf("node_quality did not survive restart: %+v", qual)
+	}
+
 	leases, _ := engine2.LoadAllLeases()
 	if len(leases) != 1 || leases[0].Account != "user1" {
 		t.Fatalf("leases did not survive restart: %+v", leases)
@@ -197,6 +207,132 @@ func TestEngine_WeakPersist_CacheDataSurvivesRestart(t *testing.T) {
 }
 
 // --- Weak persist: dirty mark → flush → verify ---
+
+func TestEngine_WeakPersist_NodeQuality_FlushAndLoad(t *testing.T) {
+	engine, _, _ := newTestEngine(t)
+
+	// Simulate in-memory quality store.
+	qualityStore := map[model.NodeQualityKey]*model.NodeQuality{
+		{NodeHash: "hash-a", Profile: "generic"}: {NodeHash: "hash-a", Profile: "generic", Grade: "A", Score: 95.0, Unstable: false, ServiceReachable: true, APIReachable: true, CloudflareChallenged: false, AvgLatencyMs: 100.0, LastCheckedNs: 5000},
+		{NodeHash: "hash-b", Profile: "openai"}:  {NodeHash: "hash-b", Profile: "openai", Grade: "B", Score: 75.0, Unstable: true, ServiceReachable: true, APIReachable: false, CloudflareChallenged: true, CloudflareChallengeType: "turnstile", AvgLatencyMs: 300.0, LastCheckedNs: 6000, LastError: "timeout"},
+	}
+
+	readers := CacheReaders{
+		ReadNodeStatic:  func(h string) *model.NodeStatic { return nil },
+		ReadNodeDynamic: func(h string) *model.NodeDynamic { return nil },
+		ReadNodeLatency: func(k NodeLatencyDirtyKey) *model.NodeLatency { return nil },
+		ReadNodeQuality: func(k NodeQualityDirtyKey) *model.NodeQuality { return qualityStore[k] },
+		ReadLease:            func(k LeaseDirtyKey) *model.Lease { return nil },
+		ReadSubscriptionNode: func(k SubscriptionNodeDirtyKey) *model.SubscriptionNode { return nil },
+	}
+
+	// Mark quality dirty.
+	engine.MarkNodeQuality(NodeQualityDirtyKey{NodeHash: "hash-a", Profile: "generic"})
+	engine.MarkNodeQuality(NodeQualityDirtyKey{NodeHash: "hash-b", Profile: "openai"})
+
+	if engine.DirtyCount() != 2 {
+		t.Fatalf("expected 2 dirty, got %d", engine.DirtyCount())
+	}
+
+	// Flush.
+	if err := engine.FlushDirtySets(readers); err != nil {
+		t.Fatal(err)
+	}
+
+	if engine.DirtyCount() != 0 {
+		t.Fatalf("expected 0 dirty after flush, got %d", engine.DirtyCount())
+	}
+
+	// Verify in DB.
+	loaded, err := engine.LoadAllNodeQuality()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded) != 2 {
+		t.Fatalf("expected 2 quality entries in DB, got %d", len(loaded))
+	}
+
+	// Verify field values survived round-trip.
+	for _, e := range loaded {
+		if e.NodeHash == "hash-a" && e.Profile == "generic" {
+			if e.Grade != "A" || e.Score != 95.0 || e.Unstable || !e.ServiceReachable {
+				t.Fatalf("unexpected quality for hash-a/generic: %+v", e)
+			}
+		}
+		if e.NodeHash == "hash-b" && e.Profile == "openai" {
+			if !e.Unstable || e.CloudflareChallengeType != "turnstile" || e.LastError != "timeout" {
+				t.Fatalf("unexpected quality for hash-b/openai: %+v", e)
+			}
+		}
+	}
+}
+
+func TestEngine_WeakPersist_NodeQuality_DeleteFlush(t *testing.T) {
+	engine, _, _ := newTestEngine(t)
+
+	qualityStore := map[model.NodeQualityKey]*model.NodeQuality{
+		{NodeHash: "hash-a", Profile: "generic"}: {NodeHash: "hash-a", Profile: "generic", Grade: "A", LastCheckedNs: 100},
+	}
+
+	readers := CacheReaders{
+		ReadNodeStatic:  func(h string) *model.NodeStatic { return nil },
+		ReadNodeDynamic: func(h string) *model.NodeDynamic { return nil },
+		ReadNodeLatency: func(k NodeLatencyDirtyKey) *model.NodeLatency { return nil },
+		ReadNodeQuality: func(k NodeQualityDirtyKey) *model.NodeQuality { return qualityStore[k] },
+		ReadLease:            func(k LeaseDirtyKey) *model.Lease { return nil },
+		ReadSubscriptionNode: func(k SubscriptionNodeDirtyKey) *model.SubscriptionNode { return nil },
+	}
+
+	// Insert first.
+	engine.MarkNodeQuality(NodeQualityDirtyKey{NodeHash: "hash-a", Profile: "generic"})
+	engine.FlushDirtySets(readers)
+
+	loaded, _ := engine.LoadAllNodeQuality()
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1 quality entry, got %d", len(loaded))
+	}
+
+	// Now delete.
+	delete(qualityStore, model.NodeQualityKey{NodeHash: "hash-a", Profile: "generic"})
+	engine.MarkNodeQualityDelete(NodeQualityDirtyKey{NodeHash: "hash-a", Profile: "generic"})
+	engine.FlushDirtySets(readers)
+
+	loaded, _ = engine.LoadAllNodeQuality()
+	if len(loaded) != 0 {
+		t.Fatalf("expected 0 quality entries after delete flush, got %d", len(loaded))
+	}
+}
+
+func TestEngine_WeakPersist_NodeQuality_UpsertMissTreatedAsDelete(t *testing.T) {
+	engine, _, _ := newTestEngine(t)
+
+	qualityStore := map[model.NodeQualityKey]*model.NodeQuality{
+		{NodeHash: "hash-a", Profile: "generic"}: {NodeHash: "hash-a", Profile: "generic", Grade: "A", LastCheckedNs: 100},
+	}
+
+	readers := CacheReaders{
+		ReadNodeStatic:  func(h string) *model.NodeStatic { return nil },
+		ReadNodeDynamic: func(h string) *model.NodeDynamic { return nil },
+		ReadNodeLatency: func(k NodeLatencyDirtyKey) *model.NodeLatency { return nil },
+		ReadNodeQuality: func(k NodeQualityDirtyKey) *model.NodeQuality { return qualityStore[k] },
+		ReadLease:            func(k LeaseDirtyKey) *model.Lease { return nil },
+		ReadSubscriptionNode: func(k SubscriptionNodeDirtyKey) *model.SubscriptionNode { return nil },
+	}
+
+	// Insert.
+	engine.MarkNodeQuality(NodeQualityDirtyKey{NodeHash: "hash-a", Profile: "generic"})
+	engine.FlushDirtySets(readers)
+
+	// Mark upsert but reader returns nil (quality removed between mark and flush).
+	delete(qualityStore, model.NodeQualityKey{NodeHash: "hash-a", Profile: "generic"})
+	engine.MarkNodeQuality(NodeQualityDirtyKey{NodeHash: "hash-a", Profile: "generic"})
+	engine.FlushDirtySets(readers)
+
+	loaded, _ := engine.LoadAllNodeQuality()
+	if len(loaded) != 0 {
+		t.Fatalf("expected upsert-miss to be treated as delete, got %d entries", len(loaded))
+	}
+}
 
 func TestEngine_WeakPersist_FlushAndLoad(t *testing.T) {
 	engine, _, _ := newTestEngine(t)

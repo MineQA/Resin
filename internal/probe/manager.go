@@ -48,6 +48,11 @@ type ProbeConfig struct {
 	// both high and normal queues are non-empty.
 	// Nil defaults to 10% chance.
 	ChooseNormalWhenBoth func() bool
+
+	// QualityCfg configures the active quality (proxy-check) probe loop.
+	// When nil or disabled, no quality scan runs and no quality tasks are
+	// enqueued, though manual CheckProxySync calls remain unaffected.
+	QualityCfg *QualityProbeConfig
 }
 
 // ProbeManager schedules and executes active probes against nodes in the pool.
@@ -68,6 +73,7 @@ type ProbeManager struct {
 	latencyTestURL                  func() string
 	latencyAuthorities              func() []string
 	onProbeEvent                    func(kind string)
+	qualityCfg                      *QualityProbeConfig
 }
 
 const (
@@ -89,7 +95,14 @@ type probeTaskKind uint8
 const (
 	probeTaskKindEgress probeTaskKind = iota
 	probeTaskKindLatency
+	probeTaskKindQuality
 )
+
+// probeTaskKindQuality is the task kind for active quality (proxy-check)
+// probes. It shares the existing queue/worker pool with egress and latency
+// probes. When enabled with aggressive settings (low interval, many nodes),
+// quality checks can compete for worker capacity with health probes.
+// Quality probes must not call RecordResult or affect circuit breaker state.
 
 type probeTaskKey struct {
 	hash node.Hash
@@ -270,6 +283,7 @@ func NewProbeManager(cfg ProbeConfig) *ProbeManager {
 		latencyTestURL:                  cfg.LatencyTestURL,
 		latencyAuthorities:              cfg.LatencyAuthorities,
 		onProbeEvent:                    cfg.OnProbeEvent,
+		qualityCfg:                      cfg.QualityCfg,
 	}
 }
 
@@ -291,6 +305,17 @@ func (m *ProbeManager) Start() {
 		defer m.wg.Done()
 		scanloop.Run(m.stopCh, scanloop.DefaultMinInterval, scanloop.DefaultJitterRange, m.scanLatency)
 	}()
+
+	// Start the quality scan loop if quality config is present.
+	// The scan itself checks Enabled() each cycle, so it is safe to start
+	// unconditionally when QualityCfg is non-nil; a disabled config is a no-op.
+	if m.qualityCfg != nil {
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			scanloop.Run(m.stopCh, scanloop.DefaultMinInterval, scanloop.DefaultJitterRange, m.scanQuality)
+		}()
+	}
 
 	for i := 0; i < m.workerCount; i++ {
 		m.wg.Add(1)
@@ -546,6 +571,8 @@ func (m *ProbeManager) executeTask(task probeTask) {
 		m.probeEgress(task.key.hash, entry)
 	case probeTaskKindLatency:
 		m.probeLatency(task.key.hash, entry, m.currentLatencyTestURL())
+	case probeTaskKindQuality:
+		m.performQualityCheck(task.key.hash, entry)
 	}
 }
 

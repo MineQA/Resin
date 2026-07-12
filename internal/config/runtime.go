@@ -30,6 +30,17 @@ type RuntimeConfig struct {
 	// Persistence
 	CacheFlushInterval       Duration `json:"cache_flush_interval"`
 	CacheFlushDirtyThreshold int      `json:"cache_flush_dirty_threshold"`
+
+	// Proxy check (active quality probing)
+	ProxyCheckEnabled             bool     `json:"proxy_check_enabled"`
+	ProxyCheckInterval            Duration `json:"proxy_check_interval"`
+	ProxyCheckProfile             string   `json:"proxy_check_profile"`
+	ProxyCheckServiceReachability bool     `json:"proxy_check_service_reachability"`
+	ProxyCheckAPIReachability     bool     `json:"proxy_check_api_reachability"`
+	ProxyCheckCloudflareDetection bool     `json:"proxy_check_cloudflare_detection"`
+	ProxyCheckMultiRound          bool     `json:"proxy_check_multi_round"`
+	ProxyCheckRounds              int      `json:"proxy_check_rounds"`
+	ProxyCheckTriggerOnNewNode    bool     `json:"proxy_check_trigger_on_new_node"`
 }
 
 // NewDefaultRuntimeConfig returns a RuntimeConfig populated with the default
@@ -56,5 +67,15 @@ func NewDefaultRuntimeConfig() *RuntimeConfig {
 
 		CacheFlushInterval:       Duration(5 * time.Minute),
 		CacheFlushDirtyThreshold: 1000,
+
+		ProxyCheckEnabled:             false,
+		ProxyCheckInterval:            Duration(30 * time.Minute),
+		ProxyCheckProfile:             "generic",
+		ProxyCheckServiceReachability: true,
+		ProxyCheckAPIReachability:     false,
+		ProxyCheckCloudflareDetection: true,
+		ProxyCheckMultiRound:          false,
+		ProxyCheckRounds:              1,
+		ProxyCheckTriggerOnNewNode:    false,
 	}
 }

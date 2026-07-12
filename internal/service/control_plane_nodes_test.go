@@ -8,6 +8,7 @@ import (
 
 	"github.com/Resinat/Resin/internal/config"
 	"github.com/Resinat/Resin/internal/geoip"
+	"github.com/Resinat/Resin/internal/model"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/platform"
 	"github.com/Resinat/Resin/internal/probe"
@@ -659,5 +660,185 @@ func TestProbeEgress_ReturnsRegion(t *testing.T) {
 	}
 	if got.Region != "jp" {
 		t.Fatalf("region: got %q, want %q", got.Region, "jp")
+	}
+}
+
+// --- NodeEntryMatchesQualityFilters tests ---
+
+func newNodeEntryForQualityFilter(hash node.Hash) *node.NodeEntry {
+	entry := node.NewNodeEntry(hash, []byte(`{"type":"ss","server":"1.1.1.1","port":443}`), time.Now(), 16)
+	ob := testutil.NewNoopOutbound()
+	entry.Outbound.Store(&ob)
+	return entry
+}
+
+func TestNodeEntryMatchesQualityFilters_NilFilters(t *testing.T) {
+	hash := node.HashFromRawOptions([]byte(`{"type":"nil-filter-test"}`))
+	entry := newNodeEntryForQualityFilter(hash)
+
+	filters := NodeFilters{}
+	if !nodeEntryMatchesQualityFilters(entry, filters) {
+		t.Fatal("expected true when no quality filters are set")
+	}
+}
+
+func TestNodeEntryMatchesQualityFilters_Profile(t *testing.T) {
+	hash := node.HashFromRawOptions([]byte(`{"type":"profile-filter"}`))
+	entry := newNodeEntryForQualityFilter(hash)
+
+	// No quality stored — profile filter should reject.
+	profile := "openai"
+	filters := NodeFilters{QualityProfile: &profile}
+	if nodeEntryMatchesQualityFilters(entry, filters) {
+		t.Fatal("expected false when quality is nil but profile filter is set")
+	}
+
+	// Store quality with a different profile.
+	entry.SetQuality(&model.NodeQuality{Profile: "generic", Grade: "A", Score: 95})
+	if nodeEntryMatchesQualityFilters(entry, filters) {
+		t.Fatal("expected false when quality profile does not match")
+	}
+
+	// Store quality with matching profile.
+	entry.SetQuality(&model.NodeQuality{Profile: "openai", Grade: "A", Score: 95})
+	if !nodeEntryMatchesQualityFilters(entry, filters) {
+		t.Fatal("expected true when quality profile matches")
+	}
+}
+
+func TestNodeEntryMatchesQualityFilters_Grade(t *testing.T) {
+	hash := node.HashFromRawOptions([]byte(`{"type":"grade-filter"}`))
+	entry := newNodeEntryForQualityFilter(hash)
+
+	grade := "A"
+	filters := NodeFilters{QualityGrade: &grade}
+
+	// No quality.
+	if nodeEntryMatchesQualityFilters(entry, filters) {
+		t.Fatal("expected false when quality is nil")
+	}
+
+	entry.SetQuality(&model.NodeQuality{Grade: "B", Score: 75})
+	if nodeEntryMatchesQualityFilters(entry, filters) {
+		t.Fatal("expected false when grade does not match")
+	}
+
+	entry.SetQuality(&model.NodeQuality{Grade: "A", Score: 95})
+	if !nodeEntryMatchesQualityFilters(entry, filters) {
+		t.Fatal("expected true when grade matches")
+	}
+}
+
+func TestNodeEntryMatchesQualityFilters_MinScore(t *testing.T) {
+	hash := node.HashFromRawOptions([]byte(`{"type":"minscore-filter"}`))
+	entry := newNodeEntryForQualityFilter(hash)
+
+	minScore := 80.0
+	filters := NodeFilters{QualityMinScore: &minScore}
+
+	// No quality.
+	if nodeEntryMatchesQualityFilters(entry, filters) {
+		t.Fatal("expected false when quality is nil")
+	}
+
+	entry.SetQuality(&model.NodeQuality{Grade: "B", Score: 75})
+	if nodeEntryMatchesQualityFilters(entry, filters) {
+		t.Fatal("expected false when score < min")
+	}
+
+	entry.SetQuality(&model.NodeQuality{Grade: "A", Score: 85})
+	if !nodeEntryMatchesQualityFilters(entry, filters) {
+		t.Fatal("expected true when score >= min")
+	}
+
+	entry.SetQuality(&model.NodeQuality{Grade: "A", Score: 80})
+	if !nodeEntryMatchesQualityFilters(entry, filters) {
+		t.Fatal("expected true when score == min")
+	}
+}
+
+func TestNodeEntryMatchesQualityFilters_CloudflareChallenged(t *testing.T) {
+	hash := node.HashFromRawOptions([]byte(`{"type":"cf-filter"}`))
+	entry := newNodeEntryForQualityFilter(hash)
+
+	cfChallenged := true
+	filters := NodeFilters{QualityCloudflareChallenged: &cfChallenged}
+
+	// No quality.
+	if nodeEntryMatchesQualityFilters(entry, filters) {
+		t.Fatal("expected false when quality is nil")
+	}
+
+	entry.SetQuality(&model.NodeQuality{Grade: "A", Score: 95, CloudflareChallenged: false})
+	if nodeEntryMatchesQualityFilters(entry, filters) {
+		t.Fatal("expected false when CloudflareChallenged=false but filter wants true")
+	}
+
+	entry.SetQuality(&model.NodeQuality{Grade: "D", Score: 30, CloudflareChallenged: true})
+	if !nodeEntryMatchesQualityFilters(entry, filters) {
+		t.Fatal("expected true when CloudflareChallenged matches")
+	}
+}
+
+func TestNodeEntryMatchesQualityFilters_CheckedSince(t *testing.T) {
+	hash := node.HashFromRawOptions([]byte(`{"type":"checkedsince-filter"}`))
+	entry := newNodeEntryForQualityFilter(hash)
+
+	now := time.Now()
+	oneHourAgo := now.Add(-1 * time.Hour)
+	checkedSince := &oneHourAgo
+	filters := NodeFilters{QualityCheckedSince: checkedSince}
+
+	// No quality.
+	if nodeEntryMatchesQualityFilters(entry, filters) {
+		t.Fatal("expected false when quality is nil")
+	}
+
+	// LastChecked before the threshold.
+	entry.SetQuality(&model.NodeQuality{
+		Grade: "A", Score: 95,
+		LastCheckedNs: now.Add(-2 * time.Hour).UnixNano(),
+	})
+	if nodeEntryMatchesQualityFilters(entry, filters) {
+		t.Fatal("expected false when LastCheckedNs < filter threshold")
+	}
+
+	// LastChecked after the threshold.
+	entry.SetQuality(&model.NodeQuality{
+		Grade: "A", Score: 95,
+		LastCheckedNs: now.UnixNano(),
+	})
+	if !nodeEntryMatchesQualityFilters(entry, filters) {
+		t.Fatal("expected true when LastCheckedNs >= filter threshold")
+	}
+}
+
+func TestNodeEntryMatchesQualityFilters_Multiple(t *testing.T) {
+	hash := node.HashFromRawOptions([]byte(`{"type":"multi-filter"}`))
+	entry := newNodeEntryForQualityFilter(hash)
+
+	grade := "A"
+	minScore := 80.0
+	filters := NodeFilters{
+		QualityGrade:    &grade,
+		QualityMinScore: &minScore,
+	}
+
+	// Match both.
+	entry.SetQuality(&model.NodeQuality{Grade: "A", Score: 90})
+	if !nodeEntryMatchesQualityFilters(entry, filters) {
+		t.Fatal("expected true when both grade and minScore match")
+	}
+
+	// Grade matches but score below min.
+	entry.SetQuality(&model.NodeQuality{Grade: "A", Score: 70})
+	if nodeEntryMatchesQualityFilters(entry, filters) {
+		t.Fatal("expected false when grade matches but score < min")
+	}
+
+	// Score meets min but grade doesn't match.
+	entry.SetQuality(&model.NodeQuality{Grade: "B", Score: 85})
+	if nodeEntryMatchesQualityFilters(entry, filters) {
+		t.Fatal("expected false when score >= min but grade doesn't match")
 	}
 }

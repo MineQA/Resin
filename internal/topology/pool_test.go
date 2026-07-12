@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Resinat/Resin/internal/model"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/platform"
 	"github.com/Resinat/Resin/internal/subscription"
@@ -778,6 +779,124 @@ func TestPool_ReplacePlatform_RebuildsViewBeforePublish(t *testing.T) {
 	}
 	if !got.View().Contains(h) {
 		t.Fatal("replaced platform view should include routable us-node")
+	}
+}
+
+func TestPool_RecordNodeQuality_StoresWithoutAffectingHealth(t *testing.T) {
+	subMgr := NewSubscriptionManager()
+	pool := newTestPool(subMgr)
+
+	raw := json.RawMessage(`{"type":"ss","server":"1.1.1.1"}`)
+	h := node.HashFromRawOptions(raw)
+
+	// Add a node and set it up as healthy.
+	pool.AddNodeFromSub(h, raw, "s1")
+	entry, ok := pool.GetEntry(h)
+	if !ok {
+		t.Fatal("entry not found")
+	}
+	ob := testutil.NewNoopOutbound()
+	entry.Outbound.Store(&ob)
+	pool.RecordResult(h, true) // clear circuit, set healthy
+
+	if !entry.IsHealthy() {
+		t.Fatal("node should be healthy")
+	}
+
+	// Record a failed quality check — must NOT affect health.
+	quality := &model.NodeQuality{
+		Profile:          "generic",
+		Grade:            "F",
+		Score:            0,
+		ServiceReachable: false,
+		LastError:        "connection refused",
+	}
+	ok = pool.RecordNodeQuality(h, quality)
+	if !ok {
+		t.Fatal("RecordNodeQuality should return true for existing node")
+	}
+
+	// Health must be unchanged.
+	if !entry.IsHealthy() {
+		t.Fatal("node should remain healthy after quality failure")
+	}
+	if entry.FailureCount.Load() != 0 {
+		t.Fatal("failure count should not be affected by quality check")
+	}
+	if entry.IsCircuitOpen() {
+		t.Fatal("circuit should not open from quality check")
+	}
+
+	// Quality data must be accessible.
+	got := entry.GetQuality()
+	if got == nil {
+		t.Fatal("expected non-nil quality")
+	}
+	if got.Grade != "F" || got.Score != 0 || got.Profile != "generic" {
+		t.Fatalf("unexpected quality: %+v", got)
+	}
+	if got.LastCheckedNs == 0 {
+		t.Fatal("LastCheckedNs should be set by RecordNodeQuality")
+	}
+	if got.NodeHash == "" {
+		t.Fatal("NodeHash should be set by RecordNodeQuality")
+	}
+	// Caller's original must not be mutated.
+	if quality.NodeHash != "" {
+		t.Fatal("RecordNodeQuality must not mutate the caller's struct")
+	}
+}
+
+func TestPool_RecordNodeQuality_MissingNode(t *testing.T) {
+	pool := newTestPool(NewSubscriptionManager())
+	ok := pool.RecordNodeQuality(node.Zero, &model.NodeQuality{Profile: "generic"})
+	if ok {
+		t.Fatal("RecordNodeQuality should return false for missing node")
+	}
+}
+
+func TestPool_RecordNodeQuality_NilQuality(t *testing.T) {
+	pool := newTestPool(NewSubscriptionManager())
+	ok := pool.RecordNodeQuality(node.Zero, nil)
+	if ok {
+		t.Fatal("RecordNodeQuality should return false for nil quality")
+	}
+}
+
+func TestPool_RecordNodeQuality_FiresCallback(t *testing.T) {
+	subMgr := NewSubscriptionManager()
+	callbackCalled := make(chan model.NodeQualityKey, 1)
+
+	pool := NewGlobalNodePool(PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(addr netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		OnNodeQualityChanged: func(key model.NodeQualityKey) {
+			callbackCalled <- key
+		},
+	})
+
+	raw := json.RawMessage(`{"type":"ss","server":"1.1.1.1"}`)
+	h := node.HashFromRawOptions(raw)
+	pool.AddNodeFromSub(h, raw, "s1")
+
+	quality := &model.NodeQuality{
+		Profile: "openai",
+		Grade:   "B",
+	}
+	pool.RecordNodeQuality(h, quality)
+
+	select {
+	case key := <-callbackCalled:
+		if key.Profile != "openai" {
+			t.Fatalf("callback profile: got %q, want %q", key.Profile, "openai")
+		}
+		if key.NodeHash == "" {
+			t.Fatal("callback node_hash should be non-empty")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("OnNodeQualityChanged callback was not fired")
 	}
 }
 

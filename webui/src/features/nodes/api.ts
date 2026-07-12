@@ -2,6 +2,7 @@ import { apiRequest } from "../../lib/api-client";
 import type {
   EgressProbeResult,
   LatencyProbeResult,
+  NodeQuality,
   NodeListQuery,
   NodePoolExportResponse,
   NodeSummary,
@@ -11,7 +12,21 @@ import type {
 const basePath = "/api/v1/nodes";
 const listBasePath = "/api/v1/node-pool/nodes";
 
-type ApiNodeSummary = Omit<NodeSummary, "tags"> & {
+type ApiNodeQuality = {
+  quality_profile?: string | null;
+  quality_grade?: string | null;
+  quality_score?: number | null;
+  quality_unstable?: boolean | null;
+  quality_service_reachable?: boolean | null;
+  quality_api_reachable?: boolean | null;
+  quality_cloudflare_challenged?: boolean | null;
+  quality_cloudflare_challenge_type?: string | null;
+  quality_avg_latency_ms?: number | null;
+  quality_last_checked?: string | null;
+  quality_last_error?: string | null;
+};
+
+type ApiNodeSummary = Omit<NodeSummary, "tags" | "quality"> & {
   tags?: NodeSummary["tags"] | null;
   enabled?: boolean | null;
   display_tag?: string | null;
@@ -25,10 +40,42 @@ type ApiNodeSummary = Omit<NodeSummary, "tags"> & {
   last_latency_probe_attempt?: string | null;
   last_authority_latency_probe_attempt?: string | null;
   last_egress_update_attempt?: string | null;
+  quality?: ApiNodeQuality | null;
 };
 
+function asStringOrEmpty(raw: unknown): string {
+  return typeof raw === "string" ? raw : "";
+}
+
+function normalizeQuality(raw: ApiNodeQuality | null | undefined): NodeQuality | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  if (!raw.quality_grade && raw.quality_grade !== "") {
+    // Missing grade means no quality record; backend omits the whole object.
+    return undefined;
+  }
+  const grade = raw.quality_grade || "";
+  if (!grade) {
+    return undefined;
+  }
+  return {
+    quality_profile: raw.quality_profile || undefined,
+    quality_grade: grade,
+    quality_score: typeof raw.quality_score === "number" ? raw.quality_score : 0,
+    quality_unstable: Boolean(raw.quality_unstable),
+    quality_service_reachable: Boolean(raw.quality_service_reachable),
+    quality_api_reachable: Boolean(raw.quality_api_reachable),
+    quality_cloudflare_challenged: Boolean(raw.quality_cloudflare_challenged),
+    quality_cloudflare_challenge_type: raw.quality_cloudflare_challenge_type || undefined,
+    quality_avg_latency_ms: typeof raw.quality_avg_latency_ms === "number" ? raw.quality_avg_latency_ms : undefined,
+    quality_last_checked: raw.quality_last_checked || undefined,
+    quality_last_error: raw.quality_last_error || undefined,
+  };
+}
+
 function normalizeNode(raw: ApiNodeSummary): NodeSummary {
-  const { reference_latency_ms, ...rest } = raw;
+  const { reference_latency_ms, quality, ...rest } = raw;
   const normalized: NodeSummary = {
     ...rest,
     enabled: raw.enabled !== false,
@@ -49,6 +96,15 @@ function normalizeNode(raw: ApiNodeSummary): NodeSummary {
   if (typeof reference_latency_ms === "number") {
     normalized.reference_latency_ms = reference_latency_ms;
   }
+
+  const normalizedQuality = normalizeQuality(quality);
+  if (normalizedQuality) {
+    normalized.quality = normalizedQuality;
+  }
+
+  // Ensure no stray empty-string fields leak from spread.
+  if (!normalized.display_tag) normalized.display_tag = asStringOrEmpty(raw.display_tag);
+  if (!normalized.protocol) normalized.protocol = asStringOrEmpty(raw.protocol);
 
   return normalized;
 }
@@ -101,6 +157,17 @@ export function buildNodeListSearchParams(filters: NodeListQuery): URLSearchPara
   }
   if (filters.routable !== undefined) {
     query.set("routable", String(filters.routable));
+  }
+
+  // Quality filters
+  appendIfNotEmpty("quality_grade", filters.quality_grade);
+  appendIfNotEmpty("quality_profile", filters.quality_profile);
+  appendIfNotEmpty("quality_checked_since", filters.quality_checked_since);
+  if (filters.quality_min_score !== undefined) {
+    query.set("quality_min_score", String(filters.quality_min_score));
+  }
+  if (filters.quality_cloudflare_challenged !== undefined) {
+    query.set("quality_cloudflare_challenged", String(filters.quality_cloudflare_challenged));
   }
 
   return query;

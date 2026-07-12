@@ -1,7 +1,9 @@
 import { apiRequest } from "../../lib/api-client";
-import type { CreatedExportToken, EnvConfig, ExportToken, RuntimeConfig, RuntimeConfigPatch } from "./types";
+import type { CreatedExportToken, EnvConfig, ExportToken, ProxyCheckProfile, RuntimeConfig, RuntimeConfigPatch } from "./types";
 
 const path = "/api/v1/system/config";
+
+const PROXY_CHECK_PROFILES: ProxyCheckProfile[] = ["generic", "openai", "grok", "gemini", "claude"];
 
 const DEFAULT_CONFIG: RuntimeConfig = {
   request_log_enabled: true,
@@ -20,6 +22,15 @@ const DEFAULT_CONFIG: RuntimeConfig = {
   latency_decay_window: "",
   cache_flush_interval: "",
   cache_flush_dirty_threshold: 0,
+  proxy_check_enabled: false,
+  proxy_check_interval: "30m",
+  proxy_check_profile: "generic",
+  proxy_check_service_reachability: true,
+  proxy_check_api_reachability: false,
+  proxy_check_cloudflare_detection: true,
+  proxy_check_multi_round: false,
+  proxy_check_rounds: 1,
+  proxy_check_trigger_on_new_node: false,
 };
 
 function asNumber(raw: unknown, fallback: number): number {
@@ -35,6 +46,30 @@ function asString(raw: unknown, fallback: string): string {
     return fallback;
   }
   return raw;
+}
+
+function asBool(raw: unknown, fallback: boolean): boolean {
+  if (typeof raw !== "boolean") {
+    return fallback;
+  }
+  return raw;
+}
+
+function asProfile(raw: unknown, fallback: ProxyCheckProfile): ProxyCheckProfile {
+  if (typeof raw === "string" && (PROXY_CHECK_PROFILES as string[]).includes(raw)) {
+    return raw as ProxyCheckProfile;
+  }
+  return fallback;
+}
+
+function clampInt(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+  const rounded = Math.round(value);
+  if (rounded < min) return min;
+  if (rounded > max) return max;
+  return rounded;
 }
 
 function normalizeRuntimeConfig(raw: Partial<RuntimeConfig> | null | undefined): RuntimeConfig {
@@ -78,6 +113,27 @@ function normalizeRuntimeConfig(raw: Partial<RuntimeConfig> | null | undefined):
     cache_flush_dirty_threshold: asNumber(
       raw.cache_flush_dirty_threshold,
       DEFAULT_CONFIG.cache_flush_dirty_threshold,
+    ),
+    proxy_check_enabled: asBool(raw.proxy_check_enabled, DEFAULT_CONFIG.proxy_check_enabled),
+    proxy_check_interval: asString(raw.proxy_check_interval, DEFAULT_CONFIG.proxy_check_interval),
+    proxy_check_profile: asProfile(raw.proxy_check_profile, DEFAULT_CONFIG.proxy_check_profile),
+    proxy_check_service_reachability: asBool(
+      raw.proxy_check_service_reachability,
+      DEFAULT_CONFIG.proxy_check_service_reachability,
+    ),
+    proxy_check_api_reachability: asBool(
+      raw.proxy_check_api_reachability,
+      DEFAULT_CONFIG.proxy_check_api_reachability,
+    ),
+    proxy_check_cloudflare_detection: asBool(
+      raw.proxy_check_cloudflare_detection,
+      DEFAULT_CONFIG.proxy_check_cloudflare_detection,
+    ),
+    proxy_check_multi_round: asBool(raw.proxy_check_multi_round, DEFAULT_CONFIG.proxy_check_multi_round),
+    proxy_check_rounds: clampInt(asNumber(raw.proxy_check_rounds, DEFAULT_CONFIG.proxy_check_rounds), 1, 3),
+    proxy_check_trigger_on_new_node: asBool(
+      raw.proxy_check_trigger_on_new_node,
+      DEFAULT_CONFIG.proxy_check_trigger_on_new_node,
     ),
   };
 }
