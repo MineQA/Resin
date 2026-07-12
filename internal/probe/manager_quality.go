@@ -1,7 +1,6 @@
 package probe
 
 import (
-	"log"
 	"time"
 
 	"github.com/Resinat/Resin/internal/model"
