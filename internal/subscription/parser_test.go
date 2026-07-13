@@ -820,7 +820,7 @@ func TestParseGeneralSubscription_ClashJSON_HysteriaAdvancedFields(t *testing.T)
 				"auth-str": "token",
 				"up": "30",
 				"down": "100",
-				"fingerprint": "chrome",
+				"client-fingerprint": "chrome",
 				"ca": "/etc/ssl/certs/custom.pem",
 				"ca-str": "-----BEGIN CERTIFICATE-----ABC",
 				"hop-interval": 15
@@ -988,7 +988,7 @@ func TestParseGeneralSubscription_ClashJSON_Hysteria2AdvancedFields(t *testing.T
 				"obfs": "salamander",
 				"obfs-password": "obfs-secret",
 				"hop-interval": 12,
-				"fingerprint": "firefox",
+				"client-fingerprint": "firefox",
 				"ca": "/etc/ssl/certs/hy2.pem",
 				"ca-str": "-----BEGIN CERTIFICATE-----XYZ"
 			}
@@ -1041,7 +1041,7 @@ func TestParseGeneralSubscription_ClashJSON_Hysteria2AdvancedFields(t *testing.T
 	}
 }
 
-func TestParseGeneralSubscription_ClashJSON_HTTPAndSOCKSUnsupportedFieldsIgnored(t *testing.T) {
+func TestParseGeneralSubscription_ClashJSON_HTTPAndSOCKSHaveFingerprintRejected(t *testing.T) {
 	data := []byte(`{
 		"proxies": [
 			{
@@ -1069,18 +1069,54 @@ func TestParseGeneralSubscription_ClashJSON_HTTPAndSOCKSUnsupportedFieldsIgnored
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(nodes) != 2 {
-		t.Fatalf("expected 2 parsed nodes, got %d", len(nodes))
+	// Both nodes carry non-empty fingerprint → default reject policy → 0 nodes.
+	if len(nodes) != 0 {
+		t.Fatalf("expected 0 parsed nodes (default reject with non-empty fingerprint), got %d", len(nodes))
 	}
+}
 
-	byTag := parseNodesByTag(t, nodes)
-	socks := byTag["socks-extra"]
-	if _, exists := socks["tls"]; exists {
-		t.Fatalf("expected socks tls to be ignored, got %v", socks["tls"])
+// TestParseGeneralSubscriptionDetailed_ClashJSON_HTTPAndSOCKSRejected verifies
+// that HTTP/SOCKS Clash nodes with fingerprint produce 2 rejections with
+// stable diagnostic codes.
+func TestParseGeneralSubscriptionDetailed_ClashJSON_HTTPAndSOCKSRejected(t *testing.T) {
+	data := []byte(`{
+		"proxies": [
+			{
+				"name": "socks-extra",
+				"type": "socks",
+				"server": "1.1.1.1",
+				"port": 1080,
+				"tls": true,
+				"fingerprint": "xxxx",
+				"skip-cert-verify": true
+			},
+			{
+				"name": "http-extra",
+				"type": "http",
+				"server": "2.2.2.2",
+				"port": 443,
+				"tls": true,
+				"sni": "custom.com",
+				"fingerprint": "xxxx"
+			}
+		]
+	}`)
+
+	result, err := ParseGeneralSubscriptionDetailed(data, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	httpNode := byTag["http-extra"]
-	if _, exists := httpNode["fingerprint"]; exists {
-		t.Fatalf("expected http fingerprint to be ignored, got %v", httpNode["fingerprint"])
+	if len(result.Nodes) != 0 {
+		t.Fatalf("expected 0 accepted nodes, got %d", len(result.Nodes))
+	}
+	if len(result.Rejected) != 2 {
+		t.Fatalf("expected 2 rejected nodes, got %d", len(result.Rejected))
+	}
+	// Both should have CLASH_FINGERPRINT_INVALID (xxxx is not valid hex SHA-256).
+	for _, r := range result.Rejected {
+		if r.Code != ClashFingerprintInvalid {
+			t.Fatalf("expected CLASH_FINGERPRINT_INVALID code, got %q on node %q", r.Code, r.Tag)
+		}
 	}
 }
 
@@ -1763,6 +1799,41 @@ func TestParseGeneralSubscription_HY2URIMPortRangeNormalizedToSingBoxFormat(t *t
 	}
 }
 
+// TestParseGeneralSubscription_NilOptsNoPanic verifies that calling the
+// legacy wrapper (which passes nil opts) does not panic and still rejects
+// nodes with Clash certificate fingerprints by default.
+func TestParseGeneralSubscription_NilOptsNoPanic(t *testing.T) {
+	// Clash JSON with a fingerprint node — should be rejected (0 nodes).
+	data := []byte(`{"proxies":[{"name":"bad-fp","type":"hysteria2","server":"hy2.example.com","port":443,"password":"pass","fingerprint":"aabbccdd"}]}`)
+	nodes, err := ParseGeneralSubscription(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 0 {
+		t.Fatalf("expected 0 nodes (default reject), got %d", len(nodes))
+	}
+}
+
+// TestParseGeneralSubscriptionDetailed_NilOptsHasRejection verifies that
+// calling ParseGeneralSubscriptionDetailed with nil opts returns a non-nil
+// result with rejection diagnostics (not silent accept).
+func TestParseGeneralSubscriptionDetailed_NilOptsHasRejection(t *testing.T) {
+	data := []byte(`{"proxies":[{"name":"bad-fp","type":"hysteria2","server":"hy2.example.com","port":443,"password":"pass","fingerprint":"aabbccdd"}]}`)
+	result, err := ParseGeneralSubscriptionDetailed(data, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result with nil opts")
+	}
+	if len(result.Nodes) != 0 {
+		t.Fatalf("expected 0 accepted nodes, got %d", len(result.Nodes))
+	}
+	if len(result.Rejected) == 0 {
+		t.Fatal("expected at least 1 rejected node with nil opts")
+	}
+}
+
 func TestParseGeneralSubscription_HY2URIUserPassAuth(t *testing.T) {
 	data := []byte("hy2://hy2-user:hy2-pass@hy2.example.com:443?sni=hy2.example.com")
 
@@ -1780,25 +1851,36 @@ func TestParseGeneralSubscription_HY2URIUserPassAuth(t *testing.T) {
 	}
 }
 
-func TestParseGeneralSubscription_HY2URIPinSHA256MapsToTLSCertPublicKeyPin(t *testing.T) {
+func TestParseGeneralSubscription_HY2URIPinSHA256RejectedLegacy(t *testing.T) {
+	// Legacy wrapper *must* also reject pinSHA256, not silently drop it.
 	data := []byte("hy2://hy2-password@hy2.example.com:443?pinSHA256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=&sni=hy2.example.com")
 
 	nodes, err := ParseGeneralSubscription(data)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(nodes) != 1 {
-		t.Fatalf("expected 1 parsed node, got %d", len(nodes))
+	if len(nodes) != 0 {
+		t.Fatalf("expected 0 nodes for HY2 URI with pinSHA256, got %d", len(nodes))
 	}
+}
 
-	obj := parseNodeRaw(t, nodes[0].RawOptions)
-	tls := mustMapField(t, obj, "tls")
-	pins := mustSliceField(t, tls, "certificate_public_key_sha256")
-	if !containsAnyString(pins, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=") {
-		t.Fatalf("tls.certificate_public_key_sha256: got %v", pins)
+func TestParseGeneralSubscriptionDetailed_HY2URIPinSHA256Rejected(t *testing.T) {
+	data := []byte("hy2://hy2-password@hy2.example.com:443?pinSHA256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=&sni=hy2.example.com")
+
+	result, err := ParseGeneralSubscriptionDetailed(data, &ParseOptions{
+		ClashFingerprintPolicy: ClashFingerprintReject,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, hasUTLS := tls["utls"]; hasUTLS {
-		t.Fatalf("tls.utls should be absent when only pinSHA256 is provided: got %v", tls["utls"])
+	if len(result.Nodes) != 0 {
+		t.Fatalf("expected 0 accepted nodes with pinSHA256, got %d", len(result.Nodes))
+	}
+	if len(result.Rejected) != 1 {
+		t.Fatalf("expected 1 rejected node, got %d", len(result.Rejected))
+	}
+	if result.Rejected[0].Code != HY2PinSHA256Unsupported {
+		t.Fatalf("expected HY2_PIN_SHA256_UNSUPPORTED code, got %q", result.Rejected[0].Code)
 	}
 }
 
@@ -2840,6 +2922,784 @@ func TestParseGeneralSubscription_UnknownFormatReturnsError(t *testing.T) {
 		t.Fatal("expected error for unknown subscription format")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Clash certificate fingerprint policy tests
+// ---------------------------------------------------------------------------
+
+const validSHA256Hex = "aabbccddee0011223344556677889900aabbccddee0011223344556677889900"
+
+// TestParseGeneralSubscriptionDetailed_ClashJSON_FingerprintRejectDefault verifies
+// that the default reject policy rejects nodes with a Clash cert fingerprint.
+func TestParseGeneralSubscriptionDetailed_ClashJSON_FingerprintRejectDefault(t *testing.T) {
+	data := []byte(`{
+		"proxies": [
+			{
+				"name": "hy2-fp",
+				"type": "hysteria2",
+				"server": "hy2.example.com",
+				"port": 443,
+				"password": "pass",
+				"fingerprint": "` + validSHA256Hex + `"
+			},
+			{
+				"name": "ss-ok",
+				"type": "ss",
+				"server": "1.1.1.1",
+				"port": 8388,
+				"cipher": "aes-128-gcm",
+				"password": "pass"
+			}
+		]
+	}`)
+
+	result, err := ParseGeneralSubscriptionDetailed(data, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Default reject: hy2-fp rejected, ss-ok accepted.
+	if len(result.Nodes) != 1 {
+		t.Fatalf("expected 1 accepted node (ss-ok), got %d", len(result.Nodes))
+	}
+	if len(result.Rejected) != 1 {
+		t.Fatalf("expected 1 rejected node, got %d", len(result.Rejected))
+	}
+	if result.Rejected[0].Tag != "hy2-fp" {
+		t.Fatalf("expected rejected tag hy2-fp, got %q", result.Rejected[0].Tag)
+	}
+	if result.Rejected[0].Code != ClashCertFingerprintUnsupported {
+		t.Fatalf("expected code CLASH_CERTIFICATE_FINGERPRINT_UNSUPPORTED, got %q", result.Rejected[0].Code)
+	}
+	node := parseNodeRaw(t, result.Nodes[0].RawOptions)
+	if got := node["tag"]; got != "ss-ok" {
+		t.Fatalf("expected remaining node ss-ok, got %v", got)
+	}
+}
+
+// TestParseGeneralSubscription_ClashJSON_FingerprintRejectWrapper verifies
+// that the legacy wrapper (ParseGeneralSubscription) also rejects nodes with
+// Clash cert fingerprints (default reject).
+func TestParseGeneralSubscription_ClashJSON_FingerprintRejectWrapper(t *testing.T) {
+	data := []byte(`{
+		"proxies": [
+			{
+				"name": "hy2-fp",
+				"type": "hysteria2",
+				"server": "hy2.example.com",
+				"port": 443,
+				"password": "pass",
+				"fingerprint": "` + validSHA256Hex + `"
+			},
+			{
+				"name": "ss-ok",
+				"type": "ss",
+				"server": "1.1.1.1",
+				"port": 8388,
+				"cipher": "aes-128-gcm",
+				"password": "pass"
+			}
+		]
+	}`)
+
+	nodes, err := ParseGeneralSubscription(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("expected 1 node (ss-ok), got %d", len(nodes))
+	}
+	if nodes[0].Tag != "ss-ok" {
+		t.Fatalf("expected ss-ok, got %s", nodes[0].Tag)
+	}
+}
+
+// TestParseGeneralSubscriptionDetailed_ClashJSON_FingerprintBrowserNameRejected
+// verifies that known browser TLS profile names used as Clash fingerprint
+// are rejected.
+func TestParseGeneralSubscriptionDetailed_ClashJSON_FingerprintBrowserNameRejected(t *testing.T) {
+	browserNames := []string{
+		"chrome", "firefox", "safari", "ios", "android",
+		"edge", "360", "qq", "random", "randomized",
+	}
+	for _, name := range browserNames {
+		data := []byte(`{
+			"proxies": [{
+				"name": "hy2-` + name + `",
+				"type": "hysteria2",
+				"server": "hy2.example.com",
+				"port": 443,
+				"password": "pass",
+				"fingerprint": "` + name + `"
+			}]
+		}`)
+
+		result, err := ParseGeneralSubscriptionDetailed(data, &ParseOptions{
+			ClashFingerprintPolicy: ClashFingerprintReject,
+		})
+		if err != nil {
+			t.Fatalf("browser %q: %v", name, err)
+		}
+		if len(result.Nodes) != 0 {
+			t.Fatalf("browser %q: expected 0 nodes, got %d", name, len(result.Nodes))
+		}
+		if len(result.Rejected) != 1 {
+			t.Fatalf("browser %q: expected 1 rejected, got %d", name, len(result.Rejected))
+		}
+		if result.Rejected[0].Code != ClashFingerprintBrowserName {
+			t.Fatalf("browser %q: expected CLASH_FINGERPRINT_BROWSER_NAME, got %q",
+				name, result.Rejected[0].Code)
+		}
+	}
+}
+
+// TestParseGeneralSubscriptionDetailed_ClashJSON_FingerprintMalformedHex
+// verifies that malformed hex fingerprints are rejected.
+func TestParseGeneralSubscriptionDetailed_ClashJSON_FingerprintMalformedHex(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{"not-hex", "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"},
+		{"short", "aabbccdd"},
+		{"long", "aabbccddee0011223344556677889900aabbccddee0011223344556677889900ff"},
+	}
+	for _, tc := range tests {
+		data := []byte(`{
+			"proxies": [{
+				"name": "hy2-bad",
+				"type": "hysteria2",
+				"server": "hy2.example.com",
+				"port": 443,
+				"password": "pass",
+				"fingerprint": "` + tc.value + `"
+			}]
+		}`)
+
+		result, err := ParseGeneralSubscriptionDetailed(data, &ParseOptions{
+			ClashFingerprintPolicy: ClashFingerprintReject,
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if len(result.Rejected) != 1 {
+			t.Fatalf("%s: expected 1 rejected, got %d", tc.name, len(result.Rejected))
+		}
+		if result.Rejected[0].Code != ClashFingerprintInvalid {
+			t.Fatalf("%s: expected CLASH_FINGERPRINT_INVALID, got %q",
+				tc.name, result.Rejected[0].Code)
+		}
+	}
+}
+
+// TestParseGeneralSubscriptionDetailed_ClashJSON_FingerprintDropSafe
+// verifies drop_safe policy behavior.
+func TestParseGeneralSubscriptionDetailed_ClashJSON_FingerprintDropSafe(t *testing.T) {
+	// Node without skip-cert-verify: fingerprint omitted, node accepted.
+	noSkipData := []byte(`{
+		"proxies": [{
+			"name": "hy2-safe",
+			"type": "hysteria2",
+			"server": "hy2.example.com",
+			"port": 443,
+			"password": "pass",
+			"fingerprint": "` + validSHA256Hex + `"
+		}]
+	}`)
+
+	result, err := ParseGeneralSubscriptionDetailed(noSkipData, &ParseOptions{
+		ClashFingerprintPolicy: ClashFingerprintDropSafe,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Nodes) != 1 {
+		t.Fatalf("drop_safe no-skip: expected 1 node, got %d", len(result.Nodes))
+	}
+	if len(result.Warnings) != 1 {
+		t.Fatalf("drop_safe no-skip: expected 1 warning, got %d", len(result.Warnings))
+	}
+	if result.Warnings[0].Code != ClashFingerprintDropSafeWarning {
+		t.Fatalf("drop_safe no-skip: expected CLASH_FINGERPRINT_DROP_SAFE, got %q",
+			result.Warnings[0].Code)
+	}
+	if result.Rejected != nil {
+		t.Fatalf("drop_safe no-skip: expected 0 rejected, got %d", len(result.Rejected))
+	}
+	node := parseNodeRaw(t, result.Nodes[0].RawOptions)
+	tls := mustMapField(t, node, "tls")
+	// Fingerprint should NOT be present.
+	if _, ok := tls["utls"]; ok {
+		t.Fatalf("drop_safe: tls.utls should be absent when fingerprint is omitted, got %v", tls["utls"])
+	}
+	if _, ok := tls["certificate_public_key_sha256"]; ok {
+		t.Fatalf("drop_safe: certificate_public_key_sha256 should be absent, got %v", tls["certificate_public_key_sha256"])
+	}
+
+	// Node with skip-cert-verify=true: rejected as unsafe.
+	skipData := []byte(`{
+		"proxies": [{
+			"name": "hy2-unsafe",
+			"type": "hysteria2",
+			"server": "hy2.example.com",
+			"port": 443,
+			"password": "pass",
+			"skip-cert-verify": true,
+			"fingerprint": "` + validSHA256Hex + `"
+		}, {
+			"name": "ss-sibling",
+			"type": "ss",
+			"server": "1.1.1.1",
+			"port": 8388,
+			"cipher": "aes-128-gcm",
+			"password": "pass"
+		}]
+	}`)
+
+	result2, err := ParseGeneralSubscriptionDetailed(skipData, &ParseOptions{
+		ClashFingerprintPolicy: ClashFingerprintDropSafe,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result2.Nodes) != 1 {
+		t.Fatalf("drop_safe skip-verify: expected 1 sibling node, got %d", len(result2.Nodes))
+	}
+	if len(result2.Rejected) != 1 {
+		t.Fatalf("drop_safe skip-verify: expected 1 rejected, got %d", len(result2.Rejected))
+	}
+	if result2.Rejected[0].Code != ClashFingerprintUnsafeDrop {
+		t.Fatalf("drop_safe skip-verify: expected CLASH_FINGERPRINT_UNSAFE_DROP, got %q",
+			result2.Rejected[0].Code)
+	}
+}
+
+// TestParseGeneralSubscriptionDetailed_ClashJSON_FingerprintDropAlways
+// verifies drop_always policy behavior.
+func TestParseGeneralSubscriptionDetailed_ClashJSON_FingerprintDropAlways(t *testing.T) {
+	// Node without skip-cert-verify: fingerprint omitted, warning emitted.
+	noSkipData := []byte(`{
+		"proxies": [{
+			"name": "hy2-always",
+			"type": "hysteria2",
+			"server": "hy2.example.com",
+			"port": 443,
+			"password": "pass",
+			"fingerprint": "` + validSHA256Hex + `"
+		}]
+	}`)
+
+	result, err := ParseGeneralSubscriptionDetailed(noSkipData, &ParseOptions{
+		ClashFingerprintPolicy: ClashFingerprintDropAlways,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Nodes) != 1 {
+		t.Fatalf("drop_always no-skip: expected 1 node, got %d", len(result.Nodes))
+	}
+	if len(result.Warnings) != 1 {
+		t.Fatalf("drop_always no-skip: expected 1 warning, got %d", len(result.Warnings))
+	}
+	if result.Warnings[0].Code != ClashFingerprintDropAlwaysWarning {
+		t.Fatalf("drop_always no-skip: expected CLASH_FINGERPRINT_DROP_ALWAYS, got %q",
+			result.Warnings[0].Code)
+	}
+
+	// Node with skip-cert-verify=true: fingerprint omitted, dangerous warning.
+	skipData := []byte(`{
+		"proxies": [{
+			"name": "hy2-unsafe",
+			"type": "hysteria2",
+			"server": "hy2.example.com",
+			"port": 443,
+			"password": "pass",
+			"skip-cert-verify": true,
+			"fingerprint": "` + validSHA256Hex + `"
+		}]
+	}`)
+
+	result2, err := ParseGeneralSubscriptionDetailed(skipData, &ParseOptions{
+		ClashFingerprintPolicy: ClashFingerprintDropAlways,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result2.Nodes) != 1 {
+		t.Fatalf("drop_always skip-verify: expected 1 node, got %d", len(result2.Nodes))
+	}
+	if len(result2.Warnings) != 1 {
+		t.Fatalf("drop_always skip-verify: expected 1 warning, got %d", len(result2.Warnings))
+	}
+	if result2.Warnings[0].Code != ClashFingerprintDropAlwaysUnsafe {
+		t.Fatalf("drop_always skip-verify: expected CLASH_FINGERPRINT_DROP_ALWAYS_UNSAFE, got %q",
+			result2.Warnings[0].Code)
+	}
+}
+
+// TestParseGeneralSubscriptionDetailed_ClashJSON_BothFingerprintsNotConflated
+// verifies that fingerprint (cert pin) and client-fingerprint (uTLS) are
+// handled independently.
+func TestParseGeneralSubscriptionDetailed_ClashJSON_BothFingerprintsNotConflated(t *testing.T) {
+	data := []byte(`{
+		"proxies": [{
+			"name": "hy2-both",
+			"type": "hysteria2",
+			"server": "hy2.example.com",
+			"port": 443,
+			"password": "pass",
+			"fingerprint": "` + validSHA256Hex + `",
+			"client-fingerprint": "chrome"
+		}]
+	}`)
+
+	// With reject policy, node is rejected (cert fingerprint causes rejection),
+	// regardless of client-fingerprint.
+	result, err := ParseGeneralSubscriptionDetailed(data, &ParseOptions{
+		ClashFingerprintPolicy: ClashFingerprintReject,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Nodes) != 0 {
+		t.Fatalf("both-fp reject: expected 0 nodes, got %d", len(result.Nodes))
+	}
+	if len(result.Rejected) != 1 {
+		t.Fatalf("both-fp reject: expected 1 rejected, got %d", len(result.Rejected))
+	}
+
+	// With drop_always, cert fingerprint is omitted but client-fingerprint
+	// is preserved as uTLS.
+	result2, err := ParseGeneralSubscriptionDetailed(data, &ParseOptions{
+		ClashFingerprintPolicy: ClashFingerprintDropAlways,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result2.Nodes) != 1 {
+		t.Fatalf("both-fp drop: expected 1 node, got %d", len(result2.Nodes))
+	}
+	node := parseNodeRaw(t, result2.Nodes[0].RawOptions)
+	tls := mustMapField(t, node, "tls")
+	utls := mustMapField(t, tls, "utls")
+	if got := utls["fingerprint"]; got != "chrome" {
+		t.Fatalf("both-fp drop: expected utls.fingerprint chrome, got %v", got)
+	}
+	if _, ok := tls["certificate_public_key_sha256"]; ok {
+		t.Fatalf("both-fp drop: certificate_public_key_sha256 should be absent")
+	}
+	if len(result2.Warnings) != 1 {
+		t.Fatalf("both-fp drop: expected 1 warning, got %d", len(result2.Warnings))
+	}
+}
+
+// TestParseGeneralSubscriptionDetailed_ClashYAML_FingerprintRejected verifies
+// that Clash YAML subscriptions also undergo fingerprint validation.
+func TestParseGeneralSubscriptionDetailed_ClashYAML_FingerprintRejected(t *testing.T) {
+	data := []byte(`
+proxies:
+  - name: hy2-yaml
+    type: hysteria2
+    server: hy2.example.com
+    port: 443
+    password: pass
+    fingerprint: "` + validSHA256Hex + `"
+  - name: ss-yaml
+    type: ss
+    server: 1.1.1.1
+    port: 8388
+    cipher: aes-128-gcm
+    password: pass
+`)
+
+	result, err := ParseGeneralSubscriptionDetailed(data, &ParseOptions{
+		ClashFingerprintPolicy: ClashFingerprintReject,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Nodes) != 1 {
+		t.Fatalf("yaml: expected 1 node, got %d", len(result.Nodes))
+	}
+	if len(result.Rejected) != 1 {
+		t.Fatalf("yaml: expected 1 rejected, got %d", len(result.Rejected))
+	}
+	if result.Rejected[0].Code != ClashCertFingerprintUnsupported {
+		t.Fatalf("yaml: expected CLASH_CERTIFICATE_FINGERPRINT_UNSUPPORTED, got %q",
+			result.Rejected[0].Code)
+	}
+}
+
+// TestParseGeneralSubscriptionDetailed_Surge_FingerprintInSurgeContext
+// verifies that Surge fingerprint options are NOT subject to Clash fingerprint
+// validation (Surge uses fingerprint as uTLS/client-fingerprint).
+func TestParseGeneralSubscriptionDetailed_Surge_FingerprintInSurgeContext(t *testing.T) {
+	// Surge uses "fingerprint" as the uTLS profile name.
+	data := []byte(`
+[Proxy]
+hy2-surge = hysteria2, hy2.example.com, 443, password=pass, fingerprint=chrome, skip-cert-verify=true
+`)
+
+	// Legacy wrapper should still work (Surge fingerprint not conflated).
+	nodes, err := ParseGeneralSubscription(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("surge: expected 1 node, got %d", len(nodes))
+	}
+	obj := parseNodeRaw(t, nodes[0].RawOptions)
+	tls := mustMapField(t, obj, "tls")
+	if got := tls["insecure"]; got != true {
+		t.Fatalf("surge tls.insecure: got %v", got)
+	}
+}
+
+// TestParseGeneralSubscriptionDetailed_FingerprintColonsStripped verifies
+// that colons in hex SHA-256 fingerprints are correctly stripped before
+// decoding.
+func TestParseGeneralSubscriptionDetailed_FingerprintColonsStripped(t *testing.T) {
+	withColons := "aa:bb:cc:dd:ee:00:11:22:33:44:55:66:77:88:99:00:aa:bb:cc:dd:ee:00:11:22:33:44:55:66:77:88:99:00"
+	data := []byte(`{
+		"proxies": [{
+			"name": "hy2-colons",
+			"type": "hysteria2",
+			"server": "hy2.example.com",
+			"port": 443,
+			"password": "pass",
+			"fingerprint": "` + withColons + `"
+		}, {
+			"name": "ss-sibling",
+			"type": "ss",
+			"server": "1.1.1.1",
+			"port": 8388,
+			"cipher": "aes-128-gcm",
+			"password": "pass"
+		}]
+	}`)
+
+	// With drop_always, colons-stripped valid SHA-256 should be accepted.
+	result, err := ParseGeneralSubscriptionDetailed(data, &ParseOptions{
+		ClashFingerprintPolicy: ClashFingerprintDropAlways,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Nodes) != 2 {
+		t.Fatalf("colons: expected 2 nodes, got %d", len(result.Nodes))
+	}
+}
+
+// TestParseGeneralSubscriptionDetailed_Vmess_FingerprintViaSetTLSFromClash
+// verifies that vmess nodes with Clash fingerprint are correctly handled.
+func TestParseGeneralSubscriptionDetailed_Vmess_FingerprintViaSetTLSFromClash(t *testing.T) {
+	data := []byte(`{
+		"proxies": [{
+			"name": "vmess-fp",
+			"type": "vmess",
+			"server": "example.com",
+			"port": 443,
+			"uuid": "11111111-2222-3333-4444-555555555555",
+			"tls": true,
+			"servername": "example.com",
+			"fingerprint": "` + validSHA256Hex + `"
+		}]
+	}`)
+
+	// Default reject: node rejected.
+	result, err := ParseGeneralSubscriptionDetailed(data, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Nodes) != 0 {
+		t.Fatalf("vmess-fp: expected 0 nodes, got %d", len(result.Nodes))
+	}
+	if len(result.Rejected) != 1 {
+		t.Fatalf("vmess-fp: expected 1 rejected, got %d", len(result.Rejected))
+	}
+}
+
+// TestParseGeneralSubscriptionDetailed_Vless_FingerprintViaSetTLSFromClash
+// verifies that vless nodes with Clash fingerprint are correctly handled.
+func TestParseGeneralSubscriptionDetailed_Vless_FingerprintViaSetTLSFromClash(t *testing.T) {
+	data := []byte(`{
+		"proxies": [{
+			"name": "vless-fp",
+			"type": "vless",
+			"server": "example.com",
+			"port": 443,
+			"uuid": "11111111-2222-3333-4444-555555555555",
+			"tls": true,
+			"servername": "example.com",
+			"fingerprint": "` + validSHA256Hex + `"
+		}]
+	}`)
+
+	result, err := ParseGeneralSubscriptionDetailed(data, &ParseOptions{
+		ClashFingerprintPolicy: ClashFingerprintReject,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Nodes) != 0 {
+		t.Fatalf("vless-fp: expected 0 nodes, got %d", len(result.Nodes))
+	}
+	if len(result.Rejected) != 1 {
+		t.Fatalf("vless-fp: expected 1 rejected, got %d", len(result.Rejected))
+	}
+}
+
+// TestParseGeneralSubscriptionDetailed_ClashJSON_FingerprintHysteria verifies
+// fingerprint handling in hysteria (not hysteria2) Clash nodes.
+func TestParseGeneralSubscriptionDetailed_ClashJSON_FingerprintHysteria(t *testing.T) {
+	data := []byte(`{
+		"proxies": [{
+			"name": "hy-fp",
+			"type": "hysteria",
+			"server": "hy.example.com",
+			"port": 443,
+			"auth-str": "token",
+			"fingerprint": "` + validSHA256Hex + `"
+		}]
+	}`)
+
+	result, err := ParseGeneralSubscriptionDetailed(data, &ParseOptions{
+		ClashFingerprintPolicy: ClashFingerprintReject,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Nodes) != 0 {
+		t.Fatalf("hy-fp: expected 0 nodes, got %d", len(result.Nodes))
+	}
+	if len(result.Rejected) != 1 {
+		t.Fatalf("hy-fp: expected 1 rejected, got %d", len(result.Rejected))
+	}
+}
+
+// TestParseClashFingerprintPolicy tests the policy parsing and string functions.
+func TestParseClashFingerprintPolicy(t *testing.T) {
+	if got := ParseClashFingerprintPolicy("reject"); got != ClashFingerprintReject {
+		t.Fatalf("expected reject, got %v", got)
+	}
+	if got := ParseClashFingerprintPolicy("drop_safe"); got != ClashFingerprintDropSafe {
+		t.Fatalf("expected drop_safe, got %v", got)
+	}
+	if got := ParseClashFingerprintPolicy("drop_always"); got != ClashFingerprintDropAlways {
+		t.Fatalf("expected drop_always, got %v", got)
+	}
+	if got := ParseClashFingerprintPolicy(""); got != ClashFingerprintReject {
+		t.Fatalf("expected reject for empty, got %v", got)
+	}
+	if got := ParseClashFingerprintPolicy("unknown"); got != ClashFingerprintReject {
+		t.Fatalf("expected reject for unknown, got %v", got)
+	}
+	if got := ClashFingerprintReject.String(); got != "reject" {
+		t.Fatalf("String: got %q", got)
+	}
+	if got := ClashFingerprintDropSafe.String(); got != "drop_safe" {
+		t.Fatalf("String: got %q", got)
+	}
+	if got := ClashFingerprintDropAlways.String(); got != "drop_always" {
+		t.Fatalf("String: got %q", got)
+	}
+}
+
+// TestValidateClashFingerprint tests the validation function directly.
+func TestValidateClashFingerprint(t *testing.T) {
+	// Valid cases
+	if _, diag := validateClashFingerprint(validSHA256Hex); diag != "" {
+		t.Fatalf("valid hex: expected no diagnostic, got %q", diag)
+	}
+	withColons := "aa:bb:cc:dd:ee:00:11:22:33:44:55:66:77:88:99:00:aa:bb:cc:dd:ee:00:11:22:33:44:55:66:77:88:99:00"
+	if _, diag := validateClashFingerprint(withColons); diag != "" {
+		t.Fatalf("valid hex with colons: expected no diagnostic, got %q", diag)
+	}
+
+	// Empty
+	if _, diag := validateClashFingerprint(""); diag != "" {
+		t.Fatalf("empty: expected no diagnostic, got %q", diag)
+	}
+
+	// Browser names
+	browsers := []string{"chrome", "firefox", "safari", "ios", "android", "edge", "360", "qq", "random", "randomized"}
+	for _, name := range browsers {
+		if _, diag := validateClashFingerprint(name); diag != ClashFingerprintBrowserName {
+			t.Fatalf("browser %q: expected CLASH_FINGERPRINT_BROWSER_NAME, got %q", name, diag)
+		}
+	}
+
+	// Invalid cases
+	if _, diag := validateClashFingerprint("zzz"); diag != ClashFingerprintInvalid {
+		t.Fatalf("expected invalid for non-hex")
+	}
+	if _, diag := validateClashFingerprint("aabbccdd"); diag != ClashFingerprintInvalid {
+		t.Fatalf("expected invalid for short hex")
+	}
+}
+
+// TestParseGeneralSubscriptionDetailed_TrojanFingerprintRejected verifies
+// that Trojan Clash proxies with non-empty fingerprint are rejected.
+func TestParseGeneralSubscriptionDetailed_TrojanFingerprintRejected(t *testing.T) {
+	data := []byte(`{
+		"proxies": [
+			{
+				"name": "trojan-fp",
+				"type": "trojan",
+				"server": "trojan.example.com",
+				"port": 443,
+				"password": "trojan-pass",
+				"fingerprint": "` + validSHA256Hex + `"
+			},
+			{
+				"name": "ss-ok",
+				"type": "ss",
+				"server": "1.1.1.1",
+				"port": 8388,
+				"cipher": "aes-128-gcm",
+				"password": "pass"
+			}
+		]
+	}`)
+
+	result, err := ParseGeneralSubscriptionDetailed(data, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Nodes) != 1 {
+		t.Fatalf("expected 1 accepted node, got %d", len(result.Nodes))
+	}
+	if len(result.Rejected) != 1 {
+		t.Fatalf("expected 1 rejected node, got %d", len(result.Rejected))
+	}
+	if result.Rejected[0].Tag != "trojan-fp" {
+		t.Fatalf("expected rejected tag trojan-fp, got %q", result.Rejected[0].Tag)
+	}
+	if result.Rejected[0].Code != ClashCertFingerprintUnsupported {
+		t.Fatalf("expected CLASH_CERTIFICATE_FINGERPRINT_UNSUPPORTED, got %q", result.Rejected[0].Code)
+	}
+}
+
+// TestParseGeneralSubscriptionDetailed_AnyTLSFingerprintRejected verifies
+// that AnyTLS Clash proxies with non-empty fingerprint are rejected.
+func TestParseGeneralSubscriptionDetailed_AnyTLSFingerprintRejected(t *testing.T) {
+	data := []byte(`{
+		"proxies": [
+			{
+				"name": "anytls-fp",
+				"type": "anytls",
+				"server": "anytls.example.com",
+				"port": 443,
+				"password": "anytls-pass",
+				"fingerprint": "` + validSHA256Hex + `"
+			}
+		]
+	}`)
+
+	result, err := ParseGeneralSubscriptionDetailed(data, &ParseOptions{
+		ClashFingerprintPolicy: ClashFingerprintReject,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Nodes) != 0 {
+		t.Fatalf("expected 0 nodes, got %d", len(result.Nodes))
+	}
+	if len(result.Rejected) != 1 {
+		t.Fatalf("expected 1 rejected, got %d", len(result.Rejected))
+	}
+	if result.Rejected[0].Code != ClashCertFingerprintUnsupported {
+		t.Fatalf("expected CLASH_CERTIFICATE_FINGERPRINT_UNSUPPORTED, got %q", result.Rejected[0].Code)
+	}
+}
+
+// TestParseGeneralSubscriptionDetailed_ClashFingerprintDetailedAPI verifies
+// the exact public API spelling ParseGeneralSubscriptionDetailed.
+func TestParseGeneralSubscriptionDetailed_ClashFingerprintDetailedAPI(t *testing.T) {
+	data := []byte(`{
+		"proxies": [
+			{
+				"name": "hy2-fp",
+				"type": "hysteria2",
+				"server": "hy2.example.com",
+				"port": 443,
+				"password": "pass",
+				"fingerprint": "` + validSHA256Hex + `"
+			}
+		]
+	}`)
+
+	// Call the exact new public API name.
+	result, err := ParseGeneralSubscriptionDetailed(data, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Nodes) != 0 {
+		t.Fatalf("detailed api: expected 0 nodes, got %d", len(result.Nodes))
+	}
+	if len(result.Rejected) != 1 {
+		t.Fatalf("detailed api: expected 1 rejected, got %d", len(result.Rejected))
+	}
+}
+
+// TestParseGeneralSubscriptionDetailed_FingerprintBrowserVsMalformedMessages
+// verifies that browser-name and malformed-fingerprint diagnostics are
+// distinct and safe.
+func TestParseGeneralSubscriptionDetailed_FingerprintBrowserVsMalformedMessages(t *testing.T) {
+	browserData := []byte(`{
+		"proxies": [{
+			"name": "fp-browser",
+			"type": "hysteria2",
+			"server": "hy2.example.com",
+			"port": 443,
+			"password": "pass",
+			"fingerprint": "chrome"
+		}]
+	}`)
+	malformedData := []byte(`{
+		"proxies": [{
+			"name": "fp-bad",
+			"type": "hysteria2",
+			"server": "hy2.example.com",
+			"port": 443,
+			"password": "pass",
+			"fingerprint": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+		}]
+	}`)
+
+	// Browser name → CLASH_FINGERPRINT_BROWSER_NAME
+	browserResult, err := ParseGeneralSubscriptionDetailed(browserData, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(browserResult.Rejected) != 1 {
+		t.Fatalf("browser: expected 1 rejected, got %d", len(browserResult.Rejected))
+	}
+	if browserResult.Rejected[0].Code != ClashFingerprintBrowserName {
+		t.Fatalf("browser: expected CLASH_FINGERPRINT_BROWSER_NAME, got %q", browserResult.Rejected[0].Code)
+	}
+	if browserResult.Rejected[0].Message == "" {
+		t.Fatal("browser: message must not be empty")
+	}
+
+	// Invalid hex → CLASH_FINGERPRINT_INVALID
+	malformedResult, err := ParseGeneralSubscriptionDetailed(malformedData, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(malformedResult.Rejected) != 1 {
+		t.Fatalf("malformed: expected 1 rejected, got %d", len(malformedResult.Rejected))
+	}
+	if malformedResult.Rejected[0].Code != ClashFingerprintInvalid {
+		t.Fatalf("malformed: expected CLASH_FINGERPRINT_INVALID, got %q", malformedResult.Rejected[0].Code)
+	}
+	if malformedResult.Rejected[0].Message == "" {
+		t.Fatal("malformed: message must not be empty")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// End fingerprint policy tests
+// ---------------------------------------------------------------------------
 
 func parseNodeRaw(t *testing.T, raw json.RawMessage) map[string]any {
 	t.Helper()

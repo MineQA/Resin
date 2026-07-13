@@ -70,46 +70,67 @@ func NewGeneralSubscriptionParser() *GeneralSubscriptionParser {
 // subscriptions (vmess/vless/trojan/ss/hysteria2/http/https/socks5/socks5h),
 // plus plain HTTP proxy lines (IP:PORT or IP:PORT:USER:PASS), with optional
 // base64-wrapped content support.
+//
+// This is a convenience wrapper around ParseGeneralSubscriptionDetailed with
+// default options (ClashFingerprintPolicy = reject).
 func ParseGeneralSubscription(data []byte) ([]ParsedNode, error) {
-	return NewGeneralSubscriptionParser().Parse(data)
+	result, err := ParseGeneralSubscriptionDetailed(data, nil)
+	if err != nil {
+		return nil, err
+	}
+	return result.Nodes, nil
 }
 
-// Parse parses subscription content and returns supported outbound nodes.
-func (p *GeneralSubscriptionParser) Parse(data []byte) ([]ParsedNode, error) {
+// ParseGeneralSubscriptionDetailed parses subscription content and returns a
+// detailed result including accepted nodes, rejected nodes, and warnings.
+// Use ParseOptions to control fingerprint policy and other per-call settings.
+// When opts is nil, defaults are used (ClashFingerprintPolicy = reject).
+func ParseGeneralSubscriptionDetailed(data []byte, opts *ParseOptions) (*ParseDetailResult, error) {
+	ctx := newParseCtx(opts)
+
 	normalized := normalizeInput(data)
 	if len(normalized) == 0 {
 		return nil, fmt.Errorf("subscription: empty response")
 	}
 
-	attempt, err := parseSubscriptionContent(normalized)
+	attempt, err := parseSubscriptionContent(normalized, ctx)
 	if err != nil {
 		return nil, err
 	}
 	if attempt.recognized {
-		return attempt.nodes, nil
+		result := ctx.collect()
+		result.Nodes = attempt.nodes
+		return result, nil
 	}
 
 	if decodedText, ok := tryDecodeBase64ToText(normalized); ok {
-		decodedAttempt, decodedErr := parseSubscriptionContent([]byte(decodedText))
+		decodedAttempt, decodedErr := parseSubscriptionContent([]byte(decodedText), ctx)
 		if decodedErr != nil {
 			return nil, decodedErr
 		}
 		if decodedAttempt.recognized {
-			return decodedAttempt.nodes, nil
+			result := ctx.collect()
+			result.Nodes = decodedAttempt.nodes
+			return result, nil
 		}
 	}
 
 	return nil, fmt.Errorf("subscription: unsupported format or no supported nodes found")
 }
 
-func parseSubscriptionContent(data []byte) (parseAttempt, error) {
+// Parse parses subscription content and returns supported outbound nodes.
+func (p *GeneralSubscriptionParser) Parse(data []byte) ([]ParsedNode, error) {
+	return ParseGeneralSubscription(data)
+}
+
+func parseSubscriptionContent(data []byte, ctx *parseCtx) (parseAttempt, error) {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 {
 		return parseAttempt{}, nil
 	}
 
 	if looksLikeJSON(trimmed) {
-		nodes, recognized, err := parseJSONSubscription(trimmed)
+		nodes, recognized, err := parseJSONSubscription(trimmed, ctx)
 		if err != nil {
 			return parseAttempt{}, err
 		}
@@ -119,7 +140,7 @@ func parseSubscriptionContent(data []byte) (parseAttempt, error) {
 	}
 
 	text := normalizeTextContent(string(trimmed))
-	if nodes, recognized, err := parseClashYAMLSubscription(text); err != nil {
+	if nodes, recognized, err := parseClashYAMLSubscription(text, ctx); err != nil {
 		return parseAttempt{}, err
 	} else if recognized {
 		return parseAttempt{nodes: nodes, recognized: true}, nil
@@ -131,14 +152,14 @@ func parseSubscriptionContent(data []byte) (parseAttempt, error) {
 		return parseAttempt{nodes: nodes, recognized: true}, nil
 	}
 
-	if nodes, recognized := parseURILineSubscription(text); recognized {
+	if nodes, recognized := parseURILineSubscription(text, ctx); recognized {
 		return parseAttempt{nodes: nodes, recognized: true}, nil
 	}
 
 	return parseAttempt{}, nil
 }
 
-func parseJSONSubscription(data []byte) ([]ParsedNode, bool, error) {
+func parseJSONSubscription(data []byte, ctx *parseCtx) ([]ParsedNode, bool, error) {
 	var obj map[string]json.RawMessage
 	objErr := json.Unmarshal(data, &obj)
 	if objErr == nil {
@@ -147,7 +168,7 @@ func parseJSONSubscription(data []byte) ([]ParsedNode, bool, error) {
 			return nodes, true, err
 		}
 		if proxiesRaw, ok := obj["proxies"]; ok {
-			nodes, err := parseClashProxiesJSON(proxiesRaw)
+			nodes, err := parseClashProxiesJSON(proxiesRaw, ctx)
 			return nodes, true, err
 		}
 		return nil, false, nil
@@ -192,15 +213,15 @@ func parseRawOutbounds(outbounds []json.RawMessage) []ParsedNode {
 	return nodes
 }
 
-func parseClashProxiesJSON(raw json.RawMessage) ([]ParsedNode, error) {
+func parseClashProxiesJSON(raw json.RawMessage, ctx *parseCtx) ([]ParsedNode, error) {
 	var proxies []map[string]any
 	if err := json.Unmarshal(raw, &proxies); err != nil {
 		return nil, fmt.Errorf("subscription: unmarshal clash proxies: %w", err)
 	}
-	return parseClashProxies(proxies), nil
+	return parseClashProxies(proxies, ctx), nil
 }
 
-func parseClashYAMLSubscription(text string) ([]ParsedNode, bool, error) {
+func parseClashYAMLSubscription(text string, ctx *parseCtx) ([]ParsedNode, bool, error) {
 	if !looksLikeClashYAML(text) {
 		return nil, false, nil
 	}
@@ -220,13 +241,16 @@ func parseClashYAMLSubscription(text string) ([]ParsedNode, bool, error) {
 	if len(proxies) == 0 && len(cfg.ProxyLower) > 0 {
 		proxies = cfg.ProxyLower
 	}
-	return parseClashProxies(proxies), true, nil
+	return parseClashProxies(proxies, ctx), true, nil
 }
 
-func parseClashProxies(proxies []map[string]any) []ParsedNode {
+func parseClashProxies(proxies []map[string]any, ctx *parseCtx) []ParsedNode {
 	nodes := make([]ParsedNode, 0, len(proxies))
 	for _, proxy := range proxies {
-		if node, ok := convertClashProxyToNode(proxy); ok {
+		if !applyClashFingerprintPolicy(proxy, ctx) {
+			continue
+		}
+		if node, ok := convertClashProxyToNode(proxy, ctx); ok {
 			nodes = append(nodes, node)
 		}
 	}
@@ -343,11 +367,11 @@ func parseSurgeProxyLine(name string, body string, wireGuardSections map[string]
 		if !ok {
 			return ParsedNode{}, false, true
 		}
-		node, ok := convertClashProxyToNode(proxy)
+		node, ok := convertClashProxyToNode(proxy, nil)
 		return node, ok, true
 	}
 	if proxy, ok := parseSurgeQXProxyLine(name, parts); ok {
-		node, ok := convertClashProxyToNode(proxy)
+		node, ok := convertClashProxyToNode(proxy, nil)
 		return node, ok, true
 	}
 	switch proto {
@@ -367,7 +391,7 @@ func parseSurgeProxyLine(name string, body string, wireGuardSections map[string]
 			if !ok {
 				return ParsedNode{}, false, true
 			}
-			node, ok := convertClashProxyToNode(proxy)
+			node, ok := convertClashProxyToNode(proxy, nil)
 			return node, ok, true
 		}
 	}
@@ -669,7 +693,7 @@ func parseSurgeProxyLine(name string, body string, wireGuardSections map[string]
 		}
 	}
 
-	node, ok := convertClashProxyToNode(proxy)
+	node, ok := convertClashProxyToNode(proxy, nil)
 	return node, ok, true
 }
 
@@ -1170,7 +1194,7 @@ func splitCommaRespectQuotes(input string) []string {
 	return out
 }
 
-func convertClashProxyToNode(proxy map[string]any) (ParsedNode, bool) {
+func convertClashProxyToNode(proxy map[string]any, ctx *parseCtx) (ParsedNode, bool) {
 	nodeType := strings.ToLower(strings.TrimSpace(getString(proxy, "type")))
 	tag := strings.TrimSpace(firstNonEmpty(getString(proxy, "name"), getString(proxy, "tag")))
 	server := strings.TrimSpace(getString(proxy, "server"))
@@ -1219,7 +1243,9 @@ func convertClashProxyToNode(proxy map[string]any) (ParsedNode, bool) {
 		} else {
 			outbound["alter_id"] = uint64(0)
 		}
-		setTLSFromClash(outbound, proxy, "tls")
+		if !setTLSFromClash(outbound, proxy, "tls", ctx) {
+			return ParsedNode{}, false
+		}
 		if !setV2RayTransportFromClash(outbound, proxy) {
 			return ParsedNode{}, false
 		}
@@ -1240,7 +1266,9 @@ func convertClashProxyToNode(proxy map[string]any) (ParsedNode, bool) {
 		if flow := normalizeVLESSFlow(getString(proxy, "flow")); flow != "" {
 			outbound["flow"] = flow
 		}
-		setTLSFromClash(outbound, proxy, "tls")
+		if !setTLSFromClash(outbound, proxy, "tls", ctx) {
+			return ParsedNode{}, false
+		}
 		if !setV2RayTransportFromClash(outbound, proxy) {
 			return ParsedNode{}, false
 		}
@@ -1300,12 +1328,9 @@ func convertClashProxyToNode(proxy map[string]any) (ParsedNode, bool) {
 		if alpn := getStringSlice(proxy, "alpn"); len(alpn) > 0 {
 			tls["alpn"] = alpn
 		}
-		applyUTLSFromValue(tls, firstNonEmpty(
-			getString(proxy, "fingerprint"),
-			getString(proxy, "client-fingerprint"),
-			getString(proxy, "client_fingerprint"),
-			getString(proxy, "fp"),
-		))
+		if !clashProcessFingerprint(tls, proxy, ctx) {
+			return ParsedNode{}, false
+		}
 		applyTLSCertificateFromClash(tls, proxy)
 		outbound := map[string]any{
 			"type":        "hysteria2",
@@ -1460,12 +1485,9 @@ func convertClashProxyToNode(proxy map[string]any) (ParsedNode, bool) {
 		))
 		insecure, _ := getBool(proxy, "skip-cert-verify", "allowInsecure", "insecure")
 		tls := newClashEnabledTLS(sni, insecure, getStringSlice(proxy, "alpn"))
-		applyUTLSFromValue(tls, firstNonEmpty(
-			getString(proxy, "fingerprint"),
-			getString(proxy, "client-fingerprint"),
-			getString(proxy, "client_fingerprint"),
-			getString(proxy, "fp"),
-		))
+		if !clashProcessFingerprint(tls, proxy, ctx) {
+			return ParsedNode{}, false
+		}
 		applyTLSCertificateFromClash(tls, proxy)
 		outbound := map[string]any{
 			"type":        "hysteria",
@@ -1890,7 +1912,7 @@ func hasLetter(value string) bool {
 	return false
 }
 
-func parseURILineSubscription(text string) ([]ParsedNode, bool) {
+func parseURILineSubscription(text string, ctx *parseCtx) ([]ParsedNode, bool) {
 	var nodes []ParsedNode
 	recognized := false
 	for _, rawLine := range strings.Split(text, "\n") {
@@ -1923,10 +1945,10 @@ func parseURILineSubscription(text string) ([]ParsedNode, bool) {
 			node, ok = parseSSURI(line)
 		case strings.HasPrefix(lower, "hysteria2://"):
 			recognized = true
-			node, ok = parseHysteria2URI(line)
+			node, ok = parseHysteria2URI(line, ctx)
 		case strings.HasPrefix(lower, "hy2://"):
 			recognized = true
-			node, ok = parseHysteria2URI(line)
+			node, ok = parseHysteria2URI(line, ctx)
 		case strings.HasPrefix(lower, "ssd://"):
 			recognized = true
 			extraNode, ok = parseSSDURI(line)
@@ -3306,7 +3328,7 @@ func parseTrojanURI(uri string) (ParsedNode, bool) {
 	return buildParsedNode(outbound)
 }
 
-func parseHysteria2URI(uri string) (ParsedNode, bool) {
+func parseHysteria2URI(uri string, ctx *parseCtx) (ParsedNode, bool) {
 	normalized := strings.TrimSpace(uri)
 	if strings.HasPrefix(strings.ToLower(normalized), "hy2://") {
 		normalized = "hysteria2://" + normalized[len("hy2://"):]
@@ -3362,12 +3384,19 @@ func parseHysteria2URI(uri string) (ParsedNode, bool) {
 		query.Get("client-fingerprint"),
 		query.Get("client_fingerprint"),
 	))
-	if pins := splitCommaList(firstNonEmpty(
+	if pin := firstNonEmpty(
 		query.Get("pinSHA256"),
 		query.Get("pin-sha256"),
 		query.Get("pin_sha256"),
-	)); len(pins) > 0 {
-		tls["certificate_public_key_sha256"] = pins
+	); pin != "" {
+		// On current sing-box v1.12.21, pinSHA256 is not supported for HY2.
+		// Reject the node regardless of whether ctx is available (both legacy
+		// wrapper and detailed path).
+		if ctx != nil {
+			ctx.rejectNode(tag, HY2PinSHA256Unsupported,
+				"HY2 URI contains pinSHA256 which is not supported by this version")
+		}
+		return ParsedNode{}, false
 	}
 	if certPath := strings.TrimSpace(query.Get("ca")); certPath != "" {
 		tls["certificate_path"] = certPath
@@ -3832,10 +3861,10 @@ func looksLikeClashYAML(text string) bool {
 		strings.Contains(lower, "\nproxy-groups:")
 }
 
-func setTLSFromClash(outbound map[string]any, proxy map[string]any, key string) {
+func setTLSFromClash(outbound map[string]any, proxy map[string]any, key string, ctx *parseCtx) bool {
 	enabled, ok := getBool(proxy, key)
 	if !ok || !enabled {
-		return
+		return true
 	}
 	tls := map[string]any{"enabled": true}
 	if serverName := strings.TrimSpace(firstNonEmpty(
@@ -3851,15 +3880,13 @@ func setTLSFromClash(outbound map[string]any, proxy map[string]any, key string) 
 	if alpn := getStringSlice(proxy, "alpn"); len(alpn) > 0 {
 		tls["alpn"] = alpn
 	}
-	applyUTLSFromValue(tls, firstNonEmpty(
-		getString(proxy, "fingerprint"),
-		getString(proxy, "client-fingerprint"),
-		getString(proxy, "client_fingerprint"),
-		getString(proxy, "fp"),
-	))
+	if !clashProcessFingerprint(tls, proxy, ctx) {
+		return false
+	}
 	applyClashRealityToTLS(tls, proxy)
 	applyTLSCertificateFromClash(tls, proxy)
 	outbound["tls"] = tls
+	return true
 }
 
 func applyClashRealityToTLS(tls map[string]any, proxy map[string]any) {

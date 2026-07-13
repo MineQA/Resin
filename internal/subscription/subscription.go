@@ -129,6 +129,9 @@ type Subscription struct {
 	// ephemeralNodeEvictDelayNs is the per-subscription eviction delay for
 	// circuit-broken nodes when Ephemeral is enabled.
 	ephemeralNodeEvictDelayNs int64
+	// clashFingerprintPolicy controls Clash certificate fingerprint handling
+	// during subscription parsing. Default is ClashFingerprintReject.
+	clashFingerprintPolicy ClashFingerprintPolicy
 
 	// Persistence timestamps (written under mu or single-writer context).
 	CreatedAtNs int64
@@ -164,6 +167,7 @@ func NewSubscription(id, name, url string, enabled, ephemeral bool) *Subscriptio
 		ephemeral:                 ephemeral,
 		incrementalAliveNodes:     UpdateModeReplace,
 		ephemeralNodeEvictDelayNs: defaultEphemeralNodeEvictDelayNs,
+		clashFingerprintPolicy:    ClashFingerprintReject,
 	}
 	empty := NewManagedNodes()
 	s.managedNodes.Store(empty)
@@ -328,6 +332,25 @@ func (s *Subscription) EphemeralNodeEvictDelayNs() int64 {
 func (s *Subscription) SetEphemeralNodeEvictDelayNs(v int64) {
 	s.mu.Lock()
 	s.ephemeralNodeEvictDelayNs = v
+	s.mu.Unlock()
+}
+
+// ClashFingerprintPolicy returns the clash fingerprint policy (thread-safe).
+func (s *Subscription) ClashFingerprintPolicy() ClashFingerprintPolicy {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.clashFingerprintPolicy
+}
+
+// SetClashFingerprintPolicy updates the clash fingerprint policy (thread-safe).
+// Increments configVersion when the value changes so in-flight stale parses
+// are rejected and a new refresh is triggered downstream.
+func (s *Subscription) SetClashFingerprintPolicy(v ClashFingerprintPolicy) {
+	s.mu.Lock()
+	if s.clashFingerprintPolicy != v {
+		s.clashFingerprintPolicy = v
+		s.configVersion.Add(1)
+	}
 	s.mu.Unlock()
 }
 

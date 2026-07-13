@@ -32,7 +32,7 @@ type RawProxyChecker func(rawOptions json.RawMessage, profile probe.TargetProfil
 
 // ProxyCheckRequest is the optional request body for the node action endpoint.
 type ProxyCheckRequest struct {
-	Profile string                 `json:"profile,omitempty"`
+	Profile string                   `json:"profile,omitempty"`
 	Options *probe.ProxyCheckOptions `json:"options,omitempty"`
 }
 
@@ -121,16 +121,16 @@ type ProxyCheckBatchResult struct {
 // ProxyCheckTask represents a batch proxy check task with status and progress.
 // Status transitions: pending → running → completed | completed_with_errors | failed.
 type ProxyCheckTask struct {
-	ID          string                   `json:"id"`
-	Status      string                   `json:"status"`
-	CreatedAt   time.Time                `json:"created_at"`
-	CompletedAt *time.Time               `json:"completed_at,omitempty"`
-	Request     ProxyCheckBatchRequest   `json:"request"`
-	Result      *ProxyCheckBatchResult   `json:"result,omitempty"`
-	Error       string                   `json:"error,omitempty"`
-	Total       int                      `json:"total"`
-	Done        int                      `json:"done"`
-	Failed      int                      `json:"failed"`
+	ID          string                 `json:"id"`
+	Status      string                 `json:"status"`
+	CreatedAt   time.Time              `json:"created_at"`
+	CompletedAt *time.Time             `json:"completed_at,omitempty"`
+	Request     ProxyCheckBatchRequest `json:"request"`
+	Result      *ProxyCheckBatchResult `json:"result,omitempty"`
+	Error       string                 `json:"error,omitempty"`
+	Total       int                    `json:"total"`
+	Done        int                    `json:"done"`
+	Failed      int                    `json:"failed"`
 
 	mu *sync.Mutex
 }
@@ -316,22 +316,63 @@ func (mgr *ProxyCheckTaskManager) executeTask(task *ProxyCheckTask, req ProxyChe
 	} else {
 		// ----- Raw proxy path (ad-hoc outbounds, MVP serial execution) -----
 		for i, proxyStr := range req.Proxies {
-			// Parse each proxy string individually to preserve original input.
-			parsed, parseErr := subscription.ParseGeneralSubscription([]byte(proxyStr))
-			if parseErr != nil || len(parsed) == 0 {
+			// Parse each proxy string individually with default reject policy.
+			result, parseErr := subscription.ParseGeneralSubscriptionDetailed(
+				[]byte(proxyStr),
+				&subscription.ParseOptions{ClashFingerprintPolicy: subscription.ClashFingerprintReject},
+			)
+			if parseErr != nil {
 				if firstErr == "" {
 					firstErr = fmt.Sprintf("proxy parse failed for %q: %v", proxyStr, parseErr)
 				}
 				items = append(items, ProxyCheckResultItem{
 					Proxy: proxyStr,
-					Error: fmt.Sprintf("parse: %v", parseErr),
+					Error: fmt.Sprintf("parse error: %v", parseErr),
 				})
 				failedCount++
 				task.updateProgress(i+1, failedCount)
 				continue
 			}
 
-			pn := parsed[0]
+			// Contract: if the input contains any rejected node, the entire
+			// input fails and rawChecker is NOT called, even if there are
+			// accepted siblings. This prevents security rejections from being
+			// silently bypassed via an accepted fallback.
+			if len(result.Rejected) > 0 {
+				r := result.Rejected[0]
+				errMsg := fmt.Sprintf("proxy rejected: %s on %s", r.Code, r.Tag)
+				if firstErr == "" {
+					firstErr = fmt.Sprintf("proxy rejected for %q: %s", proxyStr, errMsg)
+				}
+				items = append(items, ProxyCheckResultItem{
+					Proxy: proxyStr,
+					Error: errMsg,
+				})
+				failedCount++
+				task.updateProgress(i+1, failedCount)
+				continue
+			}
+
+			if len(result.Nodes) == 0 {
+				// All nodes unsupported — produce actionable error.
+				errMsg := "no supported proxy format found"
+				if len(result.Warnings) > 0 {
+					w := result.Warnings[0]
+					errMsg = fmt.Sprintf("proxy warning: %s on %s", w.Code, w.Tag)
+				}
+				if firstErr == "" {
+					firstErr = fmt.Sprintf("proxy rejected for %q: %s", proxyStr, errMsg)
+				}
+				items = append(items, ProxyCheckResultItem{
+					Proxy: proxyStr,
+					Error: errMsg,
+				})
+				failedCount++
+				task.updateProgress(i+1, failedCount)
+				continue
+			}
+
+			pn := result.Nodes[0]
 			h := node.HashFromRawOptions(pn.RawOptions)
 
 			score, err := rawChecker(pn.RawOptions, profile, opts)

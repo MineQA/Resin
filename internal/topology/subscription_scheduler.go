@@ -2,10 +2,13 @@ package topology
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Resinat/Resin/internal/netutil"
 	"github.com/Resinat/Resin/internal/node"
@@ -197,6 +200,7 @@ func (s *SubscriptionScheduler) UpdateSubscription(sub *subscription.Subscriptio
 	attemptSourceType := sub.SourceType()
 	attemptContent := sub.Content()
 	attemptConfigVersion := sub.ConfigVersion()
+	attemptPolicy := sub.ClashFingerprintPolicy()
 
 	// 1. Fetch/read content (lock-free).
 	var (
@@ -213,17 +217,21 @@ func (s *SubscriptionScheduler) UpdateSubscription(sub *subscription.Subscriptio
 		}
 	}
 
-	// 2. Parse (lock-free).
-	parsed, err := subscription.ParseGeneralSubscription(body)
+	// 2. Parse with subscription's fingerprint policy (lock-free).
+	opts := &subscription.ParseOptions{ClashFingerprintPolicy: attemptPolicy}
+	result, err := subscription.ParseGeneralSubscriptionDetailed(body, opts)
 	if err != nil {
 		s.handleUpdateFailure(sub, attemptStartedNs, attemptSeq, attemptConfigVersion, "parse", err)
 		return
 	}
 
 	// 3. Build refreshed managed nodes map (lock-free, pure computation).
+	hasRejections := len(result.Rejected) > 0
+	hasWarnings := len(result.Warnings) > 0
+
 	refreshedManagedNodes := subscription.NewManagedNodes()
 	rawByHash := make(map[node.Hash][]byte)
-	for _, p := range parsed {
+	for _, p := range result.Nodes {
 		h := node.HashFromRawOptions(p.RawOptions)
 		existing, _ := refreshedManagedNodes.LoadNode(h)
 		existing.Tags = append(existing.Tags, p.Tag)
@@ -232,6 +240,9 @@ func (s *SubscriptionScheduler) UpdateSubscription(sub *subscription.Subscriptio
 			rawByHash[h] = p.RawOptions
 		}
 	}
+
+	// Build bounded diagnostic summary for LastError.
+	lastErr := buildSubRefreshSummary(result.Nodes, result.Rejected, result.Warnings)
 
 	// 4. Diff, swap, add/remove — under lock.
 	applied := false
@@ -248,7 +259,14 @@ func (s *SubscriptionScheduler) UpdateSubscription(sub *subscription.Subscriptio
 
 		old := sub.ManagedNodes()
 		mergedManagedNodes := refreshedManagedNodes
-		if sub.IncrementalAliveNodes() {
+
+		// Security-sensitive: any node rejection disables incremental_alive_nodes
+		// merging for this refresh so previously-corrupted nodes cannot survive.
+		incrementalMode := sub.IncrementalAliveNodes()
+		if hasRejections {
+			incrementalMode = false
+		}
+		if incrementalMode {
 			mergedManagedNodes = subscription.NewManagedNodes()
 			old.RangeNodes(func(h node.Hash, oldNode subscription.ManagedNode) bool {
 				if oldNode.Evicted {
@@ -319,17 +337,26 @@ func (s *SubscriptionScheduler) UpdateSubscription(sub *subscription.Subscriptio
 		for _, h := range removed {
 			s.pool.RemoveNodeFromSub(h, sub.ID)
 		}
-		// 5. Update timestamps (inside lock, using current time).
+		// 5. Update timestamps and diagnostic summary (inside lock).
 		now := time.Now().UnixNano()
 		sub.LastCheckedNs.Store(now)
 		sub.LastUpdatedNs.Store(now)
 		sub.MarkAppliedAttempt(attemptSeq)
-		sub.SetLastError("")
+		sub.SetLastError(lastErr)
 		applied = true
 	})
 	if !applied {
 		log.Printf("[scheduler] stale success ignored for %s", sub.ID)
 		return
+	}
+
+	// Log bounded summary for partial diagnostic visibility.
+	if hasRejections || hasWarnings {
+		log.Printf("[scheduler] %s: %s", sub.ID, lastErr)
+	} else if len(result.Nodes) > 0 {
+		log.Printf("[scheduler] %s: parsed %d nodes", sub.ID, len(result.Nodes))
+	} else {
+		log.Printf("[scheduler] %s: parsed (empty result)", sub.ID)
 	}
 
 	if s.onSubUpdated != nil {
@@ -449,4 +476,75 @@ func (s *SubscriptionScheduler) RenameSubscription(sub *subscription.Subscriptio
 
 func (s *SubscriptionScheduler) fetchViaDownloader(url string) ([]byte, error) {
 	return s.downloader.Download(s.downloadCtx, url)
+}
+
+// maxTagLen is the maximum byte length of an individual tag in diagnostic
+// summaries. Longer tags are truncated with "..." appended, keeping the
+// result within maxTagLen + 3 bytes. Truncation is UTF-8 safe.
+const maxTagLen = 80
+
+// truncateTag shortens tag to at most maxTagLen bytes while staying valid
+// UTF-8. Truncated tags get a "..." suffix. Tags within the limit are
+// returned verbatim.
+func truncateTag(tag string) string {
+	if len(tag) <= maxTagLen {
+		return tag
+	}
+	// Walk backwards from maxTagLen past any invalid trailing bytes to find a
+	// complete rune boundary.
+	trunc := tag[:maxTagLen]
+	for len(trunc) > 0 {
+		r, size := utf8.DecodeLastRuneInString(trunc)
+		if r != utf8.RuneError || size != 1 {
+			break
+		}
+		trunc = trunc[:len(trunc)-1]
+	}
+	return trunc + "..."
+}
+
+// buildSubRefreshSummary creates a bounded safe diagnostic summary for
+// subscription LastError. The summary includes accepted/rejected/warning counts,
+// stable code and tag for up to maxDiagEntries entries, and a remainder count
+// for any additional entries beyond that. Tags are truncated to maxTagLen
+// bytes. No raw fingerprint values are included.
+func buildSubRefreshSummary(nodes []subscription.ParsedNode, rejected []subscription.RejectedNode, warnings []subscription.ParseWarning) string {
+	if len(rejected) == 0 && len(warnings) == 0 {
+		return ""
+	}
+	const maxDiagEntries = 10
+	var b strings.Builder
+	fmt.Fprintf(&b, "parsed: accepted=%d rejected=%d warnings=%d",
+		len(nodes), len(rejected), len(warnings))
+
+	shown := 0
+	remainder := 0
+	for _, r := range rejected {
+		if shown >= maxDiagEntries {
+			remainder++
+			continue
+		}
+		tag := truncateTag(r.Tag)
+		if tag == "" {
+			tag = "(untagged)"
+		}
+		fmt.Fprintf(&b, "\n rejected: %s on %s", r.Code, tag)
+		shown++
+	}
+	for _, w := range warnings {
+		if shown >= maxDiagEntries {
+			remainder++
+			continue
+		}
+		tag := truncateTag(w.Tag)
+		if tag == "" {
+			tag = "(untagged)"
+		}
+		fmt.Fprintf(&b, "\n warning: %s on %s", w.Code, tag)
+		shown++
+	}
+	if remainder > 0 {
+		fmt.Fprintf(&b, "\n (+%d more)", remainder)
+	}
+	return b.String()
 }

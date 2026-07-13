@@ -1475,6 +1475,83 @@ func TestAPIContract_SubscriptionEphemeralEvictDelayPatchValidation(t *testing.T
 	}
 }
 
+func TestAPIContract_Subscription_ClashFingerprintPolicy_DefaultAndCustom(t *testing.T) {
+	srv, _, _ := newControlPlaneTestServer(t)
+
+	// Default is reject.
+	defaultRec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/subscriptions", map[string]any{
+		"name": "default-fp-sub",
+		"url":  "https://example.com/default-fp",
+	}, true)
+	if defaultRec.Code != http.StatusCreated {
+		t.Fatalf("create default sub status: got %d, want %d, body=%s", defaultRec.Code, http.StatusCreated, defaultRec.Body.String())
+	}
+	defaultBody := decodeJSONMap(t, defaultRec)
+	if defaultBody["clash_fingerprint_policy"] != "reject" {
+		t.Fatalf("default clash_fingerprint_policy: got %v, want reject", defaultBody["clash_fingerprint_policy"])
+	}
+
+	// Create with drop_safe.
+	customRec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/subscriptions", map[string]any{
+		"name":                     "custom-fp-sub",
+		"url":                      "https://example.com/custom-fp",
+		"clash_fingerprint_policy": "drop_safe",
+	}, true)
+	if customRec.Code != http.StatusCreated {
+		t.Fatalf("create custom fp sub status: got %d, want %d, body=%s", customRec.Code, http.StatusCreated, customRec.Body.String())
+	}
+	customBody := decodeJSONMap(t, customRec)
+	if customBody["clash_fingerprint_policy"] != "drop_safe" {
+		t.Fatalf("custom clash_fingerprint_policy: got %v, want drop_safe", customBody["clash_fingerprint_policy"])
+	}
+	subID, _ := customBody["id"].(string)
+	if subID == "" {
+		t.Fatalf("create subscription missing id: body=%s", customRec.Body.String())
+	}
+
+	// Create rejects invalid value.
+	invalidRec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/subscriptions", map[string]any{
+		"name":                     "bad-fp-sub",
+		"url":                      "https://example.com/bad-fp",
+		"clash_fingerprint_policy": "unknown",
+	}, true)
+	if invalidRec.Code != http.StatusBadRequest {
+		t.Fatalf("create invalid fp sub status: got %d, want %d, body=%s", invalidRec.Code, http.StatusBadRequest, invalidRec.Body.String())
+	}
+	assertErrorCode(t, invalidRec, "INVALID_ARGUMENT")
+
+	// Patch to change policy.
+	patchRec := doJSONRequest(t, srv, http.MethodPatch, "/api/v1/subscriptions/"+subID, map[string]any{
+		"clash_fingerprint_policy": "drop_always",
+	}, true)
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf("patch fp sub status: got %d, want %d, body=%s", patchRec.Code, http.StatusOK, patchRec.Body.String())
+	}
+	patchBody := decodeJSONMap(t, patchRec)
+	if patchBody["clash_fingerprint_policy"] != "drop_always" {
+		t.Fatalf("patched clash_fingerprint_policy: got %v, want drop_always", patchBody["clash_fingerprint_policy"])
+	}
+
+	// Get returns the updated policy.
+	getRec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/subscriptions/"+subID, nil, true)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("get fp sub status: got %d, want %d, body=%s", getRec.Code, http.StatusOK, getRec.Body.String())
+	}
+	getBody := decodeJSONMap(t, getRec)
+	if getBody["clash_fingerprint_policy"] != "drop_always" {
+		t.Fatalf("get clash_fingerprint_policy: got %v, want drop_always", getBody["clash_fingerprint_policy"])
+	}
+
+	// Patch rejects invalid value.
+	badPatchRec := doJSONRequest(t, srv, http.MethodPatch, "/api/v1/subscriptions/"+subID, map[string]any{
+		"clash_fingerprint_policy": "",
+	}, true)
+	if badPatchRec.Code != http.StatusBadRequest {
+		t.Fatalf("patch invalid fp status: got %d, want %d, body=%s", badPatchRec.Code, http.StatusBadRequest, badPatchRec.Body.String())
+	}
+	assertErrorCode(t, badPatchRec, "INVALID_ARGUMENT")
+}
+
 func TestAPIContract_PreviewFilterUsesPaginationEnvelope(t *testing.T) {
 	srv, _, _ := newControlPlaneTestServer(t)
 

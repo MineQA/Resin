@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -925,5 +926,257 @@ func TestCheckProxyCheck_BatchNodeHashesDoesNotWriteQuality(t *testing.T) {
 	entry, _ := pool.GetEntry(hash)
 	if entryQuality := entry.GetQuality(); entryQuality != nil {
 		t.Fatal("batch task should NOT write back quality to node entry")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Raw proxy path — diagnostics consumption
+// ---------------------------------------------------------------------------
+
+// TestProxyCheckTaskManager_RawProxies_RejectedNode_NoNilError verifies that
+// when a raw proxy string is valid but its node is rejected by the parser
+// (e.g., Clash fingerprint with default reject policy), the error message is
+// actionable with stable code and never produces "parse: <nil>".
+func TestProxyCheckTaskManager_RawProxies_RejectedNode_NoNilError(t *testing.T) {
+	mgr := NewProxyCheckTaskManager()
+	rawChecker := newMockRawChecker([]byte("ok"), 10*time.Millisecond, nil)
+
+	// Clash JSON with rejected node (fingerprint + default reject policy).
+	rejectedProxy := `{"proxies":[{"name":"bad","type":"hysteria2","server":"hy2.example.com","port":443,"password":"pass","fingerprint":"aabbccdd"}]}`
+
+	task, err := mgr.CreateTask(ProxyCheckBatchRequest{
+		Proxies: []string{rejectedProxy},
+		Profile: "generic",
+		Options: &probe.ProxyCheckOptions{
+			ServiceReachability: true,
+			Rounds:              1,
+		},
+	}, nil, rawChecker)
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	completed := pollTask(t, mgr, task.ID)
+
+	// Should be "completed_with_errors" or "failed" — not plain "completed".
+	if completed.Status != "completed_with_errors" && completed.Status != "failed" {
+		t.Fatalf("expected completed_with_errors or failed, got %q", completed.Status)
+	}
+	if completed.Failed != 1 {
+		t.Fatalf("expected Failed=1, got %d", completed.Failed)
+	}
+	if len(completed.Result.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(completed.Result.Results))
+	}
+
+	item := completed.Result.Results[0]
+	// Error must not be "parse: <nil>".
+	if strings.Contains(item.Error, "parse: <nil>") {
+		t.Fatalf("error must not be 'parse: <nil>', got: %q", item.Error)
+	}
+	if item.Error == "" {
+		t.Fatal("expected non-empty Error for rejected node")
+	}
+	// Should contain stable diagnostic code.
+	if !strings.Contains(item.Error, "CLASH_FINGERPRINT_INVALID") &&
+		!strings.Contains(item.Error, "CLASH_CERTIFICATE_FINGERPRINT_UNSUPPORTED") {
+		t.Fatalf("error should contain stable diagnostic code, got: %q", item.Error)
+	}
+	// Score must be nil (checker not called for rejected input).
+	if item.Score != nil {
+		t.Fatal("expected nil Score — raw checker should not be called for rejected input")
+	}
+}
+
+// TestProxyCheckTaskManager_RawProxies_UnrecognizedFormat_NoNilError
+// verifies that an unrecognized proxy format produces an actionable error
+// and not "parse: <nil>".
+func TestProxyCheckTaskManager_RawProxies_UnrecognizedFormat_NoNilError(t *testing.T) {
+	mgr := NewProxyCheckTaskManager()
+	rawChecker := newMockRawChecker([]byte("ok"), 10*time.Millisecond, nil)
+
+	// Completely unrecognized input (not parsable as any format).
+	task, err := mgr.CreateTask(ProxyCheckBatchRequest{
+		Proxies: []string{"\x00\x01\x02garbage"},
+		Profile: "generic",
+		Options: &probe.ProxyCheckOptions{
+			Rounds: 1,
+		},
+	}, nil, rawChecker)
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	completed := pollTask(t, mgr, task.ID)
+	if completed.Failed != 1 {
+		t.Fatalf("expected Failed=1, got %d", completed.Failed)
+	}
+	item := completed.Result.Results[0]
+	if item.Error == "" {
+		t.Fatal("expected non-empty Error for unrecognized format")
+	}
+	// Must not be "parse: <nil>".
+	if strings.Contains(item.Error, "parse: <nil>") {
+		t.Fatalf("error must not be 'parse: <nil>', got: %q", item.Error)
+	}
+	// Score must be nil — checker not called.
+	if item.Score != nil {
+		t.Fatal("expected nil Score — raw checker should not be called for unrecognized input")
+	}
+}
+
+// TestProxyCheckTaskManager_RawProxies_MixedAcceptedAndRejected verifies that
+// when some raw proxies are accepted and some rejected, accepted ones are
+// checked and rejected ones get proper error diagnostics.
+func TestProxyCheckTaskManager_RawProxies_MixedAcceptedAndRejected(t *testing.T) {
+	mgr := NewProxyCheckTaskManager()
+
+	callCount := 0
+	mixedChecker := func(_ json.RawMessage, _ probe.TargetProfile, _ probe.ProxyCheckOptions) (*probe.ProxyScore, error) {
+		callCount++
+		return &probe.ProxyScore{Grade: "A", Score: 100, ServiceReachable: true}, nil
+	}
+
+	// First proxy: a valid SS line (accepted). Second: Clash JSON with rejected node.
+	validProxy := "ss://YWVzLTEyOC1nY206cGFzcw@1.1.1.1:8388"
+	rejectedProxy := `{"proxies":[{"name":"bad","type":"hysteria2","server":"x.com","port":443,"password":"pass","fingerprint":"aabbccdd"}]}`
+
+	task, err := mgr.CreateTask(ProxyCheckBatchRequest{
+		Proxies: []string{validProxy, rejectedProxy},
+		Profile: "generic",
+		Options: &probe.ProxyCheckOptions{
+			ServiceReachability: true,
+			Rounds:              1,
+		},
+	}, nil, mixedChecker)
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	completed := pollTask(t, mgr, task.ID)
+	if completed.Status != "completed_with_errors" {
+		t.Fatalf("expected completed_with_errors, got %q", completed.Status)
+	}
+	if completed.Total != 2 {
+		t.Fatalf("Total=%d, want 2", completed.Total)
+	}
+	if completed.Failed != 1 {
+		t.Fatalf("Failed=%d, want 1", completed.Failed)
+	}
+	if len(completed.Result.Results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(completed.Result.Results))
+	}
+
+	// First result (accepted) should have a score.
+	first := completed.Result.Results[0]
+	if first.Score == nil {
+		t.Fatal("expected first result to have non-nil Score")
+	}
+	if first.Error != "" {
+		t.Fatalf("first result Error=%q, want empty", first.Error)
+	}
+
+	// Second result (rejected) should have error but no score.
+	second := completed.Result.Results[1]
+	if second.Score != nil {
+		t.Fatal("expected nil Score for rejected node — checker should not be called")
+	}
+	if second.Error == "" {
+		t.Fatal("expected non-empty Error for rejected node")
+	}
+	if strings.Contains(second.Error, "parse: <nil>") {
+		t.Fatalf("error must not be 'parse: <nil>', got: %q", second.Error)
+	}
+
+	// The raw checker should have been called exactly once (for the accepted proxy).
+	if callCount != 1 {
+		t.Fatalf("expected rawChecker to be called 1 time, got %d", callCount)
+	}
+}
+
+// TestProxyCheckTaskManager_RawProxies_AcceptedAndRejectedInsideSingleInput
+// verifies that when a single proxy input parses to both accepted and rejected
+// nodes (e.g., Clash JSON with a mix), the entire input fails and rawChecker
+// is NOT called. This prevents security rejections from being bypassed.
+func TestProxyCheckTaskManager_RawProxies_AcceptedAndRejectedInsideSingleInput(t *testing.T) {
+	mgr := NewProxyCheckTaskManager()
+
+	callCount := 0
+	checkerShouldNotBeCalled := func(_ json.RawMessage, _ probe.TargetProfile, _ probe.ProxyCheckOptions) (*probe.ProxyScore, error) {
+		callCount++
+		return &probe.ProxyScore{Grade: "A", Score: 100, ServiceReachable: true}, nil
+	}
+
+	// Clash JSON with one accepted node (SS) and one rejected node (fingerprint).
+	// The entire input must fail: rawChecker must NOT be called.
+	mixedInput := `{"proxies":[
+		{"name":"ss-ok","type":"ss","server":"1.2.3.4","port":8388,"cipher":"aes-128-gcm","password":"ok"},
+		{"name":"bad-fp","type":"hysteria2","server":"x.com","port":443,"password":"pass","fingerprint":"aabbccdd"}
+	]}`
+
+	task, err := mgr.CreateTask(ProxyCheckBatchRequest{
+		Proxies: []string{mixedInput},
+		Profile: "generic",
+		Options: &probe.ProxyCheckOptions{
+			ServiceReachability: true,
+			Rounds:              1,
+		},
+	}, nil, checkerShouldNotBeCalled)
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	completed := pollTask(t, mgr, task.ID)
+	if completed.Failed != 1 {
+		t.Fatalf("expected Failed=1, got %d", completed.Failed)
+	}
+	if len(completed.Result.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(completed.Result.Results))
+	}
+
+	item := completed.Result.Results[0]
+	if item.Score != nil {
+		t.Fatal("expected nil Score — rawChecker should not be called when input has rejected nodes")
+	}
+	if item.Error == "" {
+		t.Fatal("expected non-empty Error for mixed input with rejected node")
+	}
+	if !strings.Contains(item.Error, "CLASH_FINGERPRINT_INVALID") &&
+		!strings.Contains(item.Error, "CLASH_CERTIFICATE_FINGERPRINT_UNSUPPORTED") {
+		t.Fatalf("error should contain stable diagnostic code, got: %q", item.Error)
+	}
+	if callCount != 0 {
+		t.Fatalf("expected rawChecker to NOT be called, got %d calls", callCount)
+	}
+}
+
+// TestProxyCheckTaskManager_RawProxies_CheckerNotCalledOnRejected verifies
+// that when a proxy is rejected by the parser, the raw checker is never
+// invoked — we can check this by using a checker that would panic if called.
+func TestProxyCheckTaskManager_RawProxies_CheckerNotCalledOnRejected(t *testing.T) {
+	mgr := NewProxyCheckTaskManager()
+
+	// checkerPanic will panic if called — we expect it NOT to be called.
+	checkerPanic := func(_ json.RawMessage, _ probe.TargetProfile, _ probe.ProxyCheckOptions) (*probe.ProxyScore, error) {
+		panic("checker should not be called for rejected proxy")
+	}
+
+	rejectedProxy := `{"proxies":[{"name":"bad","type":"hysteria2","server":"x.com","port":443,"password":"pass","fingerprint":"aabbccdd"}]}`
+
+	task, err := mgr.CreateTask(ProxyCheckBatchRequest{
+		Proxies: []string{rejectedProxy},
+		Profile: "generic",
+	}, nil, checkerPanic)
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	completed := pollTask(t, mgr, task.ID)
+	if completed.Failed != 1 {
+		t.Fatalf("expected Failed=1, got %d", completed.Failed)
+	}
+	item := completed.Result.Results[0]
+	if item.Score != nil {
+		t.Fatal("expected nil Score — checker was called but should not have been")
 	}
 }

@@ -25,7 +25,9 @@ const (
 	stateVersionNormalizeMissAction              = 4
 	stateVersionAddIncrementalAliveNodes         = 5
 	stateVersionAddPassiveCircuitBreakerDisabled = 6
-	stateVersionAddExportTokens                 = 7
+	stateVersionAddExportTokens                  = 7
+	stateVersionAddProtocolFilters               = 8
+	stateVersionAddClashFingerprintPolicy        = 9
 	stateLegacyBaselineVersion                   = stateVersionAddFixedAccountHeader
 
 	stateBaseSchemaMigration = stateMigrationsPath + "/000001_state_base.up.sql"
@@ -117,8 +119,24 @@ func prepareLegacyStateBaseline(db *sql.DB, driver migratedb.Driver) error {
 	if err != nil {
 		return err
 	}
+	hasClashFingerprintPolicy, err := hasTableColumn(db, "subscriptions", "clash_fingerprint_policy")
+	if err != nil {
+		return err
+	}
+	hasProtocolFilters, err := hasTableColumn(db, "platforms", "protocol_filters_json")
+	if err != nil {
+		return err
+	}
+	hasExcludeProtocolFilters, err := hasTableColumn(db, "platforms", "exclude_protocol_filters_json")
+	if err != nil {
+		return err
+	}
 
 	switch {
+	case hasEmptyBehavior && hasFixedHeader && hasIncrementalAliveNodes && hasPassiveCircuitBreakerDisabled && hasClashFingerprintPolicy && hasProtocolFilters && hasExcludeProtocolFilters:
+		return setLegacyMigrationVersion(db, driver, stateVersionAddClashFingerprintPolicy)
+	case hasEmptyBehavior && hasFixedHeader && hasIncrementalAliveNodes && hasPassiveCircuitBreakerDisabled && hasProtocolFilters && hasExcludeProtocolFilters:
+		return setLegacyMigrationVersion(db, driver, stateVersionAddProtocolFilters)
 	case hasEmptyBehavior && hasFixedHeader && hasIncrementalAliveNodes && hasPassiveCircuitBreakerDisabled:
 		return setLegacyMigrationVersion(db, driver, stateVersionAddPassiveCircuitBreakerDisabled)
 	case hasEmptyBehavior && hasFixedHeader && hasIncrementalAliveNodes:

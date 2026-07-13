@@ -97,15 +97,15 @@ var runtimeConfigAllowedFields = map[string]bool{
 	"cache_flush_dirty_threshold":              true,
 
 	// Proxy check
-	"proxy_check_enabled":                     true,
-	"proxy_check_interval":                    true,
-	"proxy_check_profile":                     true,
-	"proxy_check_service_reachability":        true,
-	"proxy_check_api_reachability":            true,
-	"proxy_check_cloudflare_detection":        true,
-	"proxy_check_multi_round":                 true,
-	"proxy_check_rounds":                      true,
-	"proxy_check_trigger_on_new_node":         true,
+	"proxy_check_enabled":              true,
+	"proxy_check_interval":             true,
+	"proxy_check_profile":              true,
+	"proxy_check_service_reachability": true,
+	"proxy_check_api_reachability":     true,
+	"proxy_check_cloudflare_detection": true,
+	"proxy_check_multi_round":          true,
+	"proxy_check_rounds":               true,
+	"proxy_check_trigger_on_new_node":  true,
 }
 
 var platformPatchAllowedFields = map[string]bool{
@@ -131,6 +131,7 @@ var subscriptionPatchAllowedFields = map[string]bool{
 	"ephemeral":                  true,
 	"incremental_alive_nodes":    true,
 	"ephemeral_node_evict_delay": true,
+	"clash_fingerprint_policy":   true,
 }
 
 func parseRuntimeConfigPatch(patchJSON json.RawMessage, out *config.RuntimeConfig) *ServiceError {

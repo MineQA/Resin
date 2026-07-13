@@ -447,6 +447,7 @@ func bootstrapTopology(
 		sub.SetContent(ms.Content)
 		sub.SetIncrementalAliveNodes(ms.IncrementalAliveNodes)
 		sub.SetEphemeralNodeEvictDelayNs(ms.EphemeralNodeEvictDelayNs)
+		sub.SetClashFingerprintPolicy(subscription.ParseClashFingerprintPolicy(ms.ClashFingerprintPolicy))
 		sub.CreatedAtNs = ms.CreatedAtNs
 		sub.UpdatedAtNs = ms.UpdatedAtNs
 		subManager.Register(sub)

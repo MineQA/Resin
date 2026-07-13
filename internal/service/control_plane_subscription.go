@@ -33,6 +33,7 @@ type SubscriptionResponse struct {
 	Ephemeral               bool   `json:"ephemeral"`
 	IncrementalAliveNodes   bool   `json:"incremental_alive_nodes"`
 	EphemeralNodeEvictDelay string `json:"ephemeral_node_evict_delay"`
+	ClashFingerprintPolicy  string `json:"clash_fingerprint_policy"`
 	Enabled                 bool   `json:"enabled"`
 	CreatedAt               string `json:"created_at"`
 	LastChecked             string `json:"last_checked,omitempty"`
@@ -75,6 +76,7 @@ func (s *ControlPlaneService) subToResponse(sub *subscription.Subscription) Subs
 		Ephemeral:               sub.Ephemeral(),
 		IncrementalAliveNodes:   sub.IncrementalAliveNodes(),
 		EphemeralNodeEvictDelay: time.Duration(sub.EphemeralNodeEvictDelayNs()).String(),
+		ClashFingerprintPolicy:  sub.ClashFingerprintPolicy().String(),
 		Enabled:                 sub.Enabled(),
 		CreatedAt:               time.Unix(0, sub.CreatedAtNs).UTC().Format(time.RFC3339Nano),
 	}
@@ -125,10 +127,20 @@ type CreateSubscriptionRequest struct {
 	Ephemeral               *bool   `json:"ephemeral"`
 	IncrementalAliveNodes   *bool   `json:"incremental_alive_nodes"`
 	EphemeralNodeEvictDelay *string `json:"ephemeral_node_evict_delay"`
+	ClashFingerprintPolicy  *string `json:"clash_fingerprint_policy"`
 }
 
 const minSubscriptionUpdateInterval = 30 * time.Second
 const defaultSubscriptionEphemeralNodeEvictDelay = 72 * time.Hour
+
+func validateClashFingerprintPolicy(raw string) (subscription.ClashFingerprintPolicy, *ServiceError) {
+	switch raw {
+	case "reject", "drop_safe", "drop_always":
+		return subscription.ParseClashFingerprintPolicy(raw), nil
+	default:
+		return 0, invalidArg("clash_fingerprint_policy: must be one of reject, drop_safe, drop_always")
+	}
+}
 
 func parseSubscriptionSourceType(raw *string) (string, *ServiceError) {
 	if raw == nil {
@@ -217,6 +229,15 @@ func (s *ControlPlaneService) CreateSubscription(req CreateSubscriptionRequest) 
 		ephemeralNodeEvictDelay = d
 	}
 
+	clashFingerprintPolicy := subscription.ClashFingerprintReject
+	if req.ClashFingerprintPolicy != nil {
+		v, verr := validateClashFingerprintPolicy(*req.ClashFingerprintPolicy)
+		if verr != nil {
+			return nil, verr
+		}
+		clashFingerprintPolicy = v
+	}
+
 	id := uuid.New().String()
 	now := time.Now().UnixNano()
 
@@ -231,6 +252,7 @@ func (s *ControlPlaneService) CreateSubscription(req CreateSubscriptionRequest) 
 		Ephemeral:                 ephemeral,
 		IncrementalAliveNodes:     incrementalAliveNodes,
 		EphemeralNodeEvictDelayNs: int64(ephemeralNodeEvictDelay),
+		ClashFingerprintPolicy:    clashFingerprintPolicy.String(),
 		CreatedAtNs:               now,
 		UpdatedAtNs:               now,
 	}
@@ -244,6 +266,7 @@ func (s *ControlPlaneService) CreateSubscription(req CreateSubscriptionRequest) 
 	sub.SetContent(content)
 	sub.SetIncrementalAliveNodes(incrementalAliveNodes)
 	sub.SetEphemeralNodeEvictDelayNs(int64(ephemeralNodeEvictDelay))
+	sub.SetClashFingerprintPolicy(clashFingerprintPolicy)
 	sub.CreatedAtNs = now
 	sub.UpdatedAtNs = now
 	s.SubMgr.Register(sub)
@@ -276,6 +299,7 @@ func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMe
 	enabledChanged := false
 	urlChanged := false
 	contentChanged := false
+	clashFingerprintPolicyChanged := false
 	sourceType := sub.SourceType()
 
 	newName := sub.Name()
@@ -364,6 +388,20 @@ func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMe
 		newEphemeralNodeEvictDelay = int64(d)
 	}
 
+	newClashFingerprintPolicy := sub.ClashFingerprintPolicy()
+	if v, ok, err := patch.optionalString("clash_fingerprint_policy"); err != nil {
+		return nil, err
+	} else if ok {
+		validated, verr := validateClashFingerprintPolicy(v)
+		if verr != nil {
+			return nil, verr
+		}
+		newClashFingerprintPolicy = validated
+		if newClashFingerprintPolicy != sub.ClashFingerprintPolicy() {
+			clashFingerprintPolicyChanged = true
+		}
+	}
+
 	now := time.Now().UnixNano()
 	ms := model.Subscription{
 		ID:                        id,
@@ -376,6 +414,7 @@ func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMe
 		Ephemeral:                 newEphemeral,
 		IncrementalAliveNodes:     newIncrementalAliveNodes,
 		EphemeralNodeEvictDelayNs: newEphemeralNodeEvictDelay,
+		ClashFingerprintPolicy:    newClashFingerprintPolicy.String(),
 		CreatedAtNs:               sub.CreatedAtNs,
 		UpdatedAtNs:               now,
 	}
@@ -389,6 +428,7 @@ func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMe
 	sub.SetEphemeral(newEphemeral)
 	sub.SetIncrementalAliveNodes(newIncrementalAliveNodes)
 	sub.SetEphemeralNodeEvictDelayNs(newEphemeralNodeEvictDelay)
+	sub.SetClashFingerprintPolicy(newClashFingerprintPolicy)
 	sub.UpdatedAtNs = now
 
 	if nameChanged {
@@ -397,7 +437,7 @@ func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMe
 	if enabledChanged {
 		s.Scheduler.SetSubscriptionEnabled(sub, newEnabled)
 	}
-	if urlChanged || contentChanged {
+	if urlChanged || contentChanged || clashFingerprintPolicyChanged {
 		go s.Scheduler.UpdateSubscription(sub)
 	}
 

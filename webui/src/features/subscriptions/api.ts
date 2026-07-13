@@ -1,16 +1,32 @@
 import { apiRequest } from "../../lib/api-client";
-import type {
-  PageResponse,
-  Subscription,
-  SubscriptionCreateInput,
-  SubscriptionUpdateInput,
+import {
+  CLASH_FINGERPRINT_POLICY_DEFAULT,
+  type ClashFingerprintPolicy,
+  type PageResponse,
+  type Subscription,
+  type SubscriptionCreateInput,
+  type SubscriptionUpdateInput,
 } from "./types";
 
 const basePath = "/api/v1/subscriptions";
 
+const CLASH_FINGERPRINT_POLICY_VALUES: ReadonlySet<ClashFingerprintPolicy> = new Set([
+  "reject",
+  "drop_safe",
+  "drop_always",
+]);
+
+function normalizeClashFingerprintPolicy(value: unknown): ClashFingerprintPolicy {
+  if (typeof value === "string" && CLASH_FINGERPRINT_POLICY_VALUES.has(value as ClashFingerprintPolicy)) {
+    return value as ClashFingerprintPolicy;
+  }
+  return CLASH_FINGERPRINT_POLICY_DEFAULT;
+}
+
 type ApiSubscription = Omit<Subscription, "last_checked" | "last_updated" | "last_error"> & {
   source_type?: "remote" | "local";
   content?: string;
+  clash_fingerprint_policy?: ClashFingerprintPolicy;
   last_checked?: string | null;
   last_updated?: string | null;
   last_error?: string | null;
@@ -21,6 +37,7 @@ function normalizeSubscription(raw: ApiSubscription): Subscription {
     ...raw,
     source_type: raw.source_type ?? "remote",
     content: raw.content ?? "",
+    clash_fingerprint_policy: normalizeClashFingerprintPolicy(raw.clash_fingerprint_policy),
     last_checked: raw.last_checked || "",
     last_updated: raw.last_updated || "",
     last_error: raw.last_error || "",

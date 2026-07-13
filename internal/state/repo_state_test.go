@@ -106,14 +106,95 @@ func TestMigrateStateDB_LegacyBaselineAdvancesToLatest(t *testing.T) {
 	if dirty {
 		t.Fatalf("schema_migrations dirty=true")
 	}
-	if version != stateVersionAddPassiveCircuitBreakerDisabled {
-		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddPassiveCircuitBreakerDisabled)
+	if version != stateVersionAddClashFingerprintPolicy {
+		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddClashFingerprintPolicy)
 	}
 	if ok, err := hasTableColumn(db, "subscriptions", "incremental_alive_nodes"); err != nil || !ok {
 		t.Fatalf("expected migrated column subscriptions.incremental_alive_nodes, ok=%v err=%v", ok, err)
 	}
 	if ok, err := hasTableColumn(db, "platforms", "passive_circuit_breaker_disabled"); err != nil || !ok {
 		t.Fatalf("expected migrated column platforms.passive_circuit_breaker_disabled, ok=%v err=%v", ok, err)
+	}
+	if ok, err := hasTableColumn(db, "subscriptions", "clash_fingerprint_policy"); err != nil || !ok {
+		t.Fatalf("expected migrated column subscriptions.clash_fingerprint_policy, ok=%v err=%v", ok, err)
+	}
+}
+
+func TestMigrateStateDB_LegacyV8AdvancesToLatest(t *testing.T) {
+	dir := t.TempDir()
+	db, err := OpenDB(dir + "/state.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Simulate a database at migration 000008 (has protocol_filters_json,
+	// exclude_protocol_filters_json) but WITHOUT 000009's clash_fingerprint_policy
+	// and WITHOUT a schema_migrations table — this is the legacy v8 shape.
+	_, err = db.Exec(`
+		CREATE TABLE platforms (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL UNIQUE,
+			sticky_ttl_ns INTEGER NOT NULL,
+			regex_filters_json TEXT NOT NULL DEFAULT '[]',
+			region_filters_json TEXT NOT NULL DEFAULT '[]',
+			reverse_proxy_miss_action TEXT NOT NULL DEFAULT 'RANDOM',
+			reverse_proxy_empty_account_behavior TEXT NOT NULL DEFAULT 'RANDOM',
+			reverse_proxy_fixed_account_header TEXT NOT NULL DEFAULT '',
+			passive_circuit_breaker_disabled INTEGER NOT NULL DEFAULT 0,
+			protocol_filters_json TEXT NOT NULL DEFAULT '[]',
+			exclude_protocol_filters_json TEXT NOT NULL DEFAULT '[]',
+			allocation_policy TEXT NOT NULL DEFAULT 'BALANCED',
+			updated_at_ns INTEGER NOT NULL
+		);
+		CREATE TABLE subscriptions (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			source_type TEXT NOT NULL DEFAULT 'remote',
+			url TEXT NOT NULL,
+			content TEXT NOT NULL DEFAULT '',
+			update_interval_ns INTEGER NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			ephemeral INTEGER NOT NULL DEFAULT 0,
+			ephemeral_node_evict_delay_ns INTEGER NOT NULL,
+			incremental_alive_nodes INTEGER NOT NULL DEFAULT 0,
+			created_at_ns INTEGER NOT NULL,
+			updated_at_ns INTEGER NOT NULL
+		)
+	`)
+	if err != nil {
+		t.Fatalf("create legacy v8 tables: %v", err)
+	}
+
+	if err := MigrateStateDB(db); err != nil {
+		t.Fatalf("MigrateStateDB: %v", err)
+	}
+
+	// Must end at the latest version (v9).
+	var version int
+	var dirty bool
+	err = db.QueryRow("SELECT version, dirty FROM schema_migrations LIMIT 1").Scan(&version, &dirty)
+	if err != nil {
+		t.Fatalf("read schema_migrations: %v", err)
+	}
+	if dirty {
+		t.Fatalf("schema_migrations dirty=true")
+	}
+	if version != stateVersionAddClashFingerprintPolicy {
+		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddClashFingerprintPolicy)
+	}
+
+	// v8 columns must still be present.
+	if ok, err := hasTableColumn(db, "platforms", "protocol_filters_json"); err != nil || !ok {
+		t.Fatalf("expected column platforms.protocol_filters_json, ok=%v err=%v", ok, err)
+	}
+	if ok, err := hasTableColumn(db, "platforms", "exclude_protocol_filters_json"); err != nil || !ok {
+		t.Fatalf("expected column platforms.exclude_protocol_filters_json, ok=%v err=%v", ok, err)
+	}
+
+	// v9 column must now exist.
+	if ok, err := hasTableColumn(db, "subscriptions", "clash_fingerprint_policy"); err != nil || !ok {
+		t.Fatalf("expected migrated column subscriptions.clash_fingerprint_policy, ok=%v err=%v", ok, err)
 	}
 }
 
@@ -173,11 +254,14 @@ func TestMigrateStateDB_AddsIncrementalAliveNodesToLegacySubscriptions(t *testin
 	if dirty {
 		t.Fatalf("schema_migrations dirty=true")
 	}
-	if version != stateVersionAddPassiveCircuitBreakerDisabled {
-		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddPassiveCircuitBreakerDisabled)
+	if version != stateVersionAddClashFingerprintPolicy {
+		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddClashFingerprintPolicy)
 	}
 	if ok, err := hasTableColumn(db, "platforms", "passive_circuit_breaker_disabled"); err != nil || !ok {
 		t.Fatalf("expected migrated column platforms.passive_circuit_breaker_disabled, ok=%v err=%v", ok, err)
+	}
+	if ok, err := hasTableColumn(db, "subscriptions", "clash_fingerprint_policy"); err != nil || !ok {
+		t.Fatalf("expected migrated column subscriptions.clash_fingerprint_policy, ok=%v err=%v", ok, err)
 	}
 }
 
@@ -248,14 +332,17 @@ func TestMigrateStateDB_NormalizesLegacyRandomMissAction(t *testing.T) {
 	if dirty {
 		t.Fatalf("schema_migrations dirty=true")
 	}
-	if version != stateVersionAddPassiveCircuitBreakerDisabled {
-		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddPassiveCircuitBreakerDisabled)
+	if version != stateVersionAddClashFingerprintPolicy {
+		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddClashFingerprintPolicy)
 	}
 	if ok, err := hasTableColumn(db, "subscriptions", "incremental_alive_nodes"); err != nil || !ok {
 		t.Fatalf("expected migrated column subscriptions.incremental_alive_nodes, ok=%v err=%v", ok, err)
 	}
 	if ok, err := hasTableColumn(db, "platforms", "passive_circuit_breaker_disabled"); err != nil || !ok {
 		t.Fatalf("expected migrated column platforms.passive_circuit_breaker_disabled, ok=%v err=%v", ok, err)
+	}
+	if ok, err := hasTableColumn(db, "subscriptions", "clash_fingerprint_policy"); err != nil || !ok {
+		t.Fatalf("expected migrated column subscriptions.clash_fingerprint_policy, ok=%v err=%v", ok, err)
 	}
 }
 
@@ -525,6 +612,7 @@ func TestStateRepo_Subscriptions_CRUD(t *testing.T) {
 		ID: "sub-1", Name: "MySub", URL: "https://example.com/sub",
 		UpdateIntervalNs: int64(30 * time.Second), Enabled: true,
 		Ephemeral: false, EphemeralNodeEvictDelayNs: int64(72 * time.Hour), CreatedAtNs: now, UpdatedAtNs: now,
+		ClashFingerprintPolicy: "reject",
 	}
 	if err := repo.UpsertSubscription(s); err != nil {
 		t.Fatal(err)
@@ -537,15 +625,22 @@ func TestStateRepo_Subscriptions_CRUD(t *testing.T) {
 	if len(list) != 1 || list[0].URL != "https://example.com/sub" {
 		t.Fatalf("unexpected list: %+v", list)
 	}
+	if list[0].ClashFingerprintPolicy != "reject" {
+		t.Fatalf("expected default clash_fingerprint_policy reject, got %q", list[0].ClashFingerprintPolicy)
+	}
 
 	// Update.
 	s.URL = "https://example.com/sub-v2"
+	s.ClashFingerprintPolicy = "drop_safe"
 	if err := repo.UpsertSubscription(s); err != nil {
 		t.Fatal(err)
 	}
 	list, _ = repo.ListSubscriptions()
 	if list[0].URL != "https://example.com/sub-v2" {
 		t.Fatalf("expected updated URL, got %s", list[0].URL)
+	}
+	if list[0].ClashFingerprintPolicy != "drop_safe" {
+		t.Fatalf("expected clash_fingerprint_policy drop_safe, got %q", list[0].ClashFingerprintPolicy)
 	}
 
 	// Delete.
@@ -566,7 +661,9 @@ func TestStateRepo_Subscription_CreatedAtNsPreserved(t *testing.T) {
 		ID: "sub-1", Name: "MySub", URL: "https://example.com",
 		UpdateIntervalNs: int64(30 * time.Second), Enabled: true,
 		Ephemeral: false, EphemeralNodeEvictDelayNs: int64(72 * time.Hour),
-		CreatedAtNs: originalCreatedAt, UpdatedAtNs: originalCreatedAt,
+		CreatedAtNs:            originalCreatedAt,
+		UpdatedAtNs:            originalCreatedAt,
+		ClashFingerprintPolicy: "reject",
 	}
 	if err := repo.UpsertSubscription(s); err != nil {
 		t.Fatal(err)
@@ -596,6 +693,9 @@ func TestStateRepo_Subscription_CreatedAtNsPreserved(t *testing.T) {
 	if list[0].UpdatedAtNs != int64(2000000) {
 		t.Fatalf("updated_at_ns should have been updated, got %d", list[0].UpdatedAtNs)
 	}
+	if list[0].ClashFingerprintPolicy != "reject" {
+		t.Fatalf("expected clash_fingerprint_policy reject, got %q", list[0].ClashFingerprintPolicy)
+	}
 }
 
 func TestStateRepo_Subscription_LocalSourcePersists(t *testing.T) {
@@ -614,6 +714,7 @@ func TestStateRepo_Subscription_LocalSourcePersists(t *testing.T) {
 		EphemeralNodeEvictDelayNs: int64(72 * time.Hour),
 		CreatedAtNs:               now,
 		UpdatedAtNs:               now,
+		ClashFingerprintPolicy:    "drop_always",
 	}
 	if err := repo.UpsertSubscription(s); err != nil {
 		t.Fatal(err)
@@ -631,6 +732,9 @@ func TestStateRepo_Subscription_LocalSourcePersists(t *testing.T) {
 	}
 	if list[0].Content != "vmess://example" {
 		t.Fatalf("content: got %q", list[0].Content)
+	}
+	if list[0].ClashFingerprintPolicy != "drop_always" {
+		t.Fatalf("clash_fingerprint_policy: got %q, want %q", list[0].ClashFingerprintPolicy, "drop_always")
 	}
 }
 

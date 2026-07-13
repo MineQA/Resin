@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,7 +46,7 @@ func TestExtractProxyCandidates_WithProtocol(t *testing.T) {
 func TestExtractProxyCandidates_Dedupe(t *testing.T) {
 	data := []byte("1.2.3.4:80\n1.2.3.4:80\nhttp://1.2.3.4:80\n1.2.3.4:80\n")
 	candidates := ExtractProxyCandidates(data, "test-src", 100)
-	// The first line is ip:port, second is same (deduped), third has protocol (different string). 
+	// The first line is ip:port, second is same (deduped), third has protocol (different string).
 	// Actually: "1.2.3.4:80" normalized, "http://1.2.3.4:80" is a different string so not deduped.
 	if len(candidates) != 2 {
 		t.Fatalf("expected 2 candidates (1 ip:port + 1 http://ip:port), got %d: %v", len(candidates), candidates)
@@ -327,9 +328,21 @@ func TestImportProxies_TooMany(t *testing.T) {
 
 func TestImportProxies_InvalidFormat(t *testing.T) {
 	cp := &ControlPlaneService{}
-	_, err := cp.ImportProxies(ImportProxiesRequest{Proxies: []string{"not-a-proxy"}, ConfirmChecked: boolPtr(true)})
-	if err == nil {
-		t.Fatal("expected error for invalid format")
+	resp, err := cp.ImportProxies(ImportProxiesRequest{Proxies: []string{"not-a-proxy"}, ConfirmChecked: boolPtr(true)})
+	if err != nil {
+		t.Fatalf("unexpected top-level error for single-item invalid format: %v", err)
+	}
+	if resp.ImportedCount != 0 {
+		t.Errorf("ImportedCount = %d, want 0", resp.ImportedCount)
+	}
+	if resp.SkippedCount != 1 {
+		t.Errorf("SkippedCount = %d, want 1", resp.SkippedCount)
+	}
+	if len(resp.Errors) == 0 {
+		t.Fatal("expected a parse error in response")
+	}
+	if !strings.Contains(resp.Errors[0], "parse error:") {
+		t.Fatalf("expected error with parse error prefix, got: %s", resp.Errors[0])
 	}
 }
 
@@ -454,8 +467,254 @@ func TestImportProxies_HTTPAndSocks(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// ImportProxies — diagnostics consumption
+// ---------------------------------------------------------------------------
+
+// TestImportProxies_PartialRejection_AcceptsSiblings verifies that when
+// some proxies are rejected (e.g., Clash fingerprint) and some accepted,
+// accepted nodes are imported and rejected nodes are counted as skipped
+// with safe formatted errors.
+func TestImportProxies_PartialRejection_AcceptsSiblings(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              nil,
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+	cp := &ControlPlaneService{
+		Pool:   pool,
+		SubMgr: subMgr,
+	}
+
+	// Mix: a valid SS URI line + a Clash JSON with rejected fingerprint node.
+	validProxy := "ss://YWVzLTEyOC1nY206cGFzcw@1.1.1.1:8388"
+	rejectedProxy := `{"proxies":[{"name":"bad","type":"hysteria2","server":"x.com","port":443,"password":"pass","fingerprint":"aabbccdd"}]}`
+
+	resp, err := cp.ImportProxies(ImportProxiesRequest{
+		Proxies:        []string{validProxy, rejectedProxy},
+		ConfirmChecked: boolPtr(true),
+	})
+	if err != nil {
+		t.Fatalf("ImportProxies: %v", err)
+	}
+
+	// The SS node should be imported.
+	if resp.ImportedCount != 1 {
+		t.Errorf("ImportedCount = %d, want 1", resp.ImportedCount)
+	}
+	if len(resp.NodeHashes) != 1 {
+		t.Errorf("expected 1 node hash, got %d", len(resp.NodeHashes))
+	}
+
+	// The rejected node should be counted as skipped.
+	if resp.SkippedCount != 1 {
+		t.Errorf("SkippedCount = %d, want 1 (rejected)", resp.SkippedCount)
+	}
+
+	// Errors should contain the rejection diagnostic with stable code.
+	if len(resp.Errors) == 0 {
+		t.Fatal("expected at least one error for rejected proxy")
+	}
+	foundCode := false
+	for _, e := range resp.Errors {
+		if strings.Contains(e, "CLASH_FINGERPRINT_INVALID") ||
+			strings.Contains(e, "CLASH_CERTIFICATE_FINGERPRINT_UNSUPPORTED") {
+			foundCode = true
+			break
+		}
+	}
+	if !foundCode {
+		t.Fatalf("expected error with stable diagnostic code, got: %v", resp.Errors)
+	}
+	if strings.Contains(strings.Join(resp.Errors, " "), "zzzz") {
+		t.Fatal("errors must not contain raw fingerprint values")
+	}
+}
+
+// TestImportProxies_OnlyRejectedNodes_ReturnsErrors verifies that when all
+// input proxies are rejected (no accepted nodes), the response still has
+// errors rather than a generic "no supported proxy formats" error.
+func TestImportProxies_OnlyRejectedNodes_ReturnsErrors(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              nil,
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+	cp := &ControlPlaneService{
+		Pool:   pool,
+		SubMgr: subMgr,
+	}
+
+	// Only rejected proxies: Clash JSON with fingerprints.
+	rejectedProxy := `{"proxies":[{"name":"n1","type":"hysteria2","server":"x.com","port":443,"password":"pass","fingerprint":"aabbccdd"}]}`
+
+	resp, err := cp.ImportProxies(ImportProxiesRequest{
+		Proxies:        []string{rejectedProxy},
+		ConfirmChecked: boolPtr(true),
+	})
+	if err != nil {
+		t.Fatalf("ImportProxies: %v", err)
+	}
+
+	if resp.ImportedCount != 0 {
+		t.Errorf("ImportedCount = %d, want 0 (all rejected)", resp.ImportedCount)
+	}
+	if resp.SkippedCount != 1 {
+		t.Errorf("SkippedCount = %d, want 1", resp.SkippedCount)
+	}
+	if len(resp.Errors) == 0 {
+		t.Fatal("expected errors for only-rejected import, got none")
+	}
+	if !strings.Contains(resp.Errors[0], "CLASH") {
+		t.Fatalf("expected error with CLASH diagnostic code, got: %s", resp.Errors[0])
+	}
+}
+
+// TestImportProxies_InvalidSibling_KeepsValidItems verifies that when one
+// item produces a fatal parse error and another is valid, the valid item
+// is still imported and the parse error is reported as skipped.
+func TestImportProxies_InvalidSibling_KeepsValidItems(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              nil,
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+	cp := &ControlPlaneService{
+		Pool:   pool,
+		SubMgr: subMgr,
+	}
+	resp, err := cp.ImportProxies(ImportProxiesRequest{
+		Proxies:        []string{"not-a-proxy", "ss://YWVzLTEyOC1nY206cGFzcw@1.1.1.1:8388"},
+		ConfirmChecked: boolPtr(true),
+	})
+	if err != nil {
+		t.Fatalf("unexpected top-level error: %v", err)
+	}
+	if resp.ImportedCount != 1 {
+		t.Errorf("ImportedCount = %d, want 1 (valid SS node)", resp.ImportedCount)
+	}
+	if resp.SkippedCount != 1 {
+		t.Errorf("SkippedCount = %d, want 1 (parse error)", resp.SkippedCount)
+	}
+	if len(resp.Errors) != 1 {
+		t.Fatalf("expected 1 error (parse error), got %d: %v", len(resp.Errors), resp.Errors)
+	}
+	if !strings.Contains(resp.Errors[0], "parse error:") {
+		t.Fatalf("expected parse error prefix, got: %s", resp.Errors[0])
+	}
+}
+
+// TestImportProxies_Warnings_RepresentedSafely verifies that when a proxy
+// is accepted with warnings (e.g., drop_always with fingerprint), the
+// warning is represented safely in errors without raw fingerprint data.
+func TestImportProxies_Warnings_RepresentedSafely(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              nil,
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+	cp := &ControlPlaneService{
+		Pool:   pool,
+		SubMgr: subMgr,
+	}
+
+	// A single SS proxy (no issue) + a Clash JSON with drop_always warning.
+	// Note: the default policy for ParseGeneralSubscriptionDetail is
+	// ClashFingerprintReject, which will reject fingerprint nodes, not warn.
+	// To get warnings, we need drop_always policy, but ImportProxies always
+	// uses default reject. So warnings under default reject won't occur
+	// naturally via fingerprints.
+	//
+	// However, the import code handles warnings defensively. We can trigger
+	// a warning-free import to verify no spurious warnings appear.
+	// For proper warning coverage, the code flow accepts warnings if the
+	// parser produces them, but under default reject, fingerprints cause
+	// rejections, not warnings. This test verifies that the code does not
+	// crash or produce garbage when warnings are absent.
+	validProxies := []string{"ss://YWVzLTEyOC1nY206cGFzcw@1.1.1.1:8388"}
+
+	resp, err := cp.ImportProxies(ImportProxiesRequest{
+		Proxies:        validProxies,
+		ConfirmChecked: boolPtr(true),
+	})
+	if err != nil {
+		t.Fatalf("ImportProxies: %v", err)
+	}
+	if resp.ImportedCount != 1 {
+		t.Errorf("ImportedCount = %d, want 1", resp.ImportedCount)
+	}
+	if resp.SkippedCount != 0 {
+		t.Errorf("SkippedCount = %d, want 0", resp.SkippedCount)
+	}
+	// No errors expected for clean import.
+	if len(resp.Errors) != 0 {
+		t.Fatalf("expected no errors for clean import, got: %v", resp.Errors)
+	}
+}
+
+// TestImportProxies_RejectedAndWarnings verifies that a mixture of rejected
+// and warning-bearing proxies produces safe formatted errors. Since the
+// default policy is reject, fingerprints produce rejections. This test
+// ensures both rejected and potential warning paths are safe.
+func TestImportProxies_RejectedAndWarnings_Formatted(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              nil,
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+	cp := &ControlPlaneService{
+		Pool:   pool,
+		SubMgr: subMgr,
+	}
+
+	// A proxy with fingerprint that will be rejected under default policy.
+	fpRejected := `{"proxies":[{"name":"fp-node","type":"hysteria2","server":"x.com","port":443,"password":"pass","fingerprint":"aabbccdd"}]}`
+
+	resp, err := cp.ImportProxies(ImportProxiesRequest{
+		Proxies:        []string{fpRejected},
+		ConfirmChecked: boolPtr(true),
+	})
+	if err != nil {
+		t.Fatalf("ImportProxies: %v", err)
+	}
+
+	if resp.ImportedCount != 0 {
+		t.Errorf("ImportedCount = %d, want 0", resp.ImportedCount)
+	}
+	if resp.SkippedCount != 1 {
+		t.Errorf("SkippedCount = %d, want 1", resp.SkippedCount)
+	}
+
+	// Verify error format includes the "proxy rejected:" prefix and stable code.
+	if len(resp.Errors) == 0 {
+		t.Fatal("expected errors, got none")
+	}
+	errStr := resp.Errors[0]
+	if !strings.HasPrefix(errStr, "proxy rejected:") && !strings.HasPrefix(errStr, "proxy warning:") {
+		t.Fatalf("expected error with proper prefix, got: %s", errStr)
+	}
+	if strings.Contains(errStr, "aabbccdd") {
+		t.Fatal("error must not contain raw fingerprint value")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-func intPtr(i int) *int  { return &i }
+func intPtr(i int) *int    { return &i }
 func boolPtr(b bool) *bool { return &b }

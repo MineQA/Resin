@@ -123,6 +123,34 @@ func TestSubscription_SourceTypeAndContent(t *testing.T) {
 	}
 }
 
+func TestSubscription_SetClashFingerprintPolicy_IncrementsConfigVersion(t *testing.T) {
+	s := NewSubscription("id1", "sub", "url", true, false)
+	v0 := s.ConfigVersion()
+
+	// Changing policy bumps configVersion.
+	s.SetClashFingerprintPolicy(ClashFingerprintDropSafe)
+	if s.ClashFingerprintPolicy() != ClashFingerprintDropSafe {
+		t.Fatalf("expected drop_safe, got %v", s.ClashFingerprintPolicy())
+	}
+	if s.ConfigVersion() <= v0 {
+		t.Fatalf("expected config version to increase: old=%d new=%d", v0, s.ConfigVersion())
+	}
+
+	v1 := s.ConfigVersion()
+
+	// Setting the same value does NOT bump configVersion.
+	s.SetClashFingerprintPolicy(ClashFingerprintDropSafe)
+	if s.ConfigVersion() != v1 {
+		t.Fatalf("expected config version unchanged: got %d, want %d", s.ConfigVersion(), v1)
+	}
+
+	// Default is reject.
+	s2 := NewSubscription("id2", "sub2", "url", true, false)
+	if s2.ClashFingerprintPolicy() != ClashFingerprintReject {
+		t.Fatalf("default clash fingerprint policy: got %v, want reject", s2.ClashFingerprintPolicy())
+	}
+}
+
 func TestDiffHashes(t *testing.T) {
 	h1 := node.HashFromRawOptions([]byte(`{"type":"ss","server":"1.1.1.1"}`))
 	h2 := node.HashFromRawOptions([]byte(`{"type":"ss","server":"2.2.2.2"}`))

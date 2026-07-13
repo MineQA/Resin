@@ -1,3 +1,7 @@
+export type ClashFingerprintPolicy = "reject" | "drop_safe" | "drop_always";
+
+export const CLASH_FINGERPRINT_POLICY_DEFAULT: ClashFingerprintPolicy = "reject";
+
 export type Subscription = {
   id: string;
   name: string;
@@ -10,6 +14,7 @@ export type Subscription = {
   ephemeral: boolean;
   incremental_alive_nodes: boolean;
   ephemeral_node_evict_delay: string;
+  clash_fingerprint_policy: ClashFingerprintPolicy;
   enabled: boolean;
   created_at: string;
   last_checked?: string;
@@ -34,6 +39,7 @@ export type SubscriptionCreateInput = {
   ephemeral?: boolean;
   incremental_alive_nodes?: boolean;
   ephemeral_node_evict_delay?: string;
+  clash_fingerprint_policy?: ClashFingerprintPolicy;
 };
 
 export type SubscriptionUpdateInput = {
@@ -45,4 +51,5 @@ export type SubscriptionUpdateInput = {
   ephemeral?: boolean;
   incremental_alive_nodes?: boolean;
   ephemeral_node_evict_delay?: string;
+  clash_fingerprint_policy?: ClashFingerprintPolicy;
 };

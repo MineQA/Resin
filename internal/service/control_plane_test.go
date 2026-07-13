@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"errors"
 	"net/netip"
 	"path/filepath"
@@ -222,6 +223,8 @@ func TestRuntimeConfigPatchAllowlist_StaysInSyncWithRuntimeConfigJSONFields(t *t
 func newDefaultCfg() *config.RuntimeConfig {
 	return config.NewDefaultRuntimeConfig()
 }
+
+func strPtr(s string) *string { return &s }
 
 func TestResolveAccountHeaderRule_UsesEscapedPathSegments(t *testing.T) {
 	dir := t.TempDir()
@@ -722,6 +725,509 @@ func TestGetSubscription_HealthyNodeCount_ExcludesDisabledSubscriptionNodes(t *t
 		t.Fatalf("healthy_node_count = %d, want 0", resp.HealthyNodeCount)
 	}
 }
+
+// --- ClashFingerprintPolicy ---
+
+func mustRegisterSub(t *testing.T, cp *ControlPlaneService, sub *subscription.Subscription) {
+	t.Helper()
+	now := time.Now().UnixNano()
+	ms := model.Subscription{
+		ID:                        sub.ID,
+		Name:                      sub.Name(),
+		URL:                       sub.URL(),
+		UpdateIntervalNs:          sub.UpdateIntervalNs(),
+		Enabled:                   sub.Enabled(),
+		Ephemeral:                 sub.Ephemeral(),
+		IncrementalAliveNodes:     sub.IncrementalAliveNodes(),
+		EphemeralNodeEvictDelayNs: sub.EphemeralNodeEvictDelayNs(),
+		ClashFingerprintPolicy:    sub.ClashFingerprintPolicy().String(),
+		CreatedAtNs:               now,
+		UpdatedAtNs:               now,
+	}
+	if err := cp.Engine.UpsertSubscription(ms); err != nil {
+		t.Fatalf("UpsertSubscription: %v", err)
+	}
+	cp.SubMgr.Register(sub)
+}
+
+func TestCreateSubscription_ClashFingerprintPolicy_DefaultIsReject(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	cp := &ControlPlaneService{
+		Engine: engine,
+		Pool:   pool,
+		SubMgr: subMgr,
+	}
+
+	name := "default-policy-sub"
+	resp, err := cp.CreateSubscription(CreateSubscriptionRequest{
+		Name: &name,
+		URL:  strPtr("https://example.com/default-policy"),
+	})
+	if err != nil {
+		t.Fatalf("CreateSubscription: %v", err)
+	}
+	if resp.ClashFingerprintPolicy != "reject" {
+		t.Fatalf("clash_fingerprint_policy: got %q, want %q", resp.ClashFingerprintPolicy, "reject")
+	}
+
+	// Verify in-memory runtime.
+	sub := subMgr.Lookup(resp.ID)
+	if sub == nil {
+		t.Fatal("runtime subscription not found")
+	}
+	if sub.ClashFingerprintPolicy().String() != "reject" {
+		t.Fatalf("runtime policy: got %s, want reject", sub.ClashFingerprintPolicy())
+	}
+}
+
+func TestCreateSubscription_ClashFingerprintPolicy_EachValidValue(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	cp := &ControlPlaneService{
+		Engine: engine,
+		Pool:   pool,
+		SubMgr: subMgr,
+	}
+
+	for _, tc := range []struct {
+		value string
+		want  subscription.ClashFingerprintPolicy
+	}{
+		{value: "drop_safe", want: subscription.ClashFingerprintDropSafe},
+		{value: "drop_always", want: subscription.ClashFingerprintDropAlways},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			name := "sub-" + tc.value
+			resp, err := cp.CreateSubscription(CreateSubscriptionRequest{
+				Name:                   &name,
+				URL:                    strPtr("https://example.com/" + tc.value),
+				ClashFingerprintPolicy: &tc.value,
+			})
+			if err != nil {
+				t.Fatalf("CreateSubscription: %v", err)
+			}
+			if resp.ClashFingerprintPolicy != tc.value {
+				t.Fatalf("clash_fingerprint_policy: got %q, want %q", resp.ClashFingerprintPolicy, tc.value)
+			}
+
+			sub := subMgr.Lookup(resp.ID)
+			if sub == nil {
+				t.Fatal("runtime subscription not found")
+			}
+			if sub.ClashFingerprintPolicy() != tc.want {
+				t.Fatalf("runtime policy: got %v, want %v", sub.ClashFingerprintPolicy(), tc.want)
+			}
+		})
+	}
+}
+
+func TestCreateSubscription_ClashFingerprintPolicy_RejectsInvalid(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	cp := &ControlPlaneService{
+		Engine: engine,
+		Pool:   pool,
+		SubMgr: subMgr,
+	}
+
+	invalidValues := []string{"unknown", "", "DROP_ALWAYS", "drop_always "}
+	for _, v := range invalidValues {
+		t.Run(v, func(t *testing.T) {
+			name := "sub-invalid-" + v
+			_, err := cp.CreateSubscription(CreateSubscriptionRequest{
+				Name:                   &name,
+				URL:                    strPtr("https://example.com/invalid"),
+				ClashFingerprintPolicy: &v,
+			})
+			if err == nil {
+				t.Fatal("expected error for invalid policy")
+			}
+			var svcErr *ServiceError
+			if !errors.As(err, &svcErr) {
+				t.Fatalf("expected ServiceError, got %T: %v", err, err)
+			}
+			if svcErr.Code != "INVALID_ARGUMENT" {
+				t.Fatalf("code: got %q, want INVALID_ARGUMENT", svcErr.Code)
+			}
+			if !strings.Contains(svcErr.Message, "clash_fingerprint_policy") {
+				t.Fatalf("message missing field name: %q", svcErr.Message)
+			}
+		})
+	}
+}
+
+func TestUpdateSubscription_ClashFingerprintPolicy_ChangesAndPersists(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	fetchCalled := make(chan struct{}, 1)
+	scheduler := topology.NewSubscriptionScheduler(topology.SchedulerConfig{
+		SubManager: subMgr,
+		Pool:       pool,
+		Fetcher: func(url string) ([]byte, error) {
+			select {
+			case fetchCalled <- struct{}{}:
+			default:
+			}
+			return []byte("proxies:"), nil
+		},
+	})
+
+	cp := &ControlPlaneService{
+		Engine:    engine,
+		Pool:      pool,
+		SubMgr:    subMgr,
+		Scheduler: scheduler,
+	}
+
+	name := "policy-update-sub"
+	createResp, err := cp.CreateSubscription(CreateSubscriptionRequest{
+		Name: &name,
+		URL:  strPtr("https://example.com/policy-update"),
+	})
+	if err != nil {
+		t.Fatalf("CreateSubscription: %v", err)
+	}
+	subID := createResp.ID
+
+	// Update to drop_safe. This should trigger a refresh (fetchCount increments).
+	patch := json.RawMessage(`{"clash_fingerprint_policy": "drop_safe"}`)
+	resp, err := cp.UpdateSubscription(subID, patch)
+	if err != nil {
+		t.Fatalf("UpdateSubscription: %v", err)
+	}
+	if resp.ClashFingerprintPolicy != "drop_safe" {
+		t.Fatalf("response policy: got %q, want %q", resp.ClashFingerprintPolicy, "drop_safe")
+	}
+
+	// Verify in-memory runtime.
+	sub := subMgr.Lookup(subID)
+	if sub == nil {
+		t.Fatal("runtime subscription not found")
+	}
+	if sub.ClashFingerprintPolicy().String() != "drop_safe" {
+		t.Fatalf("runtime policy: got %s, want drop_safe", sub.ClashFingerprintPolicy())
+	}
+
+	// Verify persisted.
+	subs, err := engine.ListSubscriptions()
+	if err != nil {
+		t.Fatalf("ListSubscriptions: %v", err)
+	}
+	var found bool
+	for _, ms := range subs {
+		if ms.ID == subID {
+			found = true
+			if ms.ClashFingerprintPolicy != "drop_safe" {
+				t.Fatalf("persisted policy: got %q, want %q", ms.ClashFingerprintPolicy, "drop_safe")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatal("subscription not found in persistence")
+	}
+
+	// Verify the asynchronous refresh was triggered (scheduler called fetcher).
+	select {
+	case <-fetchCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for scheduler UpdateSubscription")
+	}
+}
+
+func TestUpdateSubscription_ClashFingerprintPolicy_NoChangeDoesNotTriggerRefresh(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	fetchCount := 0
+	scheduler := topology.NewSubscriptionScheduler(topology.SchedulerConfig{
+		SubManager: subMgr,
+		Pool:       pool,
+		Fetcher: func(url string) ([]byte, error) {
+			fetchCount++
+			return []byte("proxies:"), nil
+		},
+	})
+
+	cp := &ControlPlaneService{
+		Engine:    engine,
+		Pool:      pool,
+		SubMgr:    subMgr,
+		Scheduler: scheduler,
+	}
+
+	name := "no-change-sub"
+	createResp, err := cp.CreateSubscription(CreateSubscriptionRequest{
+		Name:                   &name,
+		URL:                    strPtr("https://example.com/no-change"),
+		ClashFingerprintPolicy: strPtr("drop_safe"),
+	})
+	if err != nil {
+		t.Fatalf("CreateSubscription: %v", err)
+	}
+	subID := createResp.ID
+
+	// Reset fetch count after create triggers refresh.
+	createFetchCount := fetchCount
+
+	// Patch with same policy value — should NOT trigger refresh.
+	patch := json.RawMessage(`{"clash_fingerprint_policy": "drop_safe"}`)
+	_, err = cp.UpdateSubscription(subID, patch)
+	if err != nil {
+		t.Fatalf("UpdateSubscription: %v", err)
+	}
+	if fetchCount != createFetchCount {
+		t.Fatal("expected no fetch when policy unchanged")
+	}
+}
+
+func TestUpdateSubscription_ClashFingerprintPolicy_RejectsInvalid(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	cp := &ControlPlaneService{
+		Engine: engine,
+		Pool:   pool,
+		SubMgr: subMgr,
+	}
+
+	name := "invalid-patch-sub"
+	createResp, err := cp.CreateSubscription(CreateSubscriptionRequest{
+		Name: &name,
+		URL:  strPtr("https://example.com/invalid-patch"),
+	})
+	if err != nil {
+		t.Fatalf("CreateSubscription: %v", err)
+	}
+	subID := createResp.ID
+
+	_, err = cp.UpdateSubscription(subID, json.RawMessage(`{"clash_fingerprint_policy": "bogus"}`))
+	if err == nil {
+		t.Fatal("expected error for invalid policy")
+	}
+	var svcErr *ServiceError
+	if !errors.As(err, &svcErr) {
+		t.Fatalf("expected ServiceError, got %T: %v", err, err)
+	}
+	if svcErr.Code != "INVALID_ARGUMENT" {
+		t.Fatalf("code: got %q, want INVALID_ARGUMENT", svcErr.Code)
+	}
+}
+
+func TestBootstrap_ClashFingerprintPolicy_RestoresFromPersistence(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	now := time.Now().UnixNano()
+
+	// Persist a subscription with drop_always policy.
+	ms := model.Subscription{
+		ID:                        "sub-bootstrap-1",
+		Name:                      "BootstrapSub",
+		URL:                       "https://example.com/bootstrap",
+		UpdateIntervalNs:          int64(5 * time.Minute),
+		Enabled:                   true,
+		Ephemeral:                 false,
+		EphemeralNodeEvictDelayNs: int64(72 * time.Hour),
+		ClashFingerprintPolicy:    "drop_always",
+		CreatedAtNs:               now,
+		UpdatedAtNs:               now,
+	}
+	if err := engine.UpsertSubscription(ms); err != nil {
+		t.Fatalf("UpsertSubscription: %v", err)
+	}
+
+	// Persist a subscription with empty policy (legacy).
+	ms2 := model.Subscription{
+		ID:                        "sub-bootstrap-2",
+		Name:                      "BootstrapLegacy",
+		URL:                       "https://example.com/legacy",
+		UpdateIntervalNs:          int64(5 * time.Minute),
+		Enabled:                   true,
+		Ephemeral:                 false,
+		EphemeralNodeEvictDelayNs: int64(72 * time.Hour),
+		ClashFingerprintPolicy:    "",
+		CreatedAtNs:               now,
+		UpdatedAtNs:               now,
+	}
+	if err := engine.UpsertSubscription(ms2); err != nil {
+		t.Fatalf("UpsertSubscription: %v", err)
+	}
+
+	// Persist a subscription with invalid policy (legacy).
+	ms3 := model.Subscription{
+		ID:                        "sub-bootstrap-3",
+		Name:                      "BootstrapInvalid",
+		URL:                       "https://example.com/invalid",
+		UpdateIntervalNs:          int64(5 * time.Minute),
+		Enabled:                   true,
+		Ephemeral:                 false,
+		EphemeralNodeEvictDelayNs: int64(72 * time.Hour),
+		ClashFingerprintPolicy:    "unknown_value",
+		CreatedAtNs:               now,
+		UpdatedAtNs:               now,
+	}
+	if err := engine.UpsertSubscription(ms3); err != nil {
+		t.Fatalf("UpsertSubscription: %v", err)
+	}
+
+	// Bootstrap (simulate what main.go does).
+	dbSubs, err := engine.ListSubscriptions()
+	if err != nil {
+		t.Fatalf("ListSubscriptions: %v", err)
+	}
+
+	subMgr := topology.NewSubscriptionManager()
+	for _, subms := range dbSubs {
+		sub := subscription.NewSubscription(subms.ID, subms.Name, subms.URL, subms.Enabled, subms.Ephemeral)
+		sub.SetFetchConfig(subms.URL, subms.UpdateIntervalNs)
+		sub.SetSourceType(subms.SourceType)
+		sub.SetContent(subms.Content)
+		sub.SetIncrementalAliveNodes(subms.IncrementalAliveNodes)
+		sub.SetEphemeralNodeEvictDelayNs(subms.EphemeralNodeEvictDelayNs)
+		sub.SetClashFingerprintPolicy(subscription.ParseClashFingerprintPolicy(subms.ClashFingerprintPolicy))
+		sub.CreatedAtNs = subms.CreatedAtNs
+		sub.UpdatedAtNs = subms.UpdatedAtNs
+		subMgr.Register(sub)
+	}
+
+	// Verify sub 1: drop_always.
+	sub1 := subMgr.Lookup("sub-bootstrap-1")
+	if sub1 == nil {
+		t.Fatal("sub-bootstrap-1 not found")
+	}
+	if sub1.ClashFingerprintPolicy().String() != "drop_always" {
+		t.Fatalf("bootstrap sub1 policy: got %s, want drop_always", sub1.ClashFingerprintPolicy())
+	}
+
+	// Verify sub 2: empty → reject.
+	sub2 := subMgr.Lookup("sub-bootstrap-2")
+	if sub2 == nil {
+		t.Fatal("sub-bootstrap-2 not found")
+	}
+	if sub2.ClashFingerprintPolicy() != subscription.ClashFingerprintReject {
+		t.Fatalf("bootstrap sub2 policy: got %v, want reject", sub2.ClashFingerprintPolicy())
+	}
+
+	// Verify sub 3: invalid → reject.
+	sub3 := subMgr.Lookup("sub-bootstrap-3")
+	if sub3 == nil {
+		t.Fatal("sub-bootstrap-3 not found")
+	}
+	if sub3.ClashFingerprintPolicy() != subscription.ClashFingerprintReject {
+		t.Fatalf("bootstrap sub3 policy: got %v, want reject", sub3.ClashFingerprintPolicy())
+	}
+}
+
+// --- end ClashFingerprintPolicy ---
 
 func TestListPlatforms_FailsFastOnCorruptPersistedFiltersJSON(t *testing.T) {
 	dir := t.TempDir()
@@ -1299,8 +1805,8 @@ func TestCreatePlatform_WithProtocolFilters(t *testing.T) {
 
 	name := "proto-cfg"
 	created, err := cp.CreatePlatform(CreatePlatformRequest{
-		Name:               &name,
-		ProtocolFilters:    []string{"ss", "vmess"},       // aliases should be canonicalized
+		Name:                   &name,
+		ProtocolFilters:        []string{"ss", "vmess"}, // aliases should be canonicalized
 		ExcludeProtocolFilters: []string{"hysteria2"},
 	})
 	if err != nil {

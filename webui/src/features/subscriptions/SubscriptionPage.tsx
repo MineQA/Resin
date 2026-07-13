@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createColumnHelper } from "@tanstack/react-table";
 import { AlertTriangle, Eye, Filter, Info, Pencil, Plus, RefreshCw, Search, Sparkles, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useForm } from "react-hook-form";
+import { useForm, type UseFormReturn } from "react-hook-form";
 import { Link } from "react-router-dom";
 import { z } from "zod";
 import { Badge } from "../../components/ui/Badge";
@@ -28,10 +28,65 @@ import {
   refreshSubscription,
   updateSubscription,
 } from "./api";
-import type { Subscription } from "./types";
+import { CLASH_FINGERPRINT_POLICY_DEFAULT, type ClashFingerprintPolicy, type Subscription } from "./types";
 
 type EnabledFilter = "all" | "enabled" | "disabled";
 type SubscriptionSourceType = "remote" | "local";
+
+const CLASH_FINGERPRINT_POLICY_OPTIONS: ClashFingerprintPolicy[] = ["reject", "drop_safe", "drop_always"];
+
+const clashFingerprintPolicyLabelZh: Record<ClashFingerprintPolicy, string> = {
+  reject: "拒绝",
+  drop_safe: "安全丢弃",
+  drop_always: "总是丢弃（危险）",
+};
+
+const clashFingerprintPolicyHelpZh: Record<ClashFingerprintPolicy, string> = {
+  reject: "拒绝携带不支持的 Clash 证书指纹的节点；最安全的默认。",
+  drop_safe: "仅在 skip-cert-verify 关闭时丢弃指纹，保留正常的 CA/主机名校验；自签节点可能握手失败。",
+  drop_always: "即使 skip-cert-verify 开启也会丢弃指纹，可能使服务器无任何身份校验，存在中间人风险。",
+};
+
+function clashFingerprintPolicyHelpClass(policy: ClashFingerprintPolicy): string {
+  if (policy === "drop_always") {
+    return "callout callout-error";
+  }
+  if (policy === "drop_safe") {
+    return "callout callout-warning";
+  }
+  return "muted";
+}
+
+type ClashFingerprintPolicyFieldProps = {
+  form: UseFormReturn<SubscriptionCreateForm>;
+  idPrefix: "create-sub" | "edit-sub";
+  t: (text: string, options?: Record<string, unknown>) => string;
+};
+
+function ClashFingerprintPolicyField({ form, idPrefix, t }: ClashFingerprintPolicyFieldProps) {
+  const selectId = `${idPrefix}-clash-fingerprint-policy`;
+  const helpId = `${idPrefix}-clash-fingerprint-policy-help`;
+  const policy = form.watch("clash_fingerprint_policy");
+  const isDanger = policy === "drop_always";
+  return (
+    <div className="field-group field-span-2">
+      <label className="field-label" htmlFor={selectId}>
+        {t("Clash 指纹策略")}
+      </label>
+      <Select id={selectId} aria-describedby={helpId} {...form.register("clash_fingerprint_policy")}>
+        {CLASH_FINGERPRINT_POLICY_OPTIONS.map((item) => (
+          <option key={item} value={item}>
+            {t(clashFingerprintPolicyLabelZh[item])}
+          </option>
+        ))}
+      </Select>
+      <div id={helpId} className={clashFingerprintPolicyHelpClass(policy)} role={isDanger ? "alert" : undefined}>
+        {isDanger ? <AlertTriangle size={14} /> : null}
+        <span>{t(clashFingerprintPolicyHelpZh[policy])}</span>
+      </div>
+    </div>
+  );
+}
 
 const SUBSCRIPTION_SOURCE_TABS: Array<{ key: SubscriptionSourceType; label: string; hint: string }> = [
   { key: "remote", label: "远程", hint: "从 HTTP/HTTPS 订阅链接拉取内容" },
@@ -48,6 +103,7 @@ const subscriptionCreateSchema = z.object({
   enabled: z.boolean(),
   ephemeral: z.boolean(),
   incremental_alive_nodes: z.boolean(),
+  clash_fingerprint_policy: z.enum(["reject", "drop_safe", "drop_always"]),
 }).superRefine((value, ctx) => {
   const url = value.url.trim();
   const content = value.content.trim();
@@ -96,6 +152,7 @@ function subscriptionToEditForm(subscription: Subscription): SubscriptionEditFor
     enabled: subscription.enabled,
     ephemeral: subscription.ephemeral,
     incremental_alive_nodes: subscription.incremental_alive_nodes,
+    clash_fingerprint_policy: subscription.clash_fingerprint_policy,
   };
 }
 
@@ -187,6 +244,7 @@ export function SubscriptionPage() {
       enabled: true,
       ephemeral: false,
       incremental_alive_nodes: false,
+      clash_fingerprint_policy: CLASH_FINGERPRINT_POLICY_DEFAULT,
     },
   });
 
@@ -205,6 +263,7 @@ export function SubscriptionPage() {
       enabled: true,
       ephemeral: false,
       incremental_alive_nodes: false,
+      clash_fingerprint_policy: CLASH_FINGERPRINT_POLICY_DEFAULT,
     },
   });
 
@@ -260,6 +319,7 @@ export function SubscriptionPage() {
         enabled: true,
         ephemeral: false,
         incremental_alive_nodes: false,
+        clash_fingerprint_policy: CLASH_FINGERPRINT_POLICY_DEFAULT,
       });
       showToast("success", t("订阅 {{name}} 创建成功", { name: created.name }));
     },
@@ -281,6 +341,7 @@ export function SubscriptionPage() {
         enabled: formData.enabled,
         ephemeral: formData.ephemeral,
         incremental_alive_nodes: formData.incremental_alive_nodes,
+        clash_fingerprint_policy: formData.clash_fingerprint_policy,
         ...(formData.source_type === "remote"
           ? { url: formData.url.trim() }
           : { content: formData.content }),
@@ -382,6 +443,7 @@ export function SubscriptionPage() {
       enabled: values.enabled,
       ephemeral: values.ephemeral,
       incremental_alive_nodes: values.incremental_alive_nodes,
+      clash_fingerprint_policy: values.clash_fingerprint_policy,
       ...(values.source_type === "remote"
         ? { url: values.url.trim() }
         : { content: values.content }),
@@ -780,6 +842,8 @@ export function SubscriptionPage() {
                     </div>
                   )}
 
+                  <ClashFingerprintPolicyField form={editForm} idPrefix="edit-sub" t={t} />
+
                   <div className="field-group">
                     <label className="field-label" htmlFor="edit-sub-ephemeral" style={{ visibility: "hidden" }}>
                       {t("临时订阅")}
@@ -1015,6 +1079,8 @@ export function SubscriptionPage() {
                   ) : null}
                 </div>
               )}
+
+              <ClashFingerprintPolicyField form={createForm} idPrefix="create-sub" t={t} />
 
               <div className="field-group">
                 <label className="field-label" htmlFor="create-sub-ephemeral" style={{ visibility: "hidden" }}>

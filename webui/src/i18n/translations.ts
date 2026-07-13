@@ -147,6 +147,16 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
   "订阅类型": "Subscription type",
   "订阅内容": "Subscription content",
   "订阅内容不能为空": "Subscription content cannot be empty",
+  "Clash 指纹策略": "Clash Fingerprint Policy",
+  "拒绝": "Reject",
+  "安全丢弃": "Drop safely",
+  "总是丢弃（危险）": "Always drop (dangerous)",
+  "拒绝携带不支持的 Clash 证书指纹的节点；最安全的默认。":
+    "Reject nodes carrying unsupported Clash certificate fingerprint; safest default.",
+  "仅在 skip-cert-verify 关闭时丢弃指纹，保留正常的 CA/主机名校验；自签节点可能握手失败。":
+    "Discard the pin only when skip-cert-verify is off, preserving normal CA/hostname validation; self-signed nodes may fail.",
+  "即使 skip-cert-verify 开启也会丢弃指纹，可能使服务器无任何身份校验，存在中间人风险。":
+    "Discard even when skip-cert-verify is on, which may leave no server authentication and creates MITM risk.",
   "订阅源": "Subscription Source",
   "本地订阅": "Local subscription",
   "远程": "Remote",

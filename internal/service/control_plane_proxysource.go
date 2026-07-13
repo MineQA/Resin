@@ -184,12 +184,12 @@ type FetchSourcesResponse struct {
 
 // SourceFetchResult holds the fetch result for one source.
 type SourceFetchResult struct {
-	SourceID       string            `json:"source_id"`
-	SourceName     string            `json:"source_name"`
-	TotalExtracted int               `json:"total_extracted"`
-	ReturnedCount  int               `json:"returned_count"`
-	Candidates     []ProxyCandidate  `json:"candidates,omitempty"`
-	Error          string            `json:"error,omitempty"`
+	SourceID       string           `json:"source_id"`
+	SourceName     string           `json:"source_name"`
+	TotalExtracted int              `json:"total_extracted"`
+	ReturnedCount  int              `json:"returned_count"`
+	Candidates     []ProxyCandidate `json:"candidates,omitempty"`
+	Error          string           `json:"error,omitempty"`
 }
 
 // FetchProxySources fetches one or all built-in proxy sources and returns
@@ -288,11 +288,11 @@ type ImportProxiesRequest struct {
 
 // ImportProxiesResponse is the response body for an import operation.
 type ImportProxiesResponse struct {
-	ImportedCount  int        `json:"imported_count"`
-	SkippedCount   int        `json:"skipped_count"`
-	SubscriptionID string     `json:"subscription_id"`
-	NodeHashes     []string   `json:"node_hashes"`
-	Errors         []string   `json:"errors,omitempty"`
+	ImportedCount  int      `json:"imported_count"`
+	SkippedCount   int      `json:"skipped_count"`
+	SubscriptionID string   `json:"subscription_id"`
+	NodeHashes     []string `json:"node_hashes"`
+	Errors         []string `json:"errors,omitempty"`
 }
 
 var importMu sync.Mutex
@@ -317,66 +317,103 @@ func (s *ControlPlaneService) ImportProxies(req ImportProxiesRequest) (*ImportPr
 	importMu.Lock()
 	defer importMu.Unlock()
 
-	// Build raw text from proxy lines.
-	var buf strings.Builder
+	// Parse each proxy item individually so a fatal error in one item (e.g.
+	// unsupported format) does not discard siblings. Aggregate nodes, rejected,
+	// and warnings across all items.
+	opts := &subscription.ParseOptions{ClashFingerprintPolicy: subscription.ClashFingerprintReject}
+
+	var (
+		allNodes    []subscription.ParsedNode
+		allRejected []subscription.RejectedNode
+		allWarnings []subscription.ParseWarning
+		itemErrors  []string
+	)
 	for _, p := range req.Proxies {
-		buf.WriteString(p)
-		buf.WriteByte('\n')
-	}
-	data := []byte(buf.String())
-
-	// Parse using the general subscription parser.
-	nodes, err := subscription.ParseGeneralSubscription(data)
-	if err != nil {
-		return nil, invalidArg(fmt.Sprintf("parse proxies: %v", err))
-	}
-	if len(nodes) == 0 {
-		return nil, invalidArg("no supported proxy formats found in input")
+		result, err := subscription.ParseGeneralSubscriptionDetailed([]byte(p), opts)
+		if err != nil {
+			// Fatal parse error for this item — safe error, no raw input.
+			itemErrors = append(itemErrors, fmt.Sprintf("parse error: %v", err))
+			continue
+		}
+		allNodes = append(allNodes, result.Nodes...)
+		allRejected = append(allRejected, result.Rejected...)
+		allWarnings = append(allWarnings, result.Warnings...)
 	}
 
-	// Ensure the ephemeral subscription exists.
-	sub := s.SubMgr.Lookup(proxyCheckImportSubID)
-	if sub == nil {
-		sub = subscription.NewSubscription(proxyCheckImportSubID, proxyCheckImportSubName, "", true, true)
-		sub.SetSourceType(subscription.SourceTypeLocal)
-		sub.SetContent("")
-		sub.CreatedAtNs = time.Now().UnixNano()
-		sub.UpdatedAtNs = time.Now().UnixNano()
-		s.SubMgr.Register(sub)
-	}
-
-	// Add each parsed node to the pool.
+	// Build response with subscription ID.
 	resp := &ImportProxiesResponse{
 		SubscriptionID: proxyCheckImportSubID,
 	}
-	seen := make(map[node.Hash]struct{})
-	for _, parsed := range nodes {
-		rawOpts := parsed.RawOptions
-		if len(rawOpts) == 0 {
-			resp.SkippedCount++
-			continue
+
+	// Only create/access the ephemeral subscription when there are accepted
+	// nodes to add. A response with only parse errors or rejections must not
+	// require SubMgr or Pool access.
+	if len(allNodes) > 0 {
+		sub := s.SubMgr.Lookup(proxyCheckImportSubID)
+		if sub == nil {
+			sub = subscription.NewSubscription(proxyCheckImportSubID, proxyCheckImportSubName, "", true, true)
+			sub.SetSourceType(subscription.SourceTypeLocal)
+			sub.SetContent("")
+			sub.CreatedAtNs = time.Now().UnixNano()
+			sub.UpdatedAtNs = time.Now().UnixNano()
+			s.SubMgr.Register(sub)
 		}
-		h := node.HashFromRawOptions(rawOpts)
-		if h.IsZero() {
-			resp.SkippedCount++
-			resp.Errors = append(resp.Errors, "hash is zero for proxy: "+parsed.Tag)
-			continue
+
+		// Add each accepted parsed node to the pool.
+		seen := make(map[node.Hash]struct{})
+		for _, parsed := range allNodes {
+			rawOpts := parsed.RawOptions
+			if len(rawOpts) == 0 {
+				resp.SkippedCount++
+				continue
+			}
+			h := node.HashFromRawOptions(rawOpts)
+			if h.IsZero() {
+				resp.SkippedCount++
+				resp.Errors = append(resp.Errors, "hash is zero for proxy: "+parsed.Tag)
+				continue
+			}
+			if _, ok := seen[h]; ok {
+				resp.SkippedCount++
+				continue
+			}
+			seen[h] = struct{}{}
+			if _, ok := sub.ManagedNodes().LoadNode(h); ok {
+				resp.SkippedCount++
+				continue
+			}
+			s.Pool.AddNodeFromSub(h, rawOpts, proxyCheckImportSubID)
+			sub.ManagedNodes().StoreNode(h, subscription.ManagedNode{
+				Tags: []string{"proxy-check-import"},
+			})
+			resp.ImportedCount++
+			resp.NodeHashes = append(resp.NodeHashes, h.Hex())
 		}
-		if _, ok := seen[h]; ok {
-			resp.SkippedCount++
-			continue
+	}
+
+	// Count rejected nodes as skipped and add safe formatted errors.
+	for _, r := range allRejected {
+		resp.SkippedCount++
+		tag := r.Tag
+		if tag == "" {
+			tag = "(untagged)"
 		}
-		seen[h] = struct{}{}
-		if _, ok := sub.ManagedNodes().LoadNode(h); ok {
-			resp.SkippedCount++
-			continue
+		resp.Errors = append(resp.Errors, fmt.Sprintf("proxy rejected: %s on %s", r.Code, tag))
+	}
+
+	// Represent any warnings safely.
+	for _, w := range allWarnings {
+		tag := w.Tag
+		if tag == "" {
+			tag = "(untagged)"
 		}
-		s.Pool.AddNodeFromSub(h, rawOpts, proxyCheckImportSubID)
-		sub.ManagedNodes().StoreNode(h, subscription.ManagedNode{
-			Tags: []string{"proxy-check-import"},
-		})
-		resp.ImportedCount++
-		resp.NodeHashes = append(resp.NodeHashes, h.Hex())
+		resp.Errors = append(resp.Errors, fmt.Sprintf("proxy warning: %s on %s", w.Code, tag))
+	}
+
+	// Count items that produced fatal parse errors as skipped too.
+	for _, e := range itemErrors {
+		resp.SkippedCount++
+		resp.Errors = append(resp.Errors, e)
 	}
 
 	if resp.ImportedCount == 0 && len(resp.Errors) == 0 {
