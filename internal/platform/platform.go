@@ -5,7 +5,6 @@ import (
 	"regexp"
 	"sync"
 
-	"github.com/Resinat/Resin/internal/model"
 	"github.com/Resinat/Resin/internal/node"
 )
 
