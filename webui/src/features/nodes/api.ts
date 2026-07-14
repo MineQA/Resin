@@ -1,5 +1,6 @@
 import { apiRequest } from "../../lib/api-client";
 import type {
+  CloudflareStatus,
   EgressProbeResult,
   LatencyProbeResult,
   NodeQuality,
@@ -21,6 +22,7 @@ type ApiNodeQuality = {
   quality_api_reachable?: boolean | null;
   quality_cloudflare_challenged?: boolean | null;
   quality_cloudflare_challenge_type?: string | null;
+  quality_cloudflare_status?: string | null;
   quality_avg_latency_ms?: number | null;
   quality_last_checked?: string | null;
   quality_last_error?: string | null;
@@ -47,6 +49,13 @@ function asStringOrEmpty(raw: unknown): string {
   return typeof raw === "string" ? raw : "";
 }
 
+function normalizeCloudflareStatus(raw: string | null | undefined): CloudflareStatus | undefined {
+  if (raw === "challenged" || raw === "clean" || raw === "ng") {
+    return raw;
+  }
+  return undefined;
+}
+
 function normalizeQuality(raw: ApiNodeQuality | null | undefined): NodeQuality | undefined {
   if (!raw) {
     return undefined;
@@ -68,6 +77,7 @@ function normalizeQuality(raw: ApiNodeQuality | null | undefined): NodeQuality |
     quality_api_reachable: Boolean(raw.quality_api_reachable),
     quality_cloudflare_challenged: Boolean(raw.quality_cloudflare_challenged),
     quality_cloudflare_challenge_type: raw.quality_cloudflare_challenge_type || undefined,
+    quality_cloudflare_status: normalizeCloudflareStatus(raw.quality_cloudflare_status),
     quality_avg_latency_ms: typeof raw.quality_avg_latency_ms === "number" ? raw.quality_avg_latency_ms : undefined,
     quality_last_checked: raw.quality_last_checked || undefined,
     quality_last_error: raw.quality_last_error || undefined,

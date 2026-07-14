@@ -178,6 +178,88 @@ func TestBuildFromModel_FixedHeaderRequiresValidHeaderName(t *testing.T) {
 	}
 }
 
+// TestBuildFromModel_WithQualityFilters verifies quality filter fields are
+// properly decoded from model to runtime platform.
+func TestBuildFromModel_WithQualityFilters(t *testing.T) {
+	trueVal := true
+	mp := model.Platform{
+		ID:                               "plat-q-1",
+		Name:                             "Quality-Platform",
+		StickyTTLNs:                      3600,
+		RegexFilters:                     []string{},
+		RegionFilters:                    []string{},
+		ReverseProxyMissAction:           "TREAT_AS_EMPTY",
+		ReverseProxyEmptyAccountBehavior: "RANDOM",
+		AllocationPolicy:                 "BALANCED",
+		QualityGrade:                     "A",
+		QualityMinScore:                  80.0,
+		QualityCloudflareChallenged:      &trueVal,
+		QualityCheckedSinceNs:            1000000,
+		QualityProfile:                   "openai",
+	}
+
+	plat, err := BuildFromModel(mp)
+	if err != nil {
+		t.Fatalf("BuildFromModel with quality filters: %v", err)
+	}
+
+	if plat.QualityGrade != "A" {
+		t.Fatalf("QualityGrade = %q, want A", plat.QualityGrade)
+	}
+	if plat.QualityMinScore != 80.0 {
+		t.Fatalf("QualityMinScore = %f, want 80.0", plat.QualityMinScore)
+	}
+	if plat.QualityCloudflareChallenged == nil || *plat.QualityCloudflareChallenged != true {
+		t.Fatal("QualityCloudflareChallenged should be true")
+	}
+	if plat.QualityCheckedSinceNs != 1000000 {
+		t.Fatalf("QualityCheckedSinceNs = %d, want 1000000", plat.QualityCheckedSinceNs)
+	}
+	if plat.QualityProfile != "openai" {
+		t.Fatalf("QualityProfile = %q, want openai", plat.QualityProfile)
+	}
+}
+
+// TestBuildFromModel_WithQualityFilters_NilCF verifies nil CF challenged.
+func TestBuildFromModel_WithQualityFilters_NilCF(t *testing.T) {
+	mp := model.Platform{
+		ID:                               "plat-q-2",
+		Name:                             "Quality-Platform-2",
+		StickyTTLNs:                      3600,
+		RegexFilters:                     []string{},
+		RegionFilters:                    []string{},
+		ReverseProxyMissAction:           "TREAT_AS_EMPTY",
+		ReverseProxyEmptyAccountBehavior: "RANDOM",
+		AllocationPolicy:                 "BALANCED",
+		QualityGrade:                     "",
+		QualityMinScore:                  0,
+		QualityCloudflareChallenged:      nil,
+		QualityCheckedSinceNs:            0,
+		QualityProfile:                   "",
+	}
+
+	plat, err := BuildFromModel(mp)
+	if err != nil {
+		t.Fatalf("BuildFromModel with zero quality filters: %v", err)
+	}
+
+	if plat.QualityGrade != "" {
+		t.Fatalf("QualityGrade should be empty, got %q", plat.QualityGrade)
+	}
+	if plat.QualityMinScore != 0 {
+		t.Fatalf("QualityMinScore should be 0, got %f", plat.QualityMinScore)
+	}
+	if plat.QualityCloudflareChallenged != nil {
+		t.Fatal("QualityCloudflareChallenged should be nil")
+	}
+	if plat.QualityCheckedSinceNs != 0 {
+		t.Fatalf("QualityCheckedSinceNs should be 0, got %d", plat.QualityCheckedSinceNs)
+	}
+	if plat.QualityProfile != "" {
+		t.Fatalf("QualityProfile should be empty, got %q", plat.QualityProfile)
+	}
+}
+
 func TestBuildFromModel_WithProtocolFilters(t *testing.T) {
 	mp := model.Platform{
 		ID:                               "plat-1",

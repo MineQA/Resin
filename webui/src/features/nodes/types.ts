@@ -4,6 +4,8 @@ export type NodeTag = {
   tag: string;
 };
 
+export type CloudflareStatus = "challenged" | "clean" | "ng";
+
 export type NodeQuality = {
   quality_profile?: string;
   quality_grade: string;
@@ -13,6 +15,7 @@ export type NodeQuality = {
   quality_api_reachable: boolean;
   quality_cloudflare_challenged: boolean;
   quality_cloudflare_challenge_type?: string;
+  quality_cloudflare_status?: CloudflareStatus;
   quality_avg_latency_ms?: number;
   quality_last_checked?: string;
   quality_last_error?: string;

@@ -156,13 +156,25 @@ func (r *StateRepo) UpsertPlatform(p model.Platform) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	var cfChallengedInt *int64
+	if p.QualityCloudflareChallenged != nil {
+		if *p.QualityCloudflareChallenged {
+			cfChallengedInt = int64Ptr(1)
+		} else {
+			cfChallengedInt = int64Ptr(0)
+		}
+	}
+
 	_, err = r.db.Exec(`
 		INSERT INTO platforms (id, name, sticky_ttl_ns, regex_filters_json, region_filters_json,
 		                       protocol_filters_json, exclude_protocol_filters_json,
 		                       reverse_proxy_miss_action, reverse_proxy_empty_account_behavior,
 		                       reverse_proxy_fixed_account_header, allocation_policy,
-		                       passive_circuit_breaker_disabled, updated_at_ns)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                       passive_circuit_breaker_disabled,
+		                       quality_grade, quality_min_score, quality_cloudflare_challenged,
+		                       quality_checked_since_ns, quality_profile,
+		                       updated_at_ns)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name                     = excluded.name,
 			sticky_ttl_ns            = excluded.sticky_ttl_ns,
@@ -175,11 +187,19 @@ func (r *StateRepo) UpsertPlatform(p model.Platform) error {
 			reverse_proxy_fixed_account_header   = excluded.reverse_proxy_fixed_account_header,
 			allocation_policy        = excluded.allocation_policy,
 			passive_circuit_breaker_disabled = excluded.passive_circuit_breaker_disabled,
+			quality_grade           = excluded.quality_grade,
+			quality_min_score       = excluded.quality_min_score,
+			quality_cloudflare_challenged = excluded.quality_cloudflare_challenged,
+			quality_checked_since_ns = excluded.quality_checked_since_ns,
+			quality_profile         = excluded.quality_profile,
 			updated_at_ns            = excluded.updated_at_ns
 	`, p.ID, p.Name, p.StickyTTLNs, regexFiltersJSON, regionFiltersJSON,
 		protocolFiltersJSON, excludeProtocolFiltersJSON,
 		p.ReverseProxyMissAction, p.ReverseProxyEmptyAccountBehavior, p.ReverseProxyFixedAccountHeader,
-		p.AllocationPolicy, p.PassiveCircuitBreakerDisabled, p.UpdatedAtNs)
+		p.AllocationPolicy, p.PassiveCircuitBreakerDisabled,
+		p.QualityGrade, p.QualityMinScore, cfChallengedInt,
+		p.QualityCheckedSinceNs, p.QualityProfile,
+		p.UpdatedAtNs)
 	if err != nil {
 		if isSQLiteUniqueConstraint(err) {
 			return fmt.Errorf("%w: platform name already exists", ErrConflict)
@@ -236,22 +256,33 @@ func (r *StateRepo) GetPlatform(id string) (*model.Platform, error) {
 			protocol_filters_json, exclude_protocol_filters_json,
 			reverse_proxy_miss_action, reverse_proxy_empty_account_behavior,
 			reverse_proxy_fixed_account_header, allocation_policy,
-			passive_circuit_breaker_disabled, updated_at_ns
+			passive_circuit_breaker_disabled,
+			quality_grade, quality_min_score, quality_cloudflare_challenged,
+			quality_checked_since_ns, quality_profile,
+			updated_at_ns
 			FROM platforms WHERE id = ?`, id)
 
 	var p model.Platform
 	var regexFiltersJSON, regionFiltersJSON, protocolFiltersJSON, excludeProtocolFiltersJSON string
 	var passiveCircuitBreakerDisabled int
+	var cfChallengedNull sql.NullInt64
 	if err := row.Scan(&p.ID, &p.Name, &p.StickyTTLNs, &regexFiltersJSON,
 		&regionFiltersJSON, &protocolFiltersJSON, &excludeProtocolFiltersJSON,
 		&p.ReverseProxyMissAction, &p.ReverseProxyEmptyAccountBehavior,
-		&p.ReverseProxyFixedAccountHeader, &p.AllocationPolicy, &passiveCircuitBreakerDisabled, &p.UpdatedAtNs); err != nil {
+		&p.ReverseProxyFixedAccountHeader, &p.AllocationPolicy, &passiveCircuitBreakerDisabled,
+		&p.QualityGrade, &p.QualityMinScore, &cfChallengedNull,
+		&p.QualityCheckedSinceNs, &p.QualityProfile,
+		&p.UpdatedAtNs); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
 	p.PassiveCircuitBreakerDisabled = passiveCircuitBreakerDisabled != 0
+	if cfChallengedNull.Valid {
+		v := cfChallengedNull.Int64 != 0
+		p.QualityCloudflareChallenged = &v
+	}
 	regexFilters, err := decodeStringSliceJSON(regexFiltersJSON)
 	if err != nil {
 		return nil, fmt.Errorf("decode platform %s regex_filters_json: %w", p.ID, err)
@@ -281,7 +312,10 @@ func (r *StateRepo) ListPlatforms() ([]model.Platform, error) {
 		protocol_filters_json, exclude_protocol_filters_json,
 		reverse_proxy_miss_action, reverse_proxy_empty_account_behavior,
 		reverse_proxy_fixed_account_header, allocation_policy,
-		passive_circuit_breaker_disabled, updated_at_ns FROM platforms`)
+		passive_circuit_breaker_disabled,
+		quality_grade, quality_min_score, quality_cloudflare_challenged,
+		quality_checked_since_ns, quality_profile,
+		updated_at_ns FROM platforms`)
 	if err != nil {
 		return nil, err
 	}
@@ -292,13 +326,21 @@ func (r *StateRepo) ListPlatforms() ([]model.Platform, error) {
 		var p model.Platform
 		var regexFiltersJSON, regionFiltersJSON, protocolFiltersJSON, excludeProtocolFiltersJSON string
 		var passiveCircuitBreakerDisabled int
+		var cfChallengedNull sql.NullInt64
 		if err := rows.Scan(&p.ID, &p.Name, &p.StickyTTLNs, &regexFiltersJSON,
 			&regionFiltersJSON, &protocolFiltersJSON, &excludeProtocolFiltersJSON,
 			&p.ReverseProxyMissAction, &p.ReverseProxyEmptyAccountBehavior,
-			&p.ReverseProxyFixedAccountHeader, &p.AllocationPolicy, &passiveCircuitBreakerDisabled, &p.UpdatedAtNs); err != nil {
+			&p.ReverseProxyFixedAccountHeader, &p.AllocationPolicy, &passiveCircuitBreakerDisabled,
+			&p.QualityGrade, &p.QualityMinScore, &cfChallengedNull,
+			&p.QualityCheckedSinceNs, &p.QualityProfile,
+			&p.UpdatedAtNs); err != nil {
 			return nil, err
 		}
 		p.PassiveCircuitBreakerDisabled = passiveCircuitBreakerDisabled != 0
+		if cfChallengedNull.Valid {
+			v := cfChallengedNull.Int64 != 0
+			p.QualityCloudflareChallenged = &v
+		}
 		regexFilters, err := decodeStringSliceJSON(regexFiltersJSON)
 		if err != nil {
 			return nil, fmt.Errorf("decode platform %s regex_filters_json: %w", p.ID, err)
@@ -602,4 +644,9 @@ func (r *StateRepo) TouchExportTokenLastUsed(id string, lastUsedAtNs int64) erro
 
 	_, err := r.db.Exec(`UPDATE export_tokens SET last_used_at_ns = ? WHERE id = ?`, lastUsedAtNs, id)
 	return err
+}
+
+// int64Ptr returns a pointer to an int64. Used for nullable integer encoding.
+func int64Ptr(v int64) *int64 {
+	return &v
 }

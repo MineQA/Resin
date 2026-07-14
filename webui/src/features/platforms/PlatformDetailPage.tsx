@@ -41,6 +41,10 @@ import {
   emptyAccountBehaviors,
   missActionLabel,
   missActions,
+  qualityCloudflareFilterLabel,
+  qualityCloudflareFilterOptions,
+  qualityGradeOptions,
+  qualityProfileOptions,
 } from "./constants";
 import {
   defaultPlatformFormValues,
@@ -387,6 +391,15 @@ export function PlatformDetailPage() {
   const regexCount = platform?.regex_filters.length ?? 0;
   const deleteDisabled = !platform || platform.id === ZERO_UUID || deleteMutation.isPending;
 
+  const hasQualityFilter = Boolean(
+    platform &&
+      (platform.quality_grade ||
+        platform.quality_min_score > 0 ||
+        platform.quality_cloudflare_challenged !== null ||
+        platform.quality_checked_since_ns > 0 ||
+        platform.quality_profile),
+  );
+
   return (
     <section className="platform-page platform-detail-page">
       <header className="module-header">
@@ -472,6 +485,10 @@ export function PlatformDetailPage() {
                 <span className="platform-fact">
                   <span>{t("请求失败熔断")}</span>
                   <strong>{platform.passive_circuit_breaker_disabled ? t("已关闭") : t("已开启")}</strong>
+                </span>
+                <span className="platform-fact">
+                  <span>{t("质量过滤")}</span>
+                  <strong>{hasQualityFilter ? t("已设置") : t("不限制")}</strong>
                 </span>
               </div>
             </div>
@@ -741,6 +758,86 @@ export function PlatformDetailPage() {
                     </div>
                     <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
                       {t("留空表示不排除任何协议；与包含规则重叠时，排除规则优先。")}
+                    </p>
+                  </div>
+
+                  <div className="field-group field-span-2 platform-quality-filter-block">
+                    <div className="platform-quality-filter-head">
+                      <span className="field-label">{t("质量过滤")}</span>
+                      <span
+                        className="subscription-info-icon"
+                        title={t("按质量检测结果筛选可用节点；留空表示不限制。节点无质量记录时会被过滤。")}
+                        aria-label={t("按质量检测结果筛选可用节点；留空表示不限制。节点无质量记录时会被过滤。")}
+                        tabIndex={0}
+                      >
+                        <Info size={13} />
+                      </span>
+                    </div>
+                    <div className="platform-quality-filter-grid">
+                      <div className="field-group" style={{ margin: 0 }}>
+                        <label className="field-label" htmlFor="detail-edit-quality-grade">
+                          {t("质量等级")}
+                        </label>
+                        <Select id="detail-edit-quality-grade" {...editForm.register("quality_grade")}>
+                          <option value="">{t("不限制")}</option>
+                          {qualityGradeOptions.map((g) => (
+                            <option key={g} value={g}>{g}</option>
+                          ))}
+                        </Select>
+                      </div>
+
+                      <div className="field-group" style={{ margin: 0 }}>
+                        <label className="field-label" htmlFor="detail-edit-quality-min-score">
+                          {t("最低质量分")}
+                        </label>
+                        <Input
+                          id="detail-edit-quality-min-score"
+                          type="number"
+                          min={0}
+                          max={100}
+                          placeholder="0-100"
+                          {...editForm.register("quality_min_score_text")}
+                        />
+                      </div>
+
+                      <div className="field-group" style={{ margin: 0 }}>
+                        <label className="field-label" htmlFor="detail-edit-quality-cf">
+                          {t("Cloudflare 拦截")}
+                        </label>
+                        <Select id="detail-edit-quality-cf" {...editForm.register("quality_cloudflare_filter")}>
+                          {qualityCloudflareFilterOptions.map((item) => (
+                            <option key={item} value={item}>
+                              {t(qualityCloudflareFilterLabel[item])}
+                            </option>
+                          ))}
+                        </Select>
+                      </div>
+
+                      <div className="field-group" style={{ margin: 0 }}>
+                        <label className="field-label" htmlFor="detail-edit-quality-profile">
+                          {t("质量 Profile")}
+                        </label>
+                        <Select id="detail-edit-quality-profile" {...editForm.register("quality_profile")}>
+                          <option value="">{t("不限制")}</option>
+                          {qualityProfileOptions.map((p) => (
+                            <option key={p} value={p}>{p}</option>
+                          ))}
+                        </Select>
+                      </div>
+
+                      <div className="field-group" style={{ margin: 0 }}>
+                        <label className="field-label" htmlFor="detail-edit-quality-checked-since">
+                          {t("检测时间起")}
+                        </label>
+                        <Input
+                          id="detail-edit-quality-checked-since"
+                          type="datetime-local"
+                          {...editForm.register("quality_checked_since_text")}
+                        />
+                      </div>
+                    </div>
+                    <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
+                      {t("设置任意质量条件后，未检测的节点不会被选中。")}
                     </p>
                   </div>
 

@@ -17,6 +17,11 @@ type Platform struct {
 	ReverseProxyFixedAccountHeader   string `json:"reverse_proxy_fixed_account_header"`
 	AllocationPolicy                 string `json:"allocation_policy"`
 	PassiveCircuitBreakerDisabled    bool   `json:"passive_circuit_breaker_disabled"`
+	QualityGrade                     string `json:"quality_grade"`
+	QualityMinScore                  float64 `json:"quality_min_score"`
+	QualityCloudflareChallenged      *bool  `json:"quality_cloudflare_challenged,omitempty"`
+	QualityCheckedSinceNs            int64  `json:"quality_checked_since_ns"`
+	QualityProfile                   string `json:"quality_profile"`
 	UpdatedAtNs                      int64  `json:"updated_at_ns"`
 }
 

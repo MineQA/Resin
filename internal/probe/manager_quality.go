@@ -15,8 +15,9 @@ import (
 // QualityProbeConfig configures the active quality (proxy-check) probe loop.
 // All fields are closures for hot-reload from RuntimeConfig.
 type QualityProbeConfig struct {
-	// Enabled controls whether the quality scan loop runs and whether
-	// new/re-enabled nodes trigger a quality check.
+	// Enabled controls whether the periodic quality scan loop runs.
+	// New/re-enabled node event checks are controlled independently by
+	// TriggerOnNewNode.
 	Enabled func() bool
 
 	// Interval is the minimum time between quality checks for a given node.
@@ -45,8 +46,23 @@ func (m *ProbeManager) TriggerImmediateQualityProbe(hash node.Hash) {
 	m.enqueueProbe(hash, probeTaskKindQuality, probePriorityNormal)
 }
 
+// TriggerImmediateQualityProbeForce enqueues a forced async quality probe
+// that executes independently of ProxyCheckEnabled. The force bit allows
+// the task to run even when periodic quality scanning is disabled, gated
+// only by TriggerOnNewNode at execution time.
+func (m *ProbeManager) TriggerImmediateQualityProbeForce(hash node.Hash) {
+	m.enqueueProbe(hash, probeTaskKindQualityForce, probePriorityNormal)
+}
+
 func (m *ProbeManager) qualityEnabled() bool {
 	return m.qualityCfg != nil && m.qualityCfg.Enabled != nil && m.qualityCfg.Enabled()
+}
+
+// triggerOnNewNodeEnabled mirrors qualityEnabled() for the TriggerOnNewNode
+// gate. Returns true only when QualityCfg is non-nil, the TriggerOnNewNode
+// closure is non-nil, and the closure returns true.
+func (m *ProbeManager) triggerOnNewNodeEnabled() bool {
+	return m.qualityCfg != nil && m.qualityCfg.TriggerOnNewNode != nil && m.qualityCfg.TriggerOnNewNode()
 }
 
 func (m *ProbeManager) currentQualityInterval() time.Duration {
@@ -150,6 +166,11 @@ func (m *ProbeManager) scanQuality() {
 
 // performQualityCheck executes a quality (proxy-check) probe against a node.
 //
+// When force is true, the method gates on TriggerOnNewNode instead of
+// qualityEnabled(), allowing event-triggered checks to run even when the
+// periodic quality scan is disabled. The force flag is set by
+// probeTaskKindQualityForce tasks.
+//
 // IMPORTANT: This method must NOT call pool.RecordResult and must NOT affect
 // failure count, circuit breaker, or routing/routability health. Quality
 // probes check target-service reachability (e.g. OpenAI API) and are
@@ -158,12 +179,18 @@ func (m *ProbeManager) scanQuality() {
 // This shares the queue/worker pool with egress and latency probes.
 // When enabled aggressively (low interval, many nodes), quality checks
 // can compete for worker capacity with health probes.
-func (m *ProbeManager) performQualityCheck(hash node.Hash, entry *node.NodeEntry) {
+func (m *ProbeManager) performQualityCheck(hash node.Hash, entry *node.NodeEntry, force bool) {
 	if m.fetcher == nil {
 		return
 	}
-	if !m.qualityEnabled() {
-		return
+	if force {
+		if !m.triggerOnNewNodeEnabled() {
+			return
+		}
+	} else {
+		if !m.qualityEnabled() {
+			return
+		}
 	}
 	if entry.Outbound.Load() == nil {
 		return

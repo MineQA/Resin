@@ -28,6 +28,7 @@ const (
 	stateVersionAddExportTokens                  = 7
 	stateVersionAddProtocolFilters               = 8
 	stateVersionAddClashFingerprintPolicy        = 9
+	stateVersionAddPlatformQualityFilters        = 10
 	stateLegacyBaselineVersion                   = stateVersionAddFixedAccountHeader
 
 	stateBaseSchemaMigration = stateMigrationsPath + "/000001_state_base.up.sql"
@@ -131,8 +132,14 @@ func prepareLegacyStateBaseline(db *sql.DB, driver migratedb.Driver) error {
 	if err != nil {
 		return err
 	}
+	hasQualityGrade, err := hasTableColumn(db, "platforms", "quality_grade")
+	if err != nil {
+		return err
+	}
 
 	switch {
+	case hasEmptyBehavior && hasFixedHeader && hasIncrementalAliveNodes && hasPassiveCircuitBreakerDisabled && hasClashFingerprintPolicy && hasProtocolFilters && hasExcludeProtocolFilters && hasQualityGrade:
+		return setLegacyMigrationVersion(db, driver, stateVersionAddPlatformQualityFilters)
 	case hasEmptyBehavior && hasFixedHeader && hasIncrementalAliveNodes && hasPassiveCircuitBreakerDisabled && hasClashFingerprintPolicy && hasProtocolFilters && hasExcludeProtocolFilters:
 		return setLegacyMigrationVersion(db, driver, stateVersionAddClashFingerprintPolicy)
 	case hasEmptyBehavior && hasFixedHeader && hasIncrementalAliveNodes && hasPassiveCircuitBreakerDisabled && hasProtocolFilters && hasExcludeProtocolFilters:

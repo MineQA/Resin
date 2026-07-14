@@ -50,8 +50,9 @@ type ProbeConfig struct {
 	ChooseNormalWhenBoth func() bool
 
 	// QualityCfg configures the active quality (proxy-check) probe loop.
-	// When nil or disabled, no quality scan runs and no quality tasks are
-	// enqueued, though manual CheckProxySync calls remain unaffected.
+	// When nil or disabled, the periodic scan loop does not run. Event-triggered
+	// forced quality probes may still be enqueued by callers when TriggerOnNewNode
+	// is enabled.
 	QualityCfg *QualityProbeConfig
 }
 
@@ -96,6 +97,7 @@ const (
 	probeTaskKindEgress probeTaskKind = iota
 	probeTaskKindLatency
 	probeTaskKindQuality
+	probeTaskKindQualityForce
 )
 
 // probeTaskKindQuality is the task kind for active quality (proxy-check)
@@ -572,7 +574,9 @@ func (m *ProbeManager) executeTask(task probeTask) {
 	case probeTaskKindLatency:
 		m.probeLatency(task.key.hash, entry, m.currentLatencyTestURL())
 	case probeTaskKindQuality:
-		m.performQualityCheck(task.key.hash, entry)
+		m.performQualityCheck(task.key.hash, entry, false)
+	case probeTaskKindQualityForce:
+		m.performQualityCheck(task.key.hash, entry, true)
 	}
 }
 

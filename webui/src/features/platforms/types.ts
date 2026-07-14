@@ -1,6 +1,9 @@
 export type PlatformMissAction = "TREAT_AS_EMPTY" | "REJECT";
 export type PlatformEmptyAccountBehavior = "RANDOM" | "FIXED_HEADER" | "ACCOUNT_HEADER_RULE";
 export type PlatformAllocationPolicy = "BALANCED" | "PREFER_LOW_LATENCY" | "PREFER_IDLE_IP";
+export type QualityGradeFilter = "A" | "B" | "C" | "D" | "F";
+export type QualityCloudflareFilter = "any" | "challenged" | "clean";
+export type QualityProfile = "generic" | "openai" | "grok" | "gemini" | "claude";
 
 export type Platform = {
   id: string;
@@ -16,6 +19,11 @@ export type Platform = {
   reverse_proxy_fixed_account_header: string;
   allocation_policy: PlatformAllocationPolicy;
   passive_circuit_breaker_disabled: boolean;
+  quality_grade: string;
+  quality_min_score: number;
+  quality_cloudflare_challenged: boolean | null;
+  quality_checked_since_ns: number;
+  quality_profile: string;
   updated_at: string;
 };
 
@@ -38,6 +46,11 @@ export type PlatformCreateInput = {
   reverse_proxy_fixed_account_header?: string;
   allocation_policy?: PlatformAllocationPolicy;
   passive_circuit_breaker_disabled?: boolean;
+  quality_grade?: string;
+  quality_min_score?: number;
+  quality_cloudflare_challenged?: boolean | null;
+  quality_checked_since_ns?: number;
+  quality_profile?: string;
 };
 
 export type PlatformUpdateInput = {
@@ -52,6 +65,11 @@ export type PlatformUpdateInput = {
   reverse_proxy_fixed_account_header?: string;
   allocation_policy?: PlatformAllocationPolicy;
   passive_circuit_breaker_disabled?: boolean;
+  quality_grade?: string;
+  quality_min_score?: number;
+  quality_cloudflare_challenged?: boolean | null;
+  quality_checked_since_ns?: number;
+  quality_profile?: string;
 };
 
 export type PlatformLease = {

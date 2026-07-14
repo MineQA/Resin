@@ -5,8 +5,18 @@ import (
 	"regexp"
 	"sync"
 
+	"github.com/Resinat/Resin/internal/model"
 	"github.com/Resinat/Resin/internal/node"
 )
+
+// builtInQualityProfiles lists known built-in quality profiles.
+var builtInQualityProfiles = map[string]bool{
+	"generic": true,
+	"openai":  true,
+	"grok":    true,
+	"gemini":  true,
+	"claude":  true,
+}
 
 // DefaultPlatformID is the well-known UUID of the built-in Default platform.
 const DefaultPlatformID = "00000000-0000-0000-0000-000000000000"
@@ -33,6 +43,14 @@ type Platform struct {
 	RegionFilters          []string // lowercase ISO codes, supports negation "!xx"
 	ProtocolFilters        []string // canonical protocol names for include filtering
 	ExcludeProtocolFilters []string // canonical protocol names for exclude filtering
+
+	// Quality filter configuration.
+	// Empty/zero/nil values mean "no filter".
+	QualityGrade                string  // empty = no filter, else A/B/C/D/F
+	QualityMinScore             float64 // 0 = no filter, else 0..100
+	QualityCloudflareChallenged *bool   // nil = no filter, true/false = explicit match
+	QualityCheckedSinceNs       int64   // 0 = no filter, else nanoseconds timestamp
+	QualityProfile              string  // empty = no filter, else built-in profile name
 
 	// Other config fields.
 	StickyTTLNs                      int64
@@ -155,6 +173,11 @@ func (p *Platform) evaluateNode(
 		return false
 	}
 
+	// 7. Quality filters.
+	if !p.matchQualityFilters(entry) {
+		return false
+	}
+
 	return true
 }
 
@@ -192,6 +215,56 @@ func (p *Platform) matchProtocolFilters(entry *node.NodeEntry) bool {
 		}
 	}
 	return true
+}
+
+// matchQualityFilters checks the node's quality result against the platform's
+// quality filter configuration. Any active quality filter rejects nodes with
+// no quality result (nil). When all quality filters are empty/zero/nil, every
+// node passes regardless of quality state.
+func (p *Platform) matchQualityFilters(entry *node.NodeEntry) bool {
+	if p.QualityGrade == "" && p.QualityMinScore == 0 &&
+		p.QualityCloudflareChallenged == nil && p.QualityCheckedSinceNs == 0 &&
+		p.QualityProfile == "" {
+		return true // no quality filters active
+	}
+
+	q := entry.GetQuality()
+	if q == nil {
+		return false // any active quality filter rejects missing quality
+	}
+
+	// Grade filter: empty means no filter, otherwise A/B/C/D/F.
+	if p.QualityGrade != "" && q.Grade != p.QualityGrade {
+		return false
+	}
+
+	// Min score filter: 0 means no filter, otherwise 0..100.
+	if p.QualityMinScore > 0 && q.Score < p.QualityMinScore {
+		return false
+	}
+
+	// Cloudflare challenged filter: nil means no filter, true/false = explicit match.
+	if p.QualityCloudflareChallenged != nil && q.CloudflareChallenged != *p.QualityCloudflareChallenged {
+		return false
+	}
+
+	// Checked since filter: 0 means no filter, otherwise nanoseconds timestamp.
+	if p.QualityCheckedSinceNs > 0 && q.LastCheckedNs < p.QualityCheckedSinceNs {
+		return false
+	}
+
+	// Profile filter: empty means no filter, otherwise must match exactly.
+	if p.QualityProfile != "" && q.Profile != p.QualityProfile {
+		return false
+	}
+
+	return true
+}
+
+// IsBuiltInQualityProfile returns true if the given profile name matches a
+// known built-in quality profile.
+func IsBuiltInQualityProfile(profile string) bool {
+	return builtInQualityProfiles[profile]
 }
 
 // MatchRegionFilter applies include/exclude region filters.

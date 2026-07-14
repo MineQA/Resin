@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Resinat/Resin/internal/model"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/testutil"
 )
@@ -440,6 +441,234 @@ func TestPlatform_EvaluateNode_UnknownProtocolIncludeRejected(t *testing.T) {
 
 	if p.View().Size() != 0 {
 		t.Fatal("unknown protocol node should be rejected by include-only filter")
+	}
+}
+
+// TestPlatform_EvaluateNode_QualityGradeFilter verifies grade-based quality filtering.
+func TestPlatform_EvaluateNode_QualityGradeFilter(t *testing.T) {
+	p := NewPlatform("p1", "Test", nil, nil)
+	p.QualityGrade = "A"
+	p.QualityMinScore = 0    // no min score filter
+	p.QualityCloudflareChallenged = nil
+	p.QualityCheckedSinceNs = 0
+	p.QualityProfile = ""
+
+	h := makeHash(`{"type":"ss"}`)
+	entry := makeFullyRoutableEntry(h, "sub1")
+
+	// Node with no quality should be rejected when any quality filter is active.
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 0 {
+		t.Fatal("node without quality should be rejected by quality grade filter")
+	}
+
+	// Set quality with grade B - should still fail.
+	qB := &model.NodeQuality{
+		Grade:            "B",
+		Score:            90,
+		ServiceReachable: true,
+		Profile:          "generic",
+	}
+	entry.SetQuality(qB)
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 0 {
+		t.Fatal("node with grade B should be rejected by grade A filter")
+	}
+
+	// Set quality with grade A - should pass.
+	qA := &model.NodeQuality{
+		Grade:            "A",
+		Score:            95,
+		ServiceReachable: true,
+		Profile:          "generic",
+	}
+	entry.SetQuality(qA)
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 1 {
+		t.Fatal("node with grade A should pass grade A filter")
+	}
+}
+
+// TestPlatform_EvaluateNode_QualityMinScoreFilter verifies min score filtering.
+func TestPlatform_EvaluateNode_QualityMinScoreFilter(t *testing.T) {
+	p := NewPlatform("p1", "Test", nil, nil)
+	p.QualityMinScore = 80.0
+
+	h := makeHash(`{"type":"ss"}`)
+	entry := makeFullyRoutableEntry(h, "sub1")
+
+	// No quality -> reject.
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 0 {
+		t.Fatal("node without quality should be rejected by min score filter")
+	}
+
+	// Score 70 -> reject.
+	entry.SetQuality(&model.NodeQuality{
+		Grade: "B", Score: 70, ServiceReachable: true, Profile: "generic",
+	})
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 0 {
+		t.Fatal("node with score 70 should be rejected by min score 80 filter")
+	}
+
+	// Score 90 -> pass.
+	entry.SetQuality(&model.NodeQuality{
+		Grade: "A", Score: 90, ServiceReachable: true, Profile: "generic",
+	})
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 1 {
+		t.Fatal("node with score 90 should pass min score 80 filter")
+	}
+}
+
+// TestPlatform_EvaluateNode_QualityCloudflareChallengedFilter verifies CF filter.
+func TestPlatform_EvaluateNode_QualityCloudflareChallengedFilter(t *testing.T) {
+	trueVal := true
+	p := NewPlatform("p1", "Test", nil, nil)
+	p.QualityCloudflareChallenged = &trueVal
+
+	h := makeHash(`{"type":"ss"}`)
+	entry := makeFullyRoutableEntry(h, "sub1")
+
+	// No quality -> reject.
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 0 {
+		t.Fatal("node without quality should be rejected by CF challenged filter")
+	}
+
+	// Not challenged -> reject.
+	entry.SetQuality(&model.NodeQuality{
+		Grade: "A", Score: 90, ServiceReachable: true,
+		CloudflareChallenged: false, Profile: "generic",
+	})
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 0 {
+		t.Fatal("non-challenged node should be rejected by CF=true filter")
+	}
+
+	// Challenged -> pass.
+	entry.SetQuality(&model.NodeQuality{
+		Grade: "A", Score: 90, ServiceReachable: true,
+		CloudflareChallenged: true, Profile: "generic",
+	})
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 1 {
+		t.Fatal("challenged node should pass CF=true filter")
+	}
+}
+
+// TestPlatform_EvaluateNode_QualityCheckedSinceNsFilter verifies checked-since filter.
+func TestPlatform_EvaluateNode_QualityCheckedSinceNsFilter(t *testing.T) {
+	p := NewPlatform("p1", "Test", nil, nil)
+	p.QualityCheckedSinceNs = 5000
+
+	h := makeHash(`{"type":"ss"}`)
+	entry := makeFullyRoutableEntry(h, "sub1")
+
+	// No quality -> reject.
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 0 {
+		t.Fatal("node without quality should be rejected by checked-since filter")
+	}
+
+	// LastChecked before 5000 -> reject.
+	entry.SetQuality(&model.NodeQuality{
+		Grade: "A", Score: 90, ServiceReachable: true,
+		LastCheckedNs: 3000, Profile: "generic",
+	})
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 0 {
+		t.Fatal("node with LastCheckedNs=3000 should be rejected by checked-since=5000")
+	}
+
+	// LastChecked after 5000 -> pass.
+	entry.SetQuality(&model.NodeQuality{
+		Grade: "A", Score: 90, ServiceReachable: true,
+		LastCheckedNs: 6000, Profile: "generic",
+	})
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 1 {
+		t.Fatal("node with LastCheckedNs=6000 should pass checked-since=5000 filter")
+	}
+}
+
+// TestPlatform_EvaluateNode_QualityProfileFilter verifies quality profile filter.
+func TestPlatform_EvaluateNode_QualityProfileFilter(t *testing.T) {
+	p := NewPlatform("p1", "Test", nil, nil)
+	p.QualityProfile = "openai"
+
+	h := makeHash(`{"type":"ss"}`)
+	entry := makeFullyRoutableEntry(h, "sub1")
+
+	// No quality -> reject.
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 0 {
+		t.Fatal("node without quality should be rejected by profile filter")
+	}
+
+	// Wrong profile -> reject.
+	entry.SetQuality(&model.NodeQuality{
+		Grade: "A", Score: 90, ServiceReachable: true, Profile: "generic",
+	})
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 0 {
+		t.Fatal("node with generic profile should be rejected by openai filter")
+	}
+
+	// Correct profile -> pass.
+	entry.SetQuality(&model.NodeQuality{
+		Grade: "A", Score: 90, ServiceReachable: true, Profile: "openai",
+	})
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 1 {
+		t.Fatal("node with openai profile should pass openai filter")
+	}
+}
+
+// TestPlatform_EvaluateNode_QualityFilters_NoFilter_IgnoresQuality verifies that
+// when all quality filters are empty, nodes pass regardless of quality state.
+func TestPlatform_EvaluateNode_QualityFilters_NoFilter_IgnoresQuality(t *testing.T) {
+	p := NewPlatform("p1", "Test", nil, nil) // all quality filters at zero values
+	h := makeHash(`{"type":"ss"}`)
+	entry := makeFullyRoutableEntry(h, "sub1")
+
+	// Node without quality should still be routable when no quality filters.
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 1 {
+		t.Fatal("node without quality should be routable when no quality filters are active")
 	}
 }
 

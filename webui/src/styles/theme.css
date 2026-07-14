@@ -2582,6 +2582,32 @@ a {
   margin-top: 4px;
 }
 
+.platform-quality-filter-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-sunken, rgba(0, 0, 0, 0.02));
+}
+
+.platform-quality-filter-head {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.platform-quality-filter-head .field-label {
+  margin: 0;
+}
+
+.platform-quality-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 0.75rem;
+}
+
 .platform-monitor-section {
   border-color: rgba(37, 72, 120, 0.18);
   background:

@@ -1069,3 +1069,65 @@ func TestEphemeralCleaner_SkipsRecentCircuitBreak(t *testing.T) {
 		t.Fatal("recently circuit-broken node should not be evicted yet")
 	}
 }
+
+// TestRecordNodeQuality_NotifiesPlatforms verifies that RecordNodeQuality
+// triggers platform dirty notification for quality-filtered platform views.
+func TestRecordNodeQuality_NotifiesPlatforms(t *testing.T) {
+	subMgr := NewSubscriptionManager()
+	sub := subscription.NewSubscription("s1", "Sub1", "url", true, false)
+	subMgr.Register(sub)
+
+	pool := newTestPool(subMgr)
+	raw := json.RawMessage(`{"type":"ss","server":"1.1.1.1"}`)
+	h := node.HashFromRawOptions(raw)
+
+	mn := subscription.NewManagedNodes()
+	mn.StoreNode(h, subscription.ManagedNode{Tags: []string{"node-1"}})
+	sub.SwapManagedNodes(mn)
+
+	pool.AddNodeFromSub(h, raw, "s1")
+	entry, _ := pool.GetEntry(h)
+
+	// Set outbound, egress, latency so node is otherwise fully routable.
+	ob := testutil.NewNoopOutbound()
+	entry.Outbound.Store(&ob)
+	entry.SetEgressIP(netip.MustParseAddr("1.2.3.4"))
+	entry.LatencyTable.LoadEntry("example.com", node.DomainLatencyStats{
+		Ewma:        100 * time.Millisecond,
+		LastUpdated: time.Now(),
+	})
+
+	// Register a platform with a quality grade filter.
+	p := platform.NewPlatform("plat-q", "QualityFilter", nil, nil)
+	p.QualityGrade = "A"
+	pool.RegisterPlatform(p)
+
+	// Initially, no quality -> platform view should be empty.
+	if p.View().Size() != 0 {
+		t.Fatal("expected empty view before quality recorded")
+	}
+
+	// Record quality with grade A.
+	pool.RecordNodeQuality(h, &model.NodeQuality{
+		Grade: "A", Score: 95, ServiceReachable: true, Profile: "generic",
+	})
+
+	// After small delay for goroutines to complete, platform should have the node.
+	time.Sleep(50 * time.Millisecond)
+	if p.View().Size() != 1 {
+		t.Fatalf("expected 1 routable node after quality update, got %d", p.View().Size())
+	}
+	if !p.View().Contains(h) {
+		t.Fatal("expected platform view to contain the quality-updated node")
+	}
+
+	// Record quality with grade B (below A filter) -> should be removed from view.
+	pool.RecordNodeQuality(h, &model.NodeQuality{
+		Grade: "B", Score: 80, ServiceReachable: true, Profile: "generic",
+	})
+
+	time.Sleep(50 * time.Millisecond)
+	if p.View().Size() != 0 {
+		t.Fatalf("expected 0 routable nodes after quality downgrade, got %d", p.View().Size())
+	}
+}

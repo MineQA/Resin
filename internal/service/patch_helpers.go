@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
 	"strings"
 	"time"
@@ -29,11 +30,15 @@ func parseMergePatch(patchJSON json.RawMessage) (mergePatch, *ServiceError) {
 }
 
 func (p mergePatch) validateFields(allowed map[string]bool, unknownMsg unknownFieldMessage) *ServiceError {
+	return p.validateFieldsAllowingNull(allowed, nil, unknownMsg)
+}
+
+func (p mergePatch) validateFieldsAllowingNull(allowed map[string]bool, nullable map[string]bool, unknownMsg unknownFieldMessage) *ServiceError {
 	for key, val := range p {
 		if !allowed[key] {
 			return invalidArg(unknownMsg(key))
 		}
-		if val == nil {
+		if val == nil && !nullable[key] {
 			return invalidArg(fmt.Sprintf("null value not allowed for field: %q", key))
 		}
 	}
@@ -110,6 +115,49 @@ func (p mergePatch) optionalDurationString(field string) (time.Duration, bool, *
 		return 0, true, invalidArg(fmt.Sprintf("%s: %s", field, err.Error()))
 	}
 	return d, true, nil
+}
+
+func (p mergePatch) optionalFloat64(field string) (float64, bool, *ServiceError) {
+	raw, ok := p[field]
+	if !ok {
+		return 0, false, nil
+	}
+	value, ok := raw.(float64)
+	if !ok {
+		return 0, true, invalidArg(fmt.Sprintf("%s: must be a number", field))
+	}
+	return value, true, nil
+}
+
+func (p mergePatch) optionalInt64(field string) (int64, bool, *ServiceError) {
+	raw, ok := p[field]
+	if !ok {
+		return 0, false, nil
+	}
+	// JSON numbers decode as float64 by default.
+	f, ok := raw.(float64)
+	if !ok {
+		return 0, true, invalidArg(fmt.Sprintf("%s: must be an integer", field))
+	}
+	if math.Trunc(f) != f {
+		return 0, true, invalidArg(fmt.Sprintf("%s: must be an integer", field))
+	}
+	return int64(f), true, nil
+}
+
+func (p mergePatch) optionalNullableBool(field string) (*bool, bool, *ServiceError) {
+	raw, ok := p[field]
+	if !ok {
+		return nil, false, nil
+	}
+	if raw == nil {
+		return nil, true, nil
+	}
+	value, ok := raw.(bool)
+	if !ok {
+		return nil, true, invalidArg(fmt.Sprintf("%s: must be a boolean or null", field))
+	}
+	return &value, true, nil
 }
 
 func parseHTTPAbsoluteURL(field, value string) (*url.URL, *ServiceError) {

@@ -102,7 +102,7 @@ func TestPerformQualityCheck_NoRecordResult(t *testing.T) {
 		},
 	})
 
-	mgr.performQualityCheck(hash, entry)
+	mgr.performQualityCheck(hash, entry, false)
 
 	// FailureCount must remain unchanged.
 	if entry.FailureCount.Load() != 5 {
@@ -160,7 +160,7 @@ func TestPerformQualityCheck_FailureStillRecords(t *testing.T) {
 		},
 	})
 
-	mgr.performQualityCheck(hash, entry)
+	mgr.performQualityCheck(hash, entry, false)
 
 	q := entry.GetQuality()
 	if q == nil {
@@ -393,5 +393,146 @@ func TestProxyScoreToNodeQuality_NilScoreNoError(t *testing.T) {
 	}
 	if nq.LastError != "proxy check failed" {
 		t.Fatalf("LastError = %q, want 'proxy check failed'", nq.LastError)
+	}
+}
+
+// TestTriggerImmediateQualityProbeForce_ExecutesWhenPeriodicDisabled verifies
+// that a forced quality probe executes when periodic quality is disabled but
+// TriggerOnNewNode is enabled.
+func TestTriggerImmediateQualityProbeForce_ExecutesWhenPeriodicDisabled(t *testing.T) {
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+	})
+
+	hash := node.HashFromRawOptions([]byte(`{"type":"force-quality"}`))
+	pool.AddNodeFromSub(hash, []byte(`{"type":"force-quality"}`), "sub1")
+	entry, ok := pool.GetEntry(hash)
+	if !ok {
+		t.Fatal("entry not found")
+	}
+	storeOutbound(entry)
+
+	var called bool
+	mgr := NewProbeManager(ProbeConfig{
+		Pool:        pool,
+		Concurrency: 1,
+		Fetcher: func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+			called = true
+			return []byte("ok"), 10 * time.Millisecond, nil
+		},
+		QualityCfg: &QualityProbeConfig{
+			Enabled:  func() bool { return false }, // periodic disabled
+			Interval: func() time.Duration { return 30 * time.Minute },
+			Profile:  func() string { return "generic" },
+			Opts: func() ProxyCheckOptions {
+				return DefaultOptions()
+			},
+			TriggerOnNewNode: func() bool { return true }, // trigger enabled
+		},
+	})
+	mgr.Start()
+	defer mgr.Stop()
+
+	mgr.TriggerImmediateQualityProbeForce(hash)
+	time.Sleep(50 * time.Millisecond)
+
+	if !called {
+		t.Fatal("expected forced quality probe fetcher to be called when periodic disabled but trigger enabled")
+	}
+
+	q := entry.GetQuality()
+	if q == nil {
+		t.Fatal("expected quality to be recorded")
+	}
+	if !q.ServiceReachable {
+		t.Fatal("expected ServiceReachable true")
+	}
+}
+
+// TestTriggerImmediateQualityProbeForce_NoopWhenTriggerDisabled verifies that
+// a forced quality probe is a no-op when TriggerOnNewNode is disabled, even
+// when periodic quality is enabled.
+func TestTriggerImmediateQualityProbeForce_NoopWhenTriggerDisabled(t *testing.T) {
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+	})
+
+	hash := node.HashFromRawOptions([]byte(`{"type":"force-noop"}`))
+	pool.AddNodeFromSub(hash, []byte(`{"type":"force-noop"}`), "sub1")
+	entry, ok := pool.GetEntry(hash)
+	if !ok {
+		t.Fatal("entry not found")
+	}
+	storeOutbound(entry)
+
+	var called bool
+	mgr := NewProbeManager(ProbeConfig{
+		Pool:        pool,
+		Concurrency: 1,
+		Fetcher: func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+			called = true
+			return []byte("ok"), 10 * time.Millisecond, nil
+		},
+		QualityCfg: &QualityProbeConfig{
+			Enabled:  func() bool { return true }, // periodic enabled
+			Interval: func() time.Duration { return 30 * time.Minute },
+			Profile:  func() string { return "generic" },
+			Opts: func() ProxyCheckOptions {
+				return DefaultOptions()
+			},
+			TriggerOnNewNode: func() bool { return false }, // trigger disabled
+		},
+	})
+	mgr.Start()
+	defer mgr.Stop()
+
+	mgr.TriggerImmediateQualityProbeForce(hash)
+	time.Sleep(50 * time.Millisecond)
+
+	if called {
+		t.Fatal("forced quality probe should NOT execute when TriggerOnNewNode is disabled")
+	}
+}
+
+// TestScanQuality_NoopWhenDisabled verifies that scanQuality does not enqueue
+// tasks when ProxyCheckEnabled is false, even though forced probes work.
+func TestScanQuality_NoopWhenDisabled(t *testing.T) {
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+	})
+
+	hash := node.HashFromRawOptions([]byte(`{"type":"scan-disabled"}`))
+	pool.AddNodeFromSub(hash, []byte(`{"type":"scan-disabled"}`), "sub1")
+	entry, ok := pool.GetEntry(hash)
+	if !ok {
+		t.Fatal("entry not found")
+	}
+	storeOutbound(entry)
+
+	var calls int
+	mgr := NewProbeManager(ProbeConfig{
+		Pool: pool,
+		Fetcher: func(_ node.Hash, _ string) ([]byte, time.Duration, error) {
+			calls++
+			return []byte("ok"), 10 * time.Millisecond, nil
+		},
+		QualityCfg: &QualityProbeConfig{
+			Enabled:  func() bool { return false },
+			Interval: func() time.Duration { return 30 * time.Minute },
+			Profile:  func() string { return "generic" },
+			Opts: func() ProxyCheckOptions {
+				return DefaultOptions()
+			},
+		},
+	})
+
+	mgr.scanQuality()
+	time.Sleep(30 * time.Millisecond)
+
+	if calls != 0 {
+		t.Fatalf("scanQuality should not enqueue when enabled=false, calls=%d", calls)
 	}
 }

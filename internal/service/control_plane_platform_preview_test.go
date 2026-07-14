@@ -402,3 +402,119 @@ func TestPreviewFilter_ProtocolExcludeWithPlatformID(t *testing.T) {
 		t.Fatalf("expected shadowsocks, got %q", result[0].Protocol)
 	}
 }
+
+// TestPreviewFilter_QualityGradeFilter verifies quality grade filter in preview.
+func TestPreviewFilter_QualityGradeFilter(t *testing.T) {
+	svc, ssHash, _ := newPreviewFilterTestService(t)
+
+	// Set quality grade A on the ss node.
+	entry, ok := svc.Pool.GetEntry(ssHash)
+	if !ok {
+		t.Fatal("ss entry not found")
+	}
+	entry.SetQuality(&model.NodeQuality{
+		Grade: "A", Score: 95, ServiceReachable: true, Profile: "generic",
+	})
+
+	result, err := svc.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			QualityGrade: "A",
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 node matching quality grade A, got %d", len(result))
+	}
+	if result[0].NodeHash != ssHash.Hex() {
+		t.Fatalf("expected node %s, got %s", ssHash.Hex(), result[0].NodeHash)
+	}
+
+	// Filter for grade B should return 0.
+	result, err = svc.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			QualityGrade: "B",
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter: %v", err)
+	}
+	if len(result) != 0 {
+		t.Fatalf("expected 0 nodes for grade B, got %d", len(result))
+	}
+}
+
+// TestPreviewFilter_QualityMinScoreFilter verifies quality min score filter in preview.
+func TestPreviewFilter_QualityMinScoreFilter(t *testing.T) {
+	svc, ssHash, _ := newPreviewFilterTestService(t)
+
+	entry, ok := svc.Pool.GetEntry(ssHash)
+	if !ok {
+		t.Fatal("ss entry not found")
+	}
+	entry.SetQuality(&model.NodeQuality{
+		Grade: "A", Score: 90, ServiceReachable: true, Profile: "generic",
+	})
+
+	result, err := svc.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			QualityMinScore: 85,
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 node for min score 85, got %d", len(result))
+	}
+
+	result, err = svc.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			QualityMinScore: 95,
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter: %v", err)
+	}
+	if len(result) != 0 {
+		t.Fatalf("expected 0 nodes for min score 95, got %d", len(result))
+	}
+}
+
+// TestPreviewFilter_QualityProfileFilter verifies quality profile filter in preview.
+func TestPreviewFilter_QualityProfileFilter(t *testing.T) {
+	svc, ssHash, _ := newPreviewFilterTestService(t)
+
+	entry, ok := svc.Pool.GetEntry(ssHash)
+	if !ok {
+		t.Fatal("ss entry not found")
+	}
+	entry.SetQuality(&model.NodeQuality{
+		Grade: "A", Score: 95, ServiceReachable: true, Profile: "generic",
+	})
+
+	result, err := svc.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			QualityProfile: "generic",
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 node for generic profile, got %d", len(result))
+	}
+
+	result, err = svc.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			QualityProfile: "openai",
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter: %v", err)
+	}
+	if len(result) != 0 {
+		t.Fatalf("expected 0 nodes for openai profile, got %d", len(result))
+	}
+}

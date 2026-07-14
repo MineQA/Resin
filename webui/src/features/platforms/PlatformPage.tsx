@@ -25,6 +25,10 @@ import {
   emptyAccountBehaviors,
   missActionLabel,
   missActions,
+  qualityCloudflareFilterLabel,
+  qualityCloudflareFilterOptions,
+  qualityGradeOptions,
+  qualityProfileOptions,
 } from "./constants";
 import {
   defaultPlatformFormValues,
@@ -375,6 +379,86 @@ export function PlatformPage() {
                 />
                 <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
                   {t("支持反选：以 ! 开头可排除地区（如 !hk）。可与正选混用，最终结果为“先正选再排除”。")}
+                </p>
+              </div>
+
+              <div className="field-group field-span-2 platform-quality-filter-block">
+                <div className="platform-quality-filter-head">
+                  <span className="field-label">{t("质量过滤")}</span>
+                  <span
+                    className="subscription-info-icon"
+                    title={t("按质量检测结果筛选可用节点；留空表示不限制。节点无质量记录时会被过滤。")}
+                    aria-label={t("按质量检测结果筛选可用节点；留空表示不限制。节点无质量记录时会被过滤。")}
+                    tabIndex={0}
+                  >
+                    <Info size={13} />
+                  </span>
+                </div>
+                <div className="platform-quality-filter-grid">
+                  <div className="field-group" style={{ margin: 0 }}>
+                    <label className="field-label" htmlFor="create-quality-grade">
+                      {t("质量等级")}
+                    </label>
+                    <Select id="create-quality-grade" {...createForm.register("quality_grade")}>
+                      <option value="">{t("不限制")}</option>
+                      {qualityGradeOptions.map((g) => (
+                        <option key={g} value={g}>{g}</option>
+                      ))}
+                    </Select>
+                  </div>
+
+                  <div className="field-group" style={{ margin: 0 }}>
+                    <label className="field-label" htmlFor="create-quality-min-score">
+                      {t("最低质量分")}
+                    </label>
+                    <Input
+                      id="create-quality-min-score"
+                      type="number"
+                      min={0}
+                      max={100}
+                      placeholder="0-100"
+                      {...createForm.register("quality_min_score_text")}
+                    />
+                  </div>
+
+                  <div className="field-group" style={{ margin: 0 }}>
+                    <label className="field-label" htmlFor="create-quality-cf">
+                      {t("Cloudflare 拦截")}
+                    </label>
+                    <Select id="create-quality-cf" {...createForm.register("quality_cloudflare_filter")}>
+                      {qualityCloudflareFilterOptions.map((item) => (
+                        <option key={item} value={item}>
+                          {t(qualityCloudflareFilterLabel[item])}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+
+                  <div className="field-group" style={{ margin: 0 }}>
+                    <label className="field-label" htmlFor="create-quality-profile">
+                      {t("质量 Profile")}
+                    </label>
+                    <Select id="create-quality-profile" {...createForm.register("quality_profile")}>
+                      <option value="">{t("不限制")}</option>
+                      {qualityProfileOptions.map((p) => (
+                        <option key={p} value={p}>{p}</option>
+                      ))}
+                    </Select>
+                  </div>
+
+                  <div className="field-group" style={{ margin: 0 }}>
+                    <label className="field-label" htmlFor="create-quality-checked-since">
+                      {t("检测时间起")}
+                    </label>
+                    <Input
+                      id="create-quality-checked-since"
+                      type="datetime-local"
+                      {...createForm.register("quality_checked_since_text")}
+                    />
+                  </div>
+                </div>
+                <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
+                  {t("设置任意质量条件后，未检测的节点不会被选中。")}
                 </p>
               </div>
 

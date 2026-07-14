@@ -351,10 +351,11 @@ func newTopologyRuntime(
 		outboundMgr.EnsureNodeOutbound(hash)
 		// No NotifyNodeDirty here — AddNodeFromSub already notifies all platforms.
 		probeMgr.TriggerImmediateEgressProbe(hash)
-		// Trigger quality check on new node if enabled.
+		// Trigger forced quality check on new node if trigger-on-new-node is enabled.
+		// This executes independently of ProxyCheckEnabled.
 		cfg := runtimeConfigSnapshot(runtimeCfg)
-		if cfg.ProxyCheckEnabled && cfg.ProxyCheckTriggerOnNewNode {
-			probeMgr.TriggerImmediateQualityProbe(hash)
+		if cfg.ProxyCheckTriggerOnNewNode {
+			probeMgr.TriggerImmediateQualityProbeForce(hash)
 		}
 	})
 	pool.SetOnNodeRemoved(func(hash node.Hash, entry *node.NodeEntry) {
@@ -377,10 +378,11 @@ func newTopologyRuntime(
 			outboundMgr.EnsureNodeOutbound(hash)
 			probeMgr.TriggerImmediateEgressProbe(hash)
 			probeMgr.TriggerImmediateLatencyProbe(hash)
-			// Trigger quality check on re-enabled node if enabled.
+			// Trigger forced quality check on re-enabled node if trigger-on-new-node is enabled.
+			// This executes independently of ProxyCheckEnabled.
 			cfg := runtimeConfigSnapshot(runtimeCfg)
-			if cfg.ProxyCheckEnabled && cfg.ProxyCheckTriggerOnNewNode {
-				probeMgr.TriggerImmediateQualityProbe(hash)
+			if cfg.ProxyCheckTriggerOnNewNode {
+				probeMgr.TriggerImmediateQualityProbeForce(hash)
 			}
 		},
 	})

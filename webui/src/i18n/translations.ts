@@ -801,6 +801,14 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
   "否": "No",
   "上次质量检测": "Last quality check",
   "质量检测错误：{{message}}": "Quality check error: {{message}}",
+  "质量过滤": "Quality filters",
+  "按质量检测结果筛选可用节点；留空表示不限制。节点无质量记录时会被过滤。":
+    "Filter routable nodes by quality check results. Empty means no restriction. Nodes without a quality record are excluded.",
+  "不限制": "No limit",
+  "已设置": "Configured",
+  "服务不可达": "Service unreachable",
+  "设置任意质量条件后，未检测的节点不会被选中。":
+    "Once any quality condition is set, nodes without a quality record are excluded.",
 };
 
 export function translateDocumentTitle(locale: AppLocale): string {

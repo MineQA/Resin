@@ -2,6 +2,9 @@ import type {
   PlatformAllocationPolicy,
   PlatformEmptyAccountBehavior,
   PlatformMissAction,
+  QualityCloudflareFilter,
+  QualityGradeFilter,
+  QualityProfile,
 } from "./types";
 
 export const allocationPolicies: PlatformAllocationPolicy[] = [
@@ -33,4 +36,22 @@ export const emptyAccountBehaviorLabel: Record<PlatformEmptyAccountBehavior, str
   RANDOM: "随机路由",
   FIXED_HEADER: "提取指定请求头作为 Account",
   ACCOUNT_HEADER_RULE: "按照全局请求头规则提取 Account",
+};
+
+export const qualityGradeOptions: QualityGradeFilter[] = ["A", "B", "C", "D", "F"];
+
+export const qualityProfileOptions: QualityProfile[] = [
+  "generic",
+  "openai",
+  "grok",
+  "gemini",
+  "claude",
+];
+
+export const qualityCloudflareFilterOptions: QualityCloudflareFilter[] = ["any", "challenged", "clean"];
+
+export const qualityCloudflareFilterLabel: Record<QualityCloudflareFilter, string> = {
+  any: "不限制",
+  challenged: "被拦截",
+  clean: "未拦截",
 };

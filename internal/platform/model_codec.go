@@ -60,6 +60,35 @@ func NewConfiguredPlatform(
 	allocationPolicy string,
 	passiveCircuitBreakerDisabled bool,
 ) *Platform {
+	return NewConfiguredPlatformWithQuality(
+		id, name, regexFilters, regionFilters, protocolFilters, excludeProtocolFilters,
+		stickyTTLNs, missAction, emptyAccountBehavior, fixedAccountHeader, allocationPolicy,
+		passiveCircuitBreakerDisabled,
+		"", 0, nil, 0, "",
+	)
+}
+
+// NewConfiguredPlatformWithQuality builds a runtime platform with quality filter
+// settings applied. This is the full constructor; NewConfiguredPlatform is a
+// convenience wrapper that leaves all quality filters at their zero values.
+func NewConfiguredPlatformWithQuality(
+	id, name string,
+	regexFilters []*regexp.Regexp,
+	regionFilters []string,
+	protocolFilters []string,
+	excludeProtocolFilters []string,
+	stickyTTLNs int64,
+	missAction string,
+	emptyAccountBehavior string,
+	fixedAccountHeader string,
+	allocationPolicy string,
+	passiveCircuitBreakerDisabled bool,
+	qualityGrade string,
+	qualityMinScore float64,
+	qualityCloudflareChallenged *bool,
+	qualityCheckedSinceNs int64,
+	qualityProfile string,
+) *Platform {
 	normalizedFixedHeaders, fixedHeaders, err := NormalizeFixedAccountHeaders(fixedAccountHeader)
 	if err != nil {
 		normalizedFixedHeaders = strings.TrimSpace(fixedAccountHeader)
@@ -75,6 +104,11 @@ func NewConfiguredPlatform(
 	plat.ReverseProxyFixedAccountHeaders = append([]string(nil), fixedHeaders...)
 	plat.AllocationPolicy = ParseAllocationPolicy(allocationPolicy)
 	plat.PassiveCircuitBreakerDisabled = passiveCircuitBreakerDisabled
+	plat.QualityGrade = qualityGrade
+	plat.QualityMinScore = qualityMinScore
+	plat.QualityCloudflareChallenged = qualityCloudflareChallenged
+	plat.QualityCheckedSinceNs = qualityCheckedSinceNs
+	plat.QualityProfile = qualityProfile
 	return plat
 }
 
@@ -162,7 +196,14 @@ func BuildFromModel(mp model.Platform) (*Platform, error) {
 		)
 	}
 
-	return NewConfiguredPlatform(
+	// Copy quality filter fields with proper nullable bool handling.
+	var qualityCF *bool
+	if mp.QualityCloudflareChallenged != nil {
+		v := *mp.QualityCloudflareChallenged
+		qualityCF = &v
+	}
+
+	return NewConfiguredPlatformWithQuality(
 		mp.ID,
 		mp.Name,
 		regexFilters,
@@ -175,5 +216,10 @@ func BuildFromModel(mp model.Platform) (*Platform, error) {
 		fixedHeader,
 		mp.AllocationPolicy,
 		mp.PassiveCircuitBreakerDisabled,
+		mp.QualityGrade,
+		mp.QualityMinScore,
+		qualityCF,
+		mp.QualityCheckedSinceNs,
+		mp.QualityProfile,
 	), nil
 }

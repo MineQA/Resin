@@ -120,6 +120,11 @@ var platformPatchAllowedFields = map[string]bool{
 	"reverse_proxy_fixed_account_header":   true,
 	"allocation_policy":                    true,
 	"passive_circuit_breaker_disabled":     true,
+	"quality_grade":                        true,
+	"quality_min_score":                    true,
+	"quality_cloudflare_challenged":        true,
+	"quality_checked_since_ns":             true,
+	"quality_profile":                      true,
 }
 
 var subscriptionPatchAllowedFields = map[string]bool{

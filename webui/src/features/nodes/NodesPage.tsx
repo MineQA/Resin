@@ -1084,7 +1084,9 @@ export function NodesPage() {
             <span style={{ color: qualityScoreColor(q.quality_score), fontWeight: 600, fontSize: "0.8rem" }}>
               {Math.round(q.quality_score)}
             </span>
-            {q.quality_cloudflare_challenged ? (
+            {q.quality_cloudflare_status === "ng" ? (
+              <Badge variant="danger" style={{ fontSize: "0.65rem", padding: "2px 5px" }} title={t("服务不可达")}>NG</Badge>
+            ) : q.quality_cloudflare_challenged ? (
               <Badge variant="warning" style={{ fontSize: "0.65rem", padding: "2px 5px" }}>CF</Badge>
             ) : null}
           </div>
@@ -1875,7 +1877,11 @@ export function NodesPage() {
                         <div>
                           <span>{t("Cloudflare 拦截")}</span>
                           <p>
-                            {q.quality_cloudflare_challenged ? (
+                            {q.quality_cloudflare_status === "ng" ? (
+                              <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "var(--danger)" }}>
+                                <XCircle size={14} /> {t("不可达")}
+                              </span>
+                            ) : q.quality_cloudflare_challenged ? (
                               <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "var(--warning)" }}>
                                 <Badge variant="warning">CF</Badge>
                                 {q.quality_cloudflare_challenge_type ? (

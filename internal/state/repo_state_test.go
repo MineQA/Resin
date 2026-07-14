@@ -885,3 +885,170 @@ func TestStateRepo_ConcurrentWrites(t *testing.T) {
 func itoa(i int) string {
 	return strconv.Itoa(i)
 }
+
+// TestMigrateStateDB_AddsQualityFilterColumns verifies that migration 000010
+// creates the quality filter columns on platforms.
+func TestMigrateStateDB_AddsQualityFilterColumns(t *testing.T) {
+	dir := t.TempDir()
+	db, err := OpenDB(dir + "/state.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if err := MigrateStateDB(db); err != nil {
+		t.Fatalf("MigrateStateDB: %v", err)
+	}
+
+	for _, col := range []string{"quality_grade", "quality_min_score", "quality_cloudflare_challenged", "quality_checked_since_ns", "quality_profile"} {
+		if ok, err := hasTableColumn(db, "platforms", col); err != nil || !ok {
+			t.Fatalf("expected column %s, ok=%v err=%v", col, ok, err)
+		}
+	}
+}
+
+// TestPlatformCRUD_WithQualityFilters verifies round-trip of quality filter
+// fields including nullable Cloudflare challenged with nil/true/false values.
+func TestPlatformCRUD_WithQualityFilters(t *testing.T) {
+	repo := newTestStateRepo(t)
+
+	// Create platform with nil CF challenged (no filter).
+	p1 := model.Platform{
+		ID:                  "plat-q-1",
+		Name:                "Quality-Platform-1",
+		StickyTTLNs:         30000000000,
+		RegexFilters:        []string{},
+		RegionFilters:       []string{},
+		ReverseProxyMissAction:           "TREAT_AS_EMPTY",
+		ReverseProxyEmptyAccountBehavior: "RANDOM",
+		AllocationPolicy:                 "BALANCED",
+		UpdatedAtNs:                      time.Now().UnixNano(),
+		QualityGrade:                     "A",
+		QualityMinScore:                  80.0,
+		QualityCloudflareChallenged:      nil,
+		QualityCheckedSinceNs:            1000000,
+		QualityProfile:                   "generic",
+	}
+	if err := repo.UpsertPlatform(p1); err != nil {
+		t.Fatalf("UpsertPlatform: %v", err)
+	}
+	got1, err := repo.GetPlatform("plat-q-1")
+	if err != nil {
+		t.Fatalf("GetPlatform: %v", err)
+	}
+	if got1.QualityGrade != "A" {
+		t.Fatalf("QualityGrade = %q, want A", got1.QualityGrade)
+	}
+	if got1.QualityMinScore != 80.0 {
+		t.Fatalf("QualityMinScore = %f, want 80.0", got1.QualityMinScore)
+	}
+	if got1.QualityCloudflareChallenged != nil {
+		t.Fatal("QualityCloudflareChallenged should be nil")
+	}
+	if got1.QualityCheckedSinceNs != 1000000 {
+		t.Fatalf("QualityCheckedSinceNs = %d, want 1000000", got1.QualityCheckedSinceNs)
+	}
+	if got1.QualityProfile != "generic" {
+		t.Fatalf("QualityProfile = %q, want generic", got1.QualityProfile)
+	}
+
+	// Update with true CF challenged.
+	trueVal := true
+	p2 := p1
+	p2.QualityCloudflareChallenged = &trueVal
+	p2.UpdatedAtNs = time.Now().UnixNano()
+	if err := repo.UpsertPlatform(p2); err != nil {
+		t.Fatalf("UpsertPlatform (true): %v", err)
+	}
+	got2, err := repo.GetPlatform("plat-q-1")
+	if err != nil {
+		t.Fatalf("GetPlatform after true: %v", err)
+	}
+	if got2.QualityCloudflareChallenged == nil || *got2.QualityCloudflareChallenged != true {
+		t.Fatal("QualityCloudflareChallenged should be true")
+	}
+
+	// Update with false CF challenged.
+	falseVal := false
+	p3 := p1
+	p3.QualityCloudflareChallenged = &falseVal
+	p3.UpdatedAtNs = time.Now().UnixNano()
+	if err := repo.UpsertPlatform(p3); err != nil {
+		t.Fatalf("UpsertPlatform (false): %v", err)
+	}
+	got3, err := repo.GetPlatform("plat-q-1")
+	if err != nil {
+		t.Fatalf("GetPlatform after false: %v", err)
+	}
+	if got3.QualityCloudflareChallenged == nil || *got3.QualityCloudflareChallenged != false {
+		t.Fatal("QualityCloudflareChallenged should be false")
+	}
+
+	// Verify ListPlatforms also includes quality fields.
+	list, err := repo.ListPlatforms()
+	if err != nil {
+		t.Fatalf("ListPlatforms: %v", err)
+	}
+	var found bool
+	for _, p := range list {
+		if p.ID == "plat-q-1" {
+			found = true
+			if p.QualityGrade != "A" {
+				t.Fatalf("ListPlatforms QualityGrade = %q", p.QualityGrade)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("platform not found in ListPlatforms")
+	}
+}
+
+// TestPlatformDefaultPlatform_QualityFiltersZero verifies the Default platform
+// has zero-value quality filters (no filter).
+func TestPlatformDefaultPlatform_QualityFiltersZero(t *testing.T) {
+	dir := t.TempDir()
+	db, err := OpenDB(dir + "/state.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := MigrateStateDB(db); err != nil {
+		t.Fatalf("MigrateStateDB: %v", err)
+	}
+	repo := newStateRepo(db)
+
+	// Create a Default-like platform with no quality filters.
+	p := model.Platform{
+		ID:                               platform.DefaultPlatformID,
+		Name:                             platform.DefaultPlatformName,
+		StickyTTLNs:                      30000000000,
+		RegexFilters:                     []string{},
+		RegionFilters:                    []string{},
+		ReverseProxyMissAction:           "TREAT_AS_EMPTY",
+		ReverseProxyEmptyAccountBehavior: "RANDOM",
+		AllocationPolicy:                 "BALANCED",
+		UpdatedAtNs:                      time.Now().UnixNano(),
+	}
+	if err := repo.UpsertPlatform(p); err != nil {
+		t.Fatalf("UpsertPlatform Default: %v", err)
+	}
+	got, err := repo.GetPlatform(platform.DefaultPlatformID)
+	if err != nil {
+		t.Fatalf("GetPlatform Default: %v", err)
+	}
+	if got.QualityGrade != "" {
+		t.Fatalf("Default QualityGrade should be empty, got %q", got.QualityGrade)
+	}
+	if got.QualityMinScore != 0 {
+		t.Fatalf("Default QualityMinScore should be 0, got %f", got.QualityMinScore)
+	}
+	if got.QualityCloudflareChallenged != nil {
+		t.Fatal("Default QualityCloudflareChallenged should be nil")
+	}
+	if got.QualityCheckedSinceNs != 0 {
+		t.Fatalf("Default QualityCheckedSinceNs should be 0, got %d", got.QualityCheckedSinceNs)
+	}
+	if got.QualityProfile != "" {
+		t.Fatalf("Default QualityProfile should be empty, got %q", got.QualityProfile)
+	}
+}

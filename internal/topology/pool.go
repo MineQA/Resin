@@ -599,6 +599,12 @@ func (p *GlobalNodePool) RecordNodeQuality(hash node.Hash, quality *model.NodeQu
 	cp.LastCheckedNs = time.Now().UnixNano()
 	entry.SetQuality(&cp)
 
+	// Notify all platforms to re-evaluate the node immediately after quality
+	// is updated, so quality-filtered routable views reflect the new state.
+	// This is intentional: platform views must stay consistent even if the
+	// persistence callback is slow or the system restarts before flush.
+	p.notifyAllPlatformsDirty(hash)
+
 	if p.onNodeQualityChanged != nil {
 		p.onNodeQualityChanged(model.NodeQualityKey{
 			NodeHash: cp.NodeHash,

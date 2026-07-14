@@ -1961,6 +1961,83 @@ func TestUpdatePlatform_PatchProtocolFiltersCanonicalizes(t *testing.T) {
 	}
 }
 
+func TestUpdatePlatform_PatchQualityFiltersCanClear(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	cp := &ControlPlaneService{
+		Engine: engine,
+		Pool:   pool,
+		SubMgr: subMgr,
+		EnvCfg: &config.EnvConfig{
+			DefaultPlatformStickyTTL:              30 * time.Minute,
+			DefaultPlatformRegexFilters:           []string{},
+			DefaultPlatformRegionFilters:          []string{},
+			DefaultPlatformReverseProxyMissAction: "TREAT_AS_EMPTY",
+			DefaultPlatformAllocationPolicy:       "BALANCED",
+		},
+	}
+
+	name := "patch-quality"
+	cf := true
+	created, err := cp.CreatePlatform(CreatePlatformRequest{
+		Name:                         &name,
+		QualityGrade:                 "A",
+		QualityMinScore:              80,
+		QualityCloudflareChallenged:  &cf,
+		QualityCheckedSinceNs:        123456789,
+		QualityProfile:               "openai",
+	})
+	if err != nil {
+		t.Fatalf("CreatePlatform: %v", err)
+	}
+	if created.QualityCloudflareChallenged == nil || !*created.QualityCloudflareChallenged {
+		t.Fatalf("created quality_cloudflare_challenged = %v, want true", created.QualityCloudflareChallenged)
+	}
+
+	cleared, err := cp.UpdatePlatform(created.ID, []byte(`{
+		"quality_grade":"",
+		"quality_min_score":0,
+		"quality_cloudflare_challenged":null,
+		"quality_checked_since_ns":0,
+		"quality_profile":""
+	}`))
+	if err != nil {
+		t.Fatalf("UpdatePlatform clear quality filters: %v", err)
+	}
+	if cleared.QualityGrade != "" {
+		t.Fatalf("quality_grade = %q, want empty", cleared.QualityGrade)
+	}
+	if cleared.QualityMinScore != 0 {
+		t.Fatalf("quality_min_score = %v, want 0", cleared.QualityMinScore)
+	}
+	if cleared.QualityCloudflareChallenged != nil {
+		t.Fatalf("quality_cloudflare_challenged = %v, want nil", cleared.QualityCloudflareChallenged)
+	}
+	if cleared.QualityCheckedSinceNs != 0 {
+		t.Fatalf("quality_checked_since_ns = %v, want 0", cleared.QualityCheckedSinceNs)
+	}
+	if cleared.QualityProfile != "" {
+		t.Fatalf("quality_profile = %q, want empty", cleared.QualityProfile)
+	}
+}
+
 func TestCreatePlatform_RejectsInvalidProtocolFilter(t *testing.T) {
 	dir := t.TempDir()
 	engine, closer, err := state.PersistenceBootstrap(
@@ -2011,5 +2088,121 @@ func TestCreatePlatform_RejectsInvalidProtocolFilter(t *testing.T) {
 	}
 	if !strings.Contains(svcErr.Message, "protocol_filters[0]") {
 		t.Fatalf("error message = %q, expected to mention protocol_filters[0]", svcErr.Message)
+	}
+}
+
+// TestDeriveCloudflareStatus verifies the CF status derivation.
+func TestDeriveCloudflareStatus(t *testing.T) {
+	tests := []struct {
+		name     string
+		quality  *model.NodeQuality
+		want     string
+	}{
+		{
+			name: "challenged",
+			quality: &model.NodeQuality{
+				ServiceReachable:     true,
+				CloudflareChallenged: true,
+			},
+			want: "challenged",
+		},
+		{
+			name: "clean",
+			quality: &model.NodeQuality{
+				ServiceReachable:     true,
+				CloudflareChallenged: false,
+			},
+			want: "clean",
+		},
+		{
+			name: "ng_service_unreachable",
+			quality: &model.NodeQuality{
+				ServiceReachable:     false,
+				CloudflareChallenged: false,
+			},
+			want: "ng",
+		},
+		{
+			name: "ng_unreachable_despite_challenge_flag",
+			quality: &model.NodeQuality{
+				ServiceReachable:     false,
+				CloudflareChallenged: false,
+			},
+			want: "ng",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := deriveCloudflareStatus(tt.quality)
+			if got != tt.want {
+				t.Fatalf("deriveCloudflareStatus = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestValidateQualityGrade verifies quality grade validation.
+func TestValidateQualityGrade(t *testing.T) {
+	if err := validateQualityGrade(""); err != nil {
+		t.Fatalf("empty should be valid: %v", err)
+	}
+	for _, g := range []string{"A", "B", "C", "D", "F"} {
+		if err := validateQualityGrade(g); err != nil {
+			t.Fatalf("grade %q should be valid: %v", g, err)
+		}
+	}
+	if err := validateQualityGrade("E"); err == nil {
+		t.Fatal("grade E should be invalid")
+	}
+	if err := validateQualityGrade("G"); err == nil {
+		t.Fatal("grade G should be invalid")
+	}
+	if err := validateQualityGrade("AA"); err == nil {
+		t.Fatal("grade AA should be invalid")
+	}
+}
+
+// TestValidateQualityMinScore verifies quality min score validation.
+func TestValidateQualityMinScore(t *testing.T) {
+	if err := validateQualityMinScore(0); err != nil {
+		t.Fatalf("score 0 should be valid: %v", err)
+	}
+	if err := validateQualityMinScore(50); err != nil {
+		t.Fatalf("score 50 should be valid: %v", err)
+	}
+	if err := validateQualityMinScore(100); err != nil {
+		t.Fatalf("score 100 should be valid: %v", err)
+	}
+	if err := validateQualityMinScore(-1); err == nil {
+		t.Fatal("score -1 should be invalid")
+	}
+	if err := validateQualityMinScore(101); err == nil {
+		t.Fatal("score 101 should be invalid")
+	}
+}
+
+// TestValidateQualityCheckedSinceNs verifies checked-since validation.
+func TestValidateQualityCheckedSinceNs(t *testing.T) {
+	if err := validateQualityCheckedSinceNs(0); err != nil {
+		t.Fatalf("0 should be valid: %v", err)
+	}
+	if err := validateQualityCheckedSinceNs(1000); err != nil {
+		t.Fatalf("1000 should be valid: %v", err)
+	}
+	if err := validateQualityCheckedSinceNs(-1); err == nil {
+		t.Fatal("-1 should be invalid")
+	}
+}
+
+// TestValidateQualityProfile verifies quality profile validation.
+func TestValidateQualityProfile(t *testing.T) {
+	if err := validateQualityProfile(""); err != nil {
+		t.Fatalf("empty should be valid: %v", err)
+	}
+	if err := validateQualityProfile("generic"); err != nil {
+		t.Fatalf("generic should be valid: %v", err)
+	}
+	if err := validateQualityProfile("nonexistent"); err == nil {
+		t.Fatal("nonexistent profile should be invalid")
 	}
 }

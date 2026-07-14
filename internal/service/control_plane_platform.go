@@ -35,12 +35,22 @@ type PlatformResponse struct {
 	ReverseProxyFixedAccountHeader   string   `json:"reverse_proxy_fixed_account_header"`
 	AllocationPolicy                 string   `json:"allocation_policy"`
 	PassiveCircuitBreakerDisabled    bool     `json:"passive_circuit_breaker_disabled"`
+	QualityGrade                     string   `json:"quality_grade,omitempty"`
+	QualityMinScore                  float64  `json:"quality_min_score,omitempty"`
+	QualityCloudflareChallenged      *bool    `json:"quality_cloudflare_challenged,omitempty"`
+	QualityCheckedSinceNs            int64    `json:"quality_checked_since_ns,omitempty"`
+	QualityProfile                   string   `json:"quality_profile,omitempty"`
 	UpdatedAt                        string   `json:"updated_at"`
 }
 
 func platformToResponse(p model.Platform) PlatformResponse {
 	behavior := normalizePlatformEmptyAccountBehavior(p.ReverseProxyEmptyAccountBehavior)
 	fixedHeader := normalizeHeaderFieldName(p.ReverseProxyFixedAccountHeader)
+	var qualityCF *bool
+	if p.QualityCloudflareChallenged != nil {
+		v := *p.QualityCloudflareChallenged
+		qualityCF = &v
+	}
 	return PlatformResponse{
 		ID:                               p.ID,
 		Name:                             p.Name,
@@ -55,6 +65,11 @@ func platformToResponse(p model.Platform) PlatformResponse {
 		ReverseProxyFixedAccountHeader:   fixedHeader,
 		AllocationPolicy:                 p.AllocationPolicy,
 		PassiveCircuitBreakerDisabled:    p.PassiveCircuitBreakerDisabled,
+		QualityGrade:                     p.QualityGrade,
+		QualityMinScore:                  p.QualityMinScore,
+		QualityCloudflareChallenged:      qualityCF,
+		QualityCheckedSinceNs:            p.QualityCheckedSinceNs,
+		QualityProfile:                   p.QualityProfile,
 		UpdatedAt:                        time.Unix(0, p.UpdatedAtNs).UTC().Format(time.RFC3339Nano),
 	}
 }
@@ -83,6 +98,11 @@ type platformConfig struct {
 	ReverseProxyFixedAccountHeader   string
 	AllocationPolicy                 string
 	PassiveCircuitBreakerDisabled    bool
+	QualityGrade                     string
+	QualityMinScore                  float64
+	QualityCloudflareChallenged      *bool
+	QualityCheckedSinceNs            int64
+	QualityProfile                   string
 }
 
 func normalizePlatformMissAction(raw string) string {
@@ -115,11 +135,21 @@ func (s *ControlPlaneService) defaultPlatformConfig(name string) platformConfig 
 		ReverseProxyFixedAccountHeader: normalizeHeaderFieldName(
 			s.EnvCfg.DefaultPlatformReverseProxyFixedAccountHeader,
 		),
-		AllocationPolicy: s.EnvCfg.DefaultPlatformAllocationPolicy,
+		AllocationPolicy:              s.EnvCfg.DefaultPlatformAllocationPolicy,
+		QualityGrade:                  "",
+		QualityMinScore:               0,
+		QualityCloudflareChallenged:   nil,
+		QualityCheckedSinceNs:         0,
+		QualityProfile:                "",
 	}
 }
 
 func platformConfigFromModel(mp model.Platform) platformConfig {
+	var qualityCF *bool
+	if mp.QualityCloudflareChallenged != nil {
+		v := *mp.QualityCloudflareChallenged
+		qualityCF = &v
+	}
 	return platformConfig{
 		Name:                             mp.Name,
 		StickyTTLNs:                      mp.StickyTTLNs,
@@ -132,10 +162,20 @@ func platformConfigFromModel(mp model.Platform) platformConfig {
 		ReverseProxyFixedAccountHeader:   normalizeHeaderFieldName(mp.ReverseProxyFixedAccountHeader),
 		AllocationPolicy:                 mp.AllocationPolicy,
 		PassiveCircuitBreakerDisabled:    mp.PassiveCircuitBreakerDisabled,
+		QualityGrade:                     mp.QualityGrade,
+		QualityMinScore:                  mp.QualityMinScore,
+		QualityCloudflareChallenged:      qualityCF,
+		QualityCheckedSinceNs:            mp.QualityCheckedSinceNs,
+		QualityProfile:                   mp.QualityProfile,
 	}
 }
 
 func (cfg platformConfig) toModel(id string, updatedAtNs int64) model.Platform {
+	var qualityCF *bool
+	if cfg.QualityCloudflareChallenged != nil {
+		v := *cfg.QualityCloudflareChallenged
+		qualityCF = &v
+	}
 	return model.Platform{
 		ID:                               id,
 		Name:                             cfg.Name,
@@ -149,6 +189,11 @@ func (cfg platformConfig) toModel(id string, updatedAtNs int64) model.Platform {
 		ReverseProxyFixedAccountHeader:   cfg.ReverseProxyFixedAccountHeader,
 		AllocationPolicy:                 cfg.AllocationPolicy,
 		PassiveCircuitBreakerDisabled:    cfg.PassiveCircuitBreakerDisabled,
+		QualityGrade:                     cfg.QualityGrade,
+		QualityMinScore:                  cfg.QualityMinScore,
+		QualityCloudflareChallenged:      qualityCF,
+		QualityCheckedSinceNs:            cfg.QualityCheckedSinceNs,
+		QualityProfile:                   cfg.QualityProfile,
 		UpdatedAtNs:                      updatedAtNs,
 	}
 }
@@ -158,7 +203,7 @@ func (cfg platformConfig) toRuntime(id string) (*platform.Platform, error) {
 	if err != nil {
 		return nil, err
 	}
-	return platform.NewConfiguredPlatform(
+	return platform.NewConfiguredPlatformWithQuality(
 		id,
 		cfg.Name,
 		compiledRegexFilters,
@@ -171,6 +216,11 @@ func (cfg platformConfig) toRuntime(id string) (*platform.Platform, error) {
 		cfg.ReverseProxyFixedAccountHeader,
 		cfg.AllocationPolicy,
 		cfg.PassiveCircuitBreakerDisabled,
+		cfg.QualityGrade,
+		cfg.QualityMinScore,
+		cfg.QualityCloudflareChallenged,
+		cfg.QualityCheckedSinceNs,
+		cfg.QualityProfile,
 	), nil
 }
 
@@ -280,6 +330,18 @@ func validatePlatformConfig(cfg *platformConfig, validateRegionFilters bool) *Se
 		return err
 	}
 	if err := validatePlatformEmptyAccountConfig(cfg); err != nil {
+		return err
+	}
+	if err := validateQualityGrade(cfg.QualityGrade); err != nil {
+		return err
+	}
+	if err := validateQualityMinScore(cfg.QualityMinScore); err != nil {
+		return err
+	}
+	if err := validateQualityCheckedSinceNs(cfg.QualityCheckedSinceNs); err != nil {
+		return err
+	}
+	if err := validateQualityProfile(cfg.QualityProfile); err != nil {
 		return err
 	}
 	return nil
@@ -395,6 +457,11 @@ type CreatePlatformRequest struct {
 	ReverseProxyFixedAccountHeader   *string  `json:"reverse_proxy_fixed_account_header"`
 	AllocationPolicy                 *string  `json:"allocation_policy"`
 	PassiveCircuitBreakerDisabled    *bool    `json:"passive_circuit_breaker_disabled"`
+	QualityGrade                     *string  `json:"quality_grade"`
+	QualityMinScore                  *float64 `json:"quality_min_score"`
+	QualityCloudflareChallenged      *bool    `json:"quality_cloudflare_challenged,omitempty"`
+	QualityCheckedSinceNs            *int64   `json:"quality_checked_since_ns"`
+	QualityProfile                   *string  `json:"quality_profile"`
 }
 
 // CreatePlatform creates a new platform.
@@ -458,6 +525,34 @@ func (s *ControlPlaneService) CreatePlatform(req CreatePlatformRequest) (*Platfo
 	if req.PassiveCircuitBreakerDisabled != nil {
 		cfg.PassiveCircuitBreakerDisabled = *req.PassiveCircuitBreakerDisabled
 	}
+	if req.QualityGrade != nil {
+		if err := validateQualityGrade(*req.QualityGrade); err != nil {
+			return nil, err
+		}
+		cfg.QualityGrade = *req.QualityGrade
+	}
+	if req.QualityMinScore != nil {
+		if err := validateQualityMinScore(*req.QualityMinScore); err != nil {
+			return nil, err
+		}
+		cfg.QualityMinScore = *req.QualityMinScore
+	}
+	if req.QualityCloudflareChallenged != nil {
+		v := *req.QualityCloudflareChallenged
+		cfg.QualityCloudflareChallenged = &v
+	}
+	if req.QualityCheckedSinceNs != nil {
+		if err := validateQualityCheckedSinceNs(*req.QualityCheckedSinceNs); err != nil {
+			return nil, err
+		}
+		cfg.QualityCheckedSinceNs = *req.QualityCheckedSinceNs
+	}
+	if req.QualityProfile != nil {
+		if err := validateQualityProfile(*req.QualityProfile); err != nil {
+			return nil, err
+		}
+		cfg.QualityProfile = *req.QualityProfile
+	}
 	if err := validatePlatformConfig(&cfg, true); err != nil {
 		return nil, err
 	}
@@ -478,15 +573,20 @@ func (s *ControlPlaneService) CreatePlatform(req CreatePlatformRequest) (*Platfo
 	return &r, nil
 }
 
+var platformPatchNullableFields = map[string]bool{
+	"quality_cloudflare_challenged": true,
+}
+
 // UpdatePlatform applies a constrained partial patch to a platform.
-// This is not RFC 7396 JSON Merge Patch: patch must be a non-empty object and
-// null values are rejected.
+// This is not RFC 7396 JSON Merge Patch: patch must be a non-empty object.
+// Null values are rejected except for nullable tri-state fields such as
+// quality_cloudflare_challenged, where null means "no filter".
 func (s *ControlPlaneService) UpdatePlatform(id string, patchJSON json.RawMessage) (*PlatformResponse, error) {
 	patch, verr := parseMergePatch(patchJSON)
 	if verr != nil {
 		return nil, verr
 	}
-	if err := patch.validateFields(platformPatchAllowedFields, func(key string) string {
+	if err := patch.validateFieldsAllowingNull(platformPatchAllowedFields, platformPatchNullableFields, func(key string) string {
 		return fmt.Sprintf("field %q is read-only or unknown", key)
 	}); err != nil {
 		return nil, err
@@ -587,6 +687,43 @@ func (s *ControlPlaneService) UpdatePlatform(id string, patchJSON json.RawMessag
 	} else if ok {
 		cfg.PassiveCircuitBreakerDisabled = disabled
 	}
+	if gradeStr, ok, err := patch.optionalString("quality_grade"); err != nil {
+		return nil, err
+	} else if ok {
+		if err := validateQualityGrade(gradeStr); err != nil {
+			return nil, err
+		}
+		cfg.QualityGrade = gradeStr
+	}
+	if minScoreVal, ok, err := patch.optionalFloat64("quality_min_score"); err != nil {
+		return nil, err
+	} else if ok {
+		if err := validateQualityMinScore(minScoreVal); err != nil {
+			return nil, err
+		}
+		cfg.QualityMinScore = minScoreVal
+	}
+	if cfChallenged, ok, err := patch.optionalNullableBool("quality_cloudflare_challenged"); err != nil {
+		return nil, err
+	} else if ok {
+		cfg.QualityCloudflareChallenged = cfChallenged
+	}
+	if checkedSince, ok, err := patch.optionalInt64("quality_checked_since_ns"); err != nil {
+		return nil, err
+	} else if ok {
+		if err := validateQualityCheckedSinceNs(checkedSince); err != nil {
+			return nil, err
+		}
+		cfg.QualityCheckedSinceNs = checkedSince
+	}
+	if profileStr, ok, err := patch.optionalString("quality_profile"); err != nil {
+		return nil, err
+	} else if ok {
+		if err := validateQualityProfile(profileStr); err != nil {
+			return nil, err
+		}
+		cfg.QualityProfile = profileStr
+	}
 	if err := validatePlatformConfig(&cfg, regionFiltersPatched); err != nil {
 		return nil, err
 	}
@@ -662,10 +799,15 @@ type PreviewFilterRequest struct {
 }
 
 type PlatformSpecFilter struct {
-	RegexFilters           []string `json:"regex_filters"`
-	RegionFilters          []string `json:"region_filters"`
-	ProtocolFilters        []string `json:"protocol_filters"`
-	ExcludeProtocolFilters []string `json:"exclude_protocol_filters"`
+	RegexFilters                []string `json:"regex_filters"`
+	RegionFilters               []string `json:"region_filters"`
+	ProtocolFilters             []string `json:"protocol_filters"`
+	ExcludeProtocolFilters      []string `json:"exclude_protocol_filters"`
+	QualityGrade                string   `json:"quality_grade,omitempty"`
+	QualityMinScore             float64  `json:"quality_min_score,omitempty"`
+	QualityCloudflareChallenged *bool    `json:"quality_cloudflare_challenged,omitempty"`
+	QualityCheckedSinceNs       int64    `json:"quality_checked_since_ns,omitempty"`
+	QualityProfile              string   `json:"quality_profile,omitempty"`
 }
 
 // NodeSummary is the API response for a node.
@@ -705,6 +847,11 @@ type NodeQualitySummary struct {
 	AvgLatencyMs            float64 `json:"quality_avg_latency_ms,omitempty"`
 	LastChecked             string  `json:"quality_last_checked,omitempty"`
 	LastError               string  `json:"quality_last_error,omitempty"`
+	// QualityCloudflareStatus is a derived display-only field.
+	// Values: "challenged" (explicit CF challenge detected),
+	// "clean" (service reachable and no challenge), "ng" (service unreachable).
+	// Omitted when quality is nil (no check performed).
+	QualityCloudflareStatus string `json:"quality_cloudflare_status,omitempty"`
 }
 
 // IsHealthyAndEnabled follows the node-summary health rule used by API/UI
@@ -793,6 +940,7 @@ func (s *ControlPlaneService) nodeEntryToSummary(h node.Hash, entry *node.NodeEn
 	}
 	// Quality check summary.
 	if q := entry.GetQuality(); q != nil {
+		cfStatus := deriveCloudflareStatus(q)
 		quality := &NodeQualitySummary{
 			Profile:                 q.Profile,
 			Grade:                   q.Grade,
@@ -804,6 +952,7 @@ func (s *ControlPlaneService) nodeEntryToSummary(h node.Hash, entry *node.NodeEn
 			CloudflareChallengeType: q.CloudflareChallengeType,
 			AvgLatencyMs:            q.AvgLatencyMs,
 			LastError:               q.LastError,
+			QualityCloudflareStatus: cfStatus,
 		}
 		if q.LastCheckedNs > 0 {
 			quality.LastChecked = time.Unix(0, q.LastCheckedNs).UTC().Format(time.RFC3339Nano)
@@ -830,6 +979,11 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 	var regionFilters []string
 	var protocolFilters []string
 	var excludeProtocolFilters []string
+	var qualityGrade string
+	var qualityMinScore float64
+	var qualityCloudflareChallenged *bool
+	var qualityCheckedSinceNs int64
+	var qualityProfile string
 
 	if hasPlatformID {
 		plat, ok := s.Pool.GetPlatform(*req.PlatformID)
@@ -840,6 +994,11 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 		regionFilters = plat.RegionFilters
 		protocolFilters = plat.ProtocolFilters
 		excludeProtocolFilters = plat.ExcludeProtocolFilters
+		qualityGrade = plat.QualityGrade
+		qualityMinScore = plat.QualityMinScore
+		qualityCloudflareChallenged = plat.QualityCloudflareChallenged
+		qualityCheckedSinceNs = plat.QualityCheckedSinceNs
+		qualityProfile = plat.QualityProfile
 	} else {
 		compiled, err := platform.CompileRegexFilters(req.PlatformSpec.RegexFilters)
 		if err != nil {
@@ -859,6 +1018,27 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 		}
 		protocolFilters = normalizeProtocolFilterSlice(req.PlatformSpec.ProtocolFilters)
 		excludeProtocolFilters = normalizeProtocolFilterSlice(req.PlatformSpec.ExcludeProtocolFilters)
+		// Quality filters from spec.
+		if err := validateQualityGrade(req.PlatformSpec.QualityGrade); err != nil {
+			return nil, err
+		}
+		qualityGrade = req.PlatformSpec.QualityGrade
+		if err := validateQualityMinScore(req.PlatformSpec.QualityMinScore); err != nil {
+			return nil, err
+		}
+		qualityMinScore = req.PlatformSpec.QualityMinScore
+		if req.PlatformSpec.QualityCloudflareChallenged != nil {
+			v := *req.PlatformSpec.QualityCloudflareChallenged
+			qualityCloudflareChallenged = &v
+		}
+		if err := validateQualityCheckedSinceNs(req.PlatformSpec.QualityCheckedSinceNs); err != nil {
+			return nil, err
+		}
+		qualityCheckedSinceNs = req.PlatformSpec.QualityCheckedSinceNs
+		if err := validateQualityProfile(req.PlatformSpec.QualityProfile); err != nil {
+			return nil, err
+		}
+		qualityProfile = req.PlatformSpec.QualityProfile
 	}
 
 	var subLookup node.SubLookupFunc
@@ -897,16 +1077,113 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 					return true
 				}
 			}
-			if len(excludeProtocolFilters) > 0 {
-				for _, f := range excludeProtocolFilters {
-					if f == canonical {
-						return true
-					}
+		if len(excludeProtocolFilters) > 0 {
+			for _, f := range excludeProtocolFilters {
+				if f == canonical {
+					return true
 				}
 			}
+		}
+		}
+		// Quality filters.
+		if !matchNodeQualityFilters(entry, qualityGrade, qualityMinScore, qualityCloudflareChallenged, qualityCheckedSinceNs, qualityProfile) {
+			return true
 		}
 		result = append(result, s.nodeEntryToSummary(h, entry))
 		return true
 	})
 	return result, nil
+}
+
+// matchNodeQualityFilters checks a node entry against quality filter criteria.
+// This mirrors platform.matchQualityFilters for use in PreviewFilter.
+func matchNodeQualityFilters(entry *node.NodeEntry, qualityGrade string, qualityMinScore float64, qualityCloudflareChallenged *bool, qualityCheckedSinceNs int64, qualityProfile string) bool {
+	if qualityGrade == "" && qualityMinScore == 0 &&
+		qualityCloudflareChallenged == nil && qualityCheckedSinceNs == 0 &&
+		qualityProfile == "" {
+		return true
+	}
+	q := entry.GetQuality()
+	if q == nil {
+		return false
+	}
+	if qualityGrade != "" && q.Grade != qualityGrade {
+		return false
+	}
+	if qualityMinScore > 0 && q.Score < qualityMinScore {
+		return false
+	}
+	if qualityCloudflareChallenged != nil && q.CloudflareChallenged != *qualityCloudflareChallenged {
+		return false
+	}
+	if qualityCheckedSinceNs > 0 && q.LastCheckedNs < qualityCheckedSinceNs {
+		return false
+	}
+	if qualityProfile != "" && q.Profile != qualityProfile {
+		return false
+	}
+	return true
+}
+
+// --- Quality filter validation helpers ---
+
+// validateQualityGrade validates that grade is empty (no filter) or one of
+// the actual proxy-check grades: A, B, C, D, or F.
+func validateQualityGrade(grade string) *ServiceError {
+	if grade == "" {
+		return nil
+	}
+	switch grade {
+	case "A", "B", "C", "D", "F":
+		return nil
+	default:
+		return invalidArg("quality_grade: must be empty or one of A, B, C, D, F")
+	}
+}
+
+// validateQualityMinScore validates that min score is 0 (no filter) or 0..100.
+func validateQualityMinScore(score float64) *ServiceError {
+	if score == 0 {
+		return nil
+	}
+	if score < 0 || score > 100 {
+		return invalidArg("quality_min_score: must be 0 or between 0 and 100")
+	}
+	return nil
+}
+
+// validateQualityCheckedSinceNs validates that checked_since_ns >= 0.
+func validateQualityCheckedSinceNs(ns int64) *ServiceError {
+	if ns < 0 {
+		return invalidArg("quality_checked_since_ns: must be >= 0")
+	}
+	return nil
+}
+
+// validateQualityProfile validates that profile is empty (no filter) or a built-in profile.
+func validateQualityProfile(profile string) *ServiceError {
+	if profile == "" {
+		return nil
+	}
+	if !platform.IsBuiltInQualityProfile(profile) {
+		return invalidArg("quality_profile: must be empty or a built-in profile")
+	}
+	return nil
+}
+
+// deriveCloudflareStatus computes the display-only quality_cloudflare_status
+// field. This is a derived value and does not change persisted semantics.
+//
+// Rules:
+//   - CloudflareChallenged == true               → "challenged"
+//   - ServiceReachable == true && !Challenged     → "clean"
+//   - ServiceReachable == false                   → "ng"
+func deriveCloudflareStatus(q *model.NodeQuality) string {
+	if q.CloudflareChallenged {
+		return "challenged"
+	}
+	if q.ServiceReachable {
+		return "clean"
+	}
+	return "ng"
 }

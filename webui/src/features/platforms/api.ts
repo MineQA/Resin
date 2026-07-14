@@ -13,7 +13,7 @@ const basePath = "/api/v1/platforms";
 
 type ApiPlatform = Omit<
   Platform,
-  "regex_filters" | "region_filters" | "protocol_filters" | "exclude_protocol_filters"
+  "regex_filters" | "region_filters" | "protocol_filters" | "exclude_protocol_filters" | "quality_cloudflare_challenged"
 > & {
   regex_filters?: string[] | null;
   region_filters?: string[] | null;
@@ -24,6 +24,11 @@ type ApiPlatform = Omit<
   reverse_proxy_empty_account_behavior?: Platform["reverse_proxy_empty_account_behavior"] | null;
   reverse_proxy_fixed_account_header?: string | null;
   passive_circuit_breaker_disabled?: boolean | null;
+  quality_grade?: string | null;
+  quality_min_score?: number | null;
+  quality_cloudflare_challenged?: boolean | null;
+  quality_checked_since_ns?: number | string | null;
+  quality_profile?: string | null;
 };
 
 type ApiPlatformLease = Partial<PlatformLease>;
@@ -35,9 +40,45 @@ function parseMissAction(raw: ApiPlatform["reverse_proxy_miss_action"]): Platfor
   throw new Error(`invalid reverse_proxy_miss_action: ${String(raw)}`);
 }
 
+function normalizePlatformQualityFields(raw: ApiPlatform): {
+  quality_grade: string;
+  quality_min_score: number;
+  quality_cloudflare_challenged: boolean | null;
+  quality_checked_since_ns: number;
+  quality_profile: string;
+} {
+  const grade = typeof raw.quality_grade === "string" ? raw.quality_grade : "";
+  const minScore = typeof raw.quality_min_score === "number" ? raw.quality_min_score : 0;
+  // The backend encodes the nullable bool as omitempty with JSON null/true/false.
+  // null or absent => no filter (null); true/false => filter value.
+  let cfChallenged: boolean | null = null;
+  if (typeof raw.quality_cloudflare_challenged === "boolean") {
+    cfChallenged = raw.quality_cloudflare_challenged;
+  }
+  // JSON numbers may arrive as strings from some proxies; coerce defensively.
+  let checkedSinceNs = 0;
+  if (typeof raw.quality_checked_since_ns === "number") {
+    checkedSinceNs = raw.quality_checked_since_ns;
+  } else if (typeof raw.quality_checked_since_ns === "string") {
+    const parsed = Number(raw.quality_checked_since_ns);
+    if (Number.isFinite(parsed)) {
+      checkedSinceNs = parsed;
+    }
+  }
+  const profile = typeof raw.quality_profile === "string" ? raw.quality_profile : "";
+  return {
+    quality_grade: grade,
+    quality_min_score: minScore,
+    quality_cloudflare_challenged: cfChallenged,
+    quality_checked_since_ns: checkedSinceNs,
+    quality_profile: profile,
+  };
+}
+
 function normalizePlatform(raw: ApiPlatform): Platform {
   return {
     ...raw,
+    ...normalizePlatformQualityFields(raw),
     reverse_proxy_miss_action: parseMissAction(raw.reverse_proxy_miss_action),
     regex_filters: Array.isArray(raw.regex_filters) ? raw.regex_filters : [],
     region_filters: Array.isArray(raw.region_filters) ? raw.region_filters : [],
