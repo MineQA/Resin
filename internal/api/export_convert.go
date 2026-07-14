@@ -5,9 +5,36 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"strconv"
 	"strings"
+	"time"
 )
+
+// ---------------------------------------------------------------------------
+// Internal structs for TLS and transport metadata
+// ---------------------------------------------------------------------------
+
+// tlsInfo holds extracted TLS fields from a sing-box outbound map.
+type tlsInfo struct {
+	Enabled           bool
+	SNI               string
+	SkipCertVerify    bool
+	ALPN              []string
+	ClientFingerprint string // tls.utls.fingerprint → Mihomo client-fingerprint
+	RealityPublicKey  string // tls.reality.public_key
+	RealityShortID    string // tls.reality.short_id
+}
+
+// transportInfo holds extracted transport fields from a sing-box outbound map.
+type transportInfo struct {
+	Network             string // ws, grpc, http, h2, quic, tcp, websocket
+	Path                string
+	Host                string            // primary host (Host header for WS, first host for HTTP/H2)
+	Hosts               []string          // all hosts (HTTP/H2 transport)
+	ServiceName         string            // gRPC service_name
+	Headers             map[string]string // WS headers
+	MaxEarlyData        int               // WS max_early_data (numeric)
+	EarlyDataHeaderName string            // WS early_data_header_name
+}
 
 // ---------------------------------------------------------------------------
 // Clash proxy conversion
@@ -82,6 +109,16 @@ func toFloat(v any) (float64, bool) {
 	return 0, false
 }
 
+// toNumberOrFloat returns n as int when mathematically integral, float64 otherwise.
+// This preserves canonical integer style for whole numbers while supporting
+// fractional values like 10.5.
+func toNumberOrFloat(n float64) any {
+	if n == float64(int64(n)) {
+		return int(n)
+	}
+	return n
+}
+
 func toString(v any) string {
 	if s, ok := v.(string); ok {
 		return s
@@ -105,78 +142,263 @@ func toBool(v any) bool {
 	return false
 }
 
-// extractTLS extracts common TLS fields from a sing-box outbound map.
-// Returns (tls bool, sni, skipCertVerify, alpn).
-func extractTLS(m map[string]any) (tls bool, sni string, skipCertVerify bool, alpn string) {
+// parseHostList converts a sing-box host value (string, []string, or []any) to []string.
+func parseHostList(v any) []string {
+	switch t := v.(type) {
+	case string:
+		if s := strings.TrimSpace(t); s != "" {
+			return []string{s}
+		}
+	case []string:
+		out := make([]string, 0, len(t))
+		for _, item := range t {
+			if s := strings.TrimSpace(item); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, item := range t {
+			if s := strings.TrimSpace(toString(item)); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+// applyClashTransport applies transport fields to a Clash proxy map for
+// VMess, Trojan, and VLESS.  It sets the "network" key and the appropriate
+// nested opts block (ws-opts, grpc-opts, http-opts, h2-opts).
+//
+// Normalization notes for transport.type:
+//   - "http" → network "http"  with http-opts  (HTTP/1.1 CONNECT)
+//   - "h2"   → network "h2"    with h2-opts    (HTTP/2)
+//
+// Direct raw sing-box data may contain "h2" and it is preserved here.
+// However, after Clash ingestion (internal/subscription/parser.go) both
+// Clash network=h2 and network=http are normalized to transport.type=http,
+// so subscription-derived canonical data always emits http/http-opts.
+func applyClashTransport(proxy map[string]any, ti transportInfo) {
+	if ti.Network == "" || ti.Network == "tcp" {
+		return
+	}
+	proxy["network"] = ti.Network
+
+	switch ti.Network {
+	case "ws", "websocket":
+		opts := make(map[string]any)
+		if ti.Path != "" {
+			opts["path"] = ti.Path
+		}
+		if len(ti.Headers) > 0 {
+			opts["headers"] = ti.Headers
+		}
+		if ti.MaxEarlyData > 0 {
+			opts["max-early-data"] = ti.MaxEarlyData
+		}
+		if ti.EarlyDataHeaderName != "" {
+			opts["early-data-header-name"] = ti.EarlyDataHeaderName
+		}
+		if len(opts) > 0 {
+			proxy["ws-opts"] = opts
+		}
+
+	case "grpc":
+		opts := make(map[string]any)
+		if ti.ServiceName != "" {
+			opts["grpc-service-name"] = ti.ServiceName
+		}
+		if len(opts) > 0 {
+			proxy["grpc-opts"] = opts
+		}
+
+	case "http":
+		opts := make(map[string]any)
+		if ti.Path != "" {
+			opts["path"] = ti.Path
+		}
+		if len(ti.Hosts) > 0 {
+			opts["host"] = ti.Hosts
+		} else if ti.Host != "" {
+			opts["host"] = ti.Host
+		}
+		if len(opts) > 0 {
+			proxy["http-opts"] = opts
+		}
+
+	case "h2":
+		// h2 branch: direct/raw sing-box outbound data may contain "h2".
+		// Clash subscription canonical (internal/subscription/parser.go)
+		// normalises both Clash network=h2 and network=http to
+		// transport.type=http, so canonical data always hits the "http"
+		// case above, never "h2".
+		opts := make(map[string]any)
+		if ti.Path != "" {
+			opts["path"] = ti.Path
+		}
+		if len(ti.Hosts) > 0 {
+			opts["host"] = ti.Hosts
+		} else if ti.Host != "" {
+			opts["host"] = ti.Host
+		}
+		if len(opts) > 0 {
+			proxy["h2-opts"] = opts
+		}
+	}
+}
+
+// applyClashTLS applies TLS fields from tlsInfo to a Clash proxy map.
+// sniKey controls the output key for the SNI value ("servername" for
+// VMess/VLESS, "sni" for Trojan).  emitDisabled controls whether tls: false
+// is written when TLS is not enabled (true for VMess to match its observable
+// behaviour; false for Trojan/VLESS which omit the key).
+func applyClashTLS(proxy map[string]any, ti tlsInfo, sniKey string, emitDisabled bool) {
+	if ti.Enabled {
+		proxy["tls"] = true
+		if ti.SNI != "" {
+			proxy[sniKey] = ti.SNI
+		}
+		if ti.SkipCertVerify {
+			proxy["skip-cert-verify"] = true
+		}
+		if len(ti.ALPN) > 0 {
+			proxy["alpn"] = ti.ALPN
+		}
+		if ti.ClientFingerprint != "" {
+			proxy["client-fingerprint"] = ti.ClientFingerprint
+		}
+		if ti.RealityPublicKey != "" || ti.RealityShortID != "" {
+			reality := make(map[string]any)
+			if ti.RealityPublicKey != "" {
+				reality["public-key"] = ti.RealityPublicKey
+			}
+			if ti.RealityShortID != "" {
+				reality["short-id"] = ti.RealityShortID
+			}
+			proxy["reality-opts"] = reality
+		}
+	} else if emitDisabled {
+		proxy["tls"] = false
+	}
+}
+
+// extractTLS extracts TLS fields from a sing-box outbound map into a tlsInfo struct.
+func extractTLS(m map[string]any) tlsInfo {
+	var info tlsInfo
 	tlsObj, ok := m["tls"].(map[string]any)
 	if !ok {
 		if enabled, exists := m["tls"]; exists {
 			if b, ok := enabled.(bool); ok && b {
-				return true, "", false, ""
+				info.Enabled = true
 			}
 		}
-		return
+		return info
 	}
-	tls = true
 	if v, ok := tlsObj["enabled"]; ok {
-		tls = toBool(v)
+		info.Enabled = toBool(v)
+	} else {
+		info.Enabled = true
 	}
-	sni, _ = tlsObj["server_name"].(string)
-	if sni == "" {
-		sni, _ = tlsObj["sni"].(string)
+	info.SNI, _ = tlsObj["server_name"].(string)
+	if info.SNI == "" {
+		info.SNI, _ = tlsObj["sni"].(string)
 	}
 	if v, ok := tlsObj["insecure"]; ok {
-		skipCertVerify = toBool(v)
+		info.SkipCertVerify = toBool(v)
 	}
 	if v, ok := tlsObj["alpn"]; ok {
 		switch arr := v.(type) {
-		case []any:
-			if len(arr) > 0 {
-				alpn, _ = arr[0].(string)
-			}
 		case string:
-			alpn = arr
+			if s := strings.TrimSpace(arr); s != "" {
+				info.ALPN = []string{s}
+			}
+		case []any:
+			info.ALPN = make([]string, 0, len(arr))
+			for _, item := range arr {
+				if s, ok := item.(string); ok {
+					info.ALPN = append(info.ALPN, s)
+				}
+			}
+		case []string:
+			info.ALPN = arr
 		}
 	}
-	return
+	// uTLS client fingerprint
+	if utls, ok := tlsObj["utls"].(map[string]any); ok {
+		if fp, _ := utls["fingerprint"].(string); fp != "" {
+			info.ClientFingerprint = fp
+		}
+	}
+	// Reality options
+	if reality, ok := tlsObj["reality"].(map[string]any); ok {
+		if pk, _ := reality["public_key"].(string); pk != "" {
+			info.RealityPublicKey = pk
+		}
+		if sid, _ := reality["short_id"].(string); sid != "" {
+			info.RealityShortID = sid
+		}
+	}
+	return info
 }
 
-// extractTransport extracts transport info from sing-box outbound.
-// Returns (network, path, host, serviceName, headers, earlyData).
-func extractTransport(m map[string]any) (network, path, host, serviceName string, headers map[string]string, earlyData bool) {
+// extractTransport extracts transport fields from a sing-box outbound map into a transportInfo struct.
+func extractTransport(m map[string]any) transportInfo {
+	var info transportInfo
 	t, ok := m["transport"].(map[string]any)
 	if !ok {
-		return
+		return info
 	}
-	network, _ = t["type"].(string)
-	switch network {
+	info.Network, _ = t["type"].(string)
+	switch info.Network {
 	case "ws", "websocket":
 		if wp, ok := t["path"].(string); ok {
-			path = wp
+			info.Path = wp
 		}
 		if h, ok := t["headers"].(map[string]any); ok {
-			headers = make(map[string]string, len(h))
+			info.Headers = make(map[string]string, len(h))
 			for k, v := range h {
-				headers[k] = toString(v)
+				info.Headers[k] = toString(v)
 			}
 		}
-		host = headers["Host"]
-		if e, ok := t["max_early_data"]; ok {
-			earlyData = toBool(e)
+		info.Host = info.Headers["Host"]
+		// max_early_data is numeric in sing-box
+		if ed, ok := t["max_early_data"]; ok {
+			switch n := ed.(type) {
+			case float64:
+				info.MaxEarlyData = int(n)
+			case int:
+				info.MaxEarlyData = n
+			case int64:
+				info.MaxEarlyData = int(n)
+			case json.Number:
+				if i, err := n.Int64(); err == nil {
+					info.MaxEarlyData = int(i)
+				}
+			}
+		}
+		if edn, ok := t["early_data_header_name"].(string); ok {
+			info.EarlyDataHeaderName = edn
 		}
 	case "grpc":
-		serviceName, _ = t["service_name"].(string)
+		info.ServiceName, _ = t["service_name"].(string)
 	case "http", "h2":
 		if p, ok := t["path"].(string); ok {
-			path = p
+			info.Path = p
 		}
-		if h, ok := t["host"].(string); ok {
-			host = h
+		// host can be string, []string, or []any in the canonical store
+		if h, ok := t["host"]; ok {
+			info.Hosts = parseHostList(h)
+			if len(info.Hosts) > 0 {
+				info.Host = info.Hosts[0]
+			}
 		}
 	case "quic":
 		// nothing extra needed
 	}
-	return
+	return info
 }
 
 func convertShadowsocks(tag string, m map[string]any, server string, port int) map[string]any {
@@ -185,7 +407,7 @@ func convertShadowsocks(tag string, m map[string]any, server string, port int) m
 	if method == "" || password == "" {
 		return nil
 	}
-	return map[string]any{
+	proxy := map[string]any{
 		"name":     tag,
 		"type":     "ss",
 		"server":   server,
@@ -194,6 +416,225 @@ func convertShadowsocks(tag string, m map[string]any, server string, port int) m
 		"password": password,
 		"udp":      true,
 	}
+
+	plugin, _ := m["plugin"].(string)
+	pluginOpts, _ := m["plugin_opts"].(string)
+	if plugin == "" {
+		return proxy
+	}
+
+	// Map canonical plugin name to Mihomo name
+	switch strings.ToLower(strings.TrimSpace(plugin)) {
+	case "obfs-local", "simple-obfs":
+		proxy["plugin"] = "obfs"
+	case "v2ray-plugin":
+		proxy["plugin"] = "v2ray-plugin"
+	default:
+		proxy["plugin"] = plugin
+	}
+
+	if pluginOpts == "" {
+		return proxy
+	}
+
+	parsed := parsePluginOpts(pluginOpts)
+	if len(parsed) == 0 {
+		return proxy
+	}
+
+	// Convert canonical plugin_opts keys to Mihomo nested plugin-opts
+	switch strings.ToLower(strings.TrimSpace(plugin)) {
+	case "obfs-local", "simple-obfs":
+		proxy["plugin-opts"] = convertSimpleObfsOpts(parsed)
+	case "v2ray-plugin":
+		proxy["plugin-opts"] = convertV2RayPluginOpts(parsed)
+	default:
+		proxy["plugin-opts"] = parsed
+	}
+	return proxy
+}
+
+// parsePluginOpts parses a semicolon-delimited canonical plugin_opts string
+// with backslash-escaped \;, \=, and \\ into a map. Bare flags (no =value) become
+// bool true. Empty keys or fragments are silently skipped. Never panics.
+func parsePluginOpts(raw string) map[string]any {
+	if raw == "" {
+		return nil
+	}
+	parts := splitUnescapedExport(raw, ';')
+	opts := make(map[string]any, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		keyRaw, valueRaw, hasValue := cutUnescapedExport(part, '=')
+		key := strings.TrimSpace(keyRaw)
+		if key == "" {
+			continue
+		}
+		if hasValue {
+			value := strings.TrimSpace(valueRaw)
+			opts[key] = unescapeValue(value)
+		} else {
+			opts[key] = true // bare flag
+		}
+	}
+	if len(opts) == 0 {
+		return nil
+	}
+	return opts
+}
+
+// splitUnescapedExport splits on delimiter but respects \-escaped delimiters.
+func splitUnescapedExport(input string, delimiter byte) []string {
+	parts := make([]string, 0, 1)
+	start := 0
+	escaped := false
+	for i := 0; i < len(input); i++ {
+		switch {
+		case escaped:
+			escaped = false
+		case input[i] == '\\':
+			escaped = true
+		case input[i] == delimiter:
+			parts = append(parts, input[start:i])
+			start = i + 1
+		}
+	}
+	return append(parts, input[start:])
+}
+
+// cutUnescapedExport splits on the first unescaped delimiter, returning (before, after, true)
+// or (input, "", false) when no delimiter is found.
+func cutUnescapedExport(input string, delimiter byte) (string, string, bool) {
+	escaped := false
+	for i := 0; i < len(input); i++ {
+		switch {
+		case escaped:
+			escaped = false
+		case input[i] == '\\':
+			escaped = true
+		case input[i] == delimiter:
+			return input[:i], input[i+1:], true
+		}
+	}
+	return input, "", false
+}
+
+// unescapeValue decodes documented backslash-escaped sequences (\;, \=, \\) in a
+// value string.  For a backslash before any other character, both the backslash
+// and the character are preserved.  A trailing backslash is preserved.
+func unescapeValue(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	escaped := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if escaped {
+			switch c {
+			case ';', '=', '\\':
+				b.WriteByte(c)
+			default:
+				b.WriteByte('\\')
+				b.WriteByte(c)
+			}
+			escaped = false
+			continue
+		}
+		if c == '\\' {
+			escaped = true
+			continue
+		}
+		b.WriteByte(c)
+	}
+	if escaped {
+		b.WriteByte('\\')
+	}
+	return b.String()
+}
+
+// convertSimpleObfsOpts maps canonical obfs-local options to Mihomo obfs plugin-opts.
+//
+//	obfs       → mode
+//	obfs-host  → host
+//	host       → host
+//	unknown    → preserved as string
+func convertSimpleObfsOpts(opts map[string]any) map[string]any {
+	mapped := make(map[string]any, len(opts))
+	for k, v := range opts {
+		switch strings.ToLower(k) {
+		case "obfs":
+			mapped["mode"] = v
+		case "obfs-host", "obfs_host", "host":
+			mapped["host"] = v
+		default:
+			mapped[k] = v
+		}
+	}
+	if len(mapped) == 0 {
+		return nil
+	}
+	return mapped
+}
+
+// v2rayBoolFromString converts a v2ray-plugin boolean option string to its
+// typed value.  Recognized true/false strings (case-insensitive, trimmed) and
+// the aliases "1"/"0" produce bool values.  Unrecognized strings are returned
+// as-is so they are preserved rather than silently coerced.
+func v2rayBoolFromString(s string) any {
+	s = strings.TrimSpace(s)
+	if strings.EqualFold(s, "true") || s == "1" {
+		return true
+	}
+	if strings.EqualFold(s, "false") || s == "0" {
+		return false
+	}
+	return s
+}
+
+// convertV2RayPluginOpts maps canonical v2ray-plugin options to Mihomo plugin-opts.
+// Known booleans (tls, mux, skip-cert-verify, v2ray-http-upgrade) are typed as bool.
+// Canonical mux=4 is reversed to mux: true.
+// Known string keys (mode, host, path) are preserved as-is.
+// Unknown keys are passed through as their parsed type.
+func convertV2RayPluginOpts(opts map[string]any) map[string]any {
+	knownBools := map[string]bool{
+		"tls": true, "mux": true, "skip-cert-verify": true, "v2ray-http-upgrade": true,
+	}
+	mapped := make(map[string]any, len(opts))
+	for k, v := range opts {
+		kl := strings.ToLower(k)
+		if knownBools[kl] {
+			if b, ok := v.(bool); ok {
+				mapped[kl] = b
+				continue
+			}
+			if s, ok := v.(string); ok {
+				if kl == "mux" && s == "4" {
+					// Reverse parser normalization: mux=true → mux=4
+					mapped["mux"] = true
+					continue
+				}
+				mapped[kl] = v2rayBoolFromString(s)
+				continue
+			}
+			// Non-string, non-bool → preserve as-is
+			mapped[kl] = v
+			continue
+		}
+		// Known string keys
+		switch kl {
+		case "mode", "host", "path":
+			mapped[kl] = v
+		default:
+			mapped[k] = v
+		}
+	}
+	if len(mapped) == 0 {
+		return nil
+	}
+	return mapped
 }
 
 func convertVMess(tag string, m map[string]any, server string, port int) map[string]any {
@@ -214,46 +655,24 @@ func convertVMess(tag string, m map[string]any, server string, port int) map[str
 	if security == "" {
 		security = "auto"
 	}
-	tls, sni, skipCert, _ := extractTLS(m)
-	network, path, host, serviceName, _, _ := extractTransport(m)
+	ti := extractTLS(m)
+	tr := extractTransport(m)
 
 	proxy := map[string]any{
-		"name":     tag,
-		"type":     "vmess",
-		"server":   server,
-		"port":     port,
-		"uuid":     uuid,
-		"alterId":  alterID,
-		"cipher":   security,
-		"tls":      tls,
-		"udp":      true,
-		"network":  "tcp",
+		"name":    tag,
+		"type":    "vmess",
+		"server":  server,
+		"port":    port,
+		"uuid":    uuid,
+		"alterId": alterID,
+		"cipher":  security,
+		"udp":     true,
+		"network": "tcp",
 	}
-	if network != "" {
-		proxy["network"] = network
-	}
-	if tls && sni != "" {
-		proxy["servername"] = sni
-	}
-	if tls && skipCert {
-		proxy["skip-cert-verify"] = true
-	}
-	if path != "" {
-		if network == "ws" || network == "websocket" || network == "h2" || network == "http" {
-			proxy["ws-path"] = path
-		}
-	}
-	if host != "" {
-		proxy["ws-headers"] = map[string]any{"Host": host}
-	}
-
-	// grpc service name
-	if network == "grpc" {
-		proxy["grpc-opts"] = map[string]any{
-			"grpc-service-name": serviceName,
-		}
-	}
-
+	// TLS
+	applyClashTLS(proxy, ti, "servername", true)
+	// Transport (shared function for VMess/Trojan/VLESS)
+	applyClashTransport(proxy, tr)
 	return proxy
 }
 
@@ -262,8 +681,8 @@ func convertTrojan(tag string, m map[string]any, server string, port int) map[st
 	if password == "" {
 		return nil
 	}
-	tls, sni, skipCert, _ := extractTLS(m)
-	network, path, host, _, _, _ := extractTransport(m)
+	ti := extractTLS(m)
+	tr := extractTransport(m)
 
 	proxy := map[string]any{
 		"name":     tag,
@@ -273,34 +692,10 @@ func convertTrojan(tag string, m map[string]any, server string, port int) map[st
 		"password": password,
 		"udp":      true,
 	}
-	if tls {
-		proxy["tls"] = true
-	}
-	if sni != "" {
-		proxy["sni"] = sni
-	}
-	if skipCert {
-		proxy["skip-cert-verify"] = true
-	}
-	if network == "ws" || network == "websocket" {
-		proxy["network"] = "ws"
-		if path != "" {
-			proxy["ws-path"] = path
-		}
-		if host != "" {
-			proxy["ws-headers"] = map[string]any{"Host": host}
-		}
-	} else if network == "grpc" {
-		// In Clash, grpc network support varies; omit serviceName for now.
-	}
-	if network == "h2" || network == "http" {
-		if path != "" {
-			proxy["ws-path"] = path
-		}
-		if host != "" {
-			proxy["ws-headers"] = map[string]any{"Host": host}
-		}
-	}
+	// TLS
+	applyClashTLS(proxy, ti, "sni", false)
+	// Transport (shared function for VMess/Trojan/VLESS)
+	applyClashTransport(proxy, tr)
 	return proxy
 }
 
@@ -310,8 +705,8 @@ func convertVLess(tag string, m map[string]any, server string, port int) map[str
 		return nil
 	}
 	flow, _ := m["flow"].(string)
-	tls, sni, skipCert, _ := extractTLS(m)
-	network, path, host, serviceName, _, _ := extractTransport(m)
+	ti := extractTLS(m)
+	tr := extractTransport(m)
 
 	proxy := map[string]any{
 		"name":   tag,
@@ -324,31 +719,10 @@ func convertVLess(tag string, m map[string]any, server string, port int) map[str
 	if flow != "" {
 		proxy["flow"] = flow
 	}
-	if tls {
-		proxy["tls"] = true
-	}
-	if sni != "" {
-		proxy["servername"] = sni
-	}
-	if skipCert {
-		proxy["skip-cert-verify"] = true
-	}
-	if network != "" {
-		proxy["network"] = network
-	}
-	if path != "" {
-		if network == "ws" || network == "websocket" || network == "h2" || network == "http" {
-			proxy["ws-path"] = path
-		}
-	}
-	if host != "" {
-		proxy["ws-headers"] = map[string]any{"Host": host}
-	}
-	if network == "grpc" {
-		proxy["grpc-opts"] = map[string]any{
-			"grpc-service-name": serviceName,
-		}
-	}
+	// TLS
+	applyClashTLS(proxy, ti, "servername", false)
+	// Transport (shared function for VMess/Trojan/VLESS)
+	applyClashTransport(proxy, tr)
 	return proxy
 }
 
@@ -357,48 +731,151 @@ func convertHysteria2(tag string, m map[string]any, server string, port int) map
 	if password == "" {
 		return nil
 	}
-	_, sni, skipCert, alpn := extractTLS(m)
-	// For hysteria2, ports can be "443" or "443-500".
-	portStr := strconv.Itoa(port)
-	if v, ok := m["ports"].(string); ok && v != "" {
-		portStr = v
-	}
+	ti := extractTLS(m)
+
 	proxy := map[string]any{
 		"name":     tag,
 		"type":     "hysteria2",
 		"server":   server,
-		"port":     portStr,
+		"port":     port, // integer server_port; NOT replaced by ports
 		"password": password,
 		"udp":      true,
 	}
-	if sni != "" {
-		proxy["sni"] = sni
+	// TLS
+	if ti.Enabled {
+		proxy["tls"] = true
 	}
-	if skipCert {
+	if ti.SNI != "" {
+		proxy["sni"] = ti.SNI
+	}
+	if ti.SkipCertVerify {
 		proxy["skip-cert-verify"] = true
 	}
-	if alpn != "" {
-		proxy["alpn"] = []string{alpn}
+	if len(ti.ALPN) > 0 {
+		proxy["alpn"] = ti.ALPN
 	}
-	// obfs fields
+	if ti.ClientFingerprint != "" {
+		proxy["client-fingerprint"] = ti.ClientFingerprint
+	}
+	// server_ports → ports (scalar string, not port replacement)
+	if portsStr := convertServerPorts(m); portsStr != "" {
+		proxy["ports"] = portsStr
+	}
+	// hop_interval → hop-interval (seconds)
+	if hopSec, ok := convertHopInterval(m); ok {
+		proxy["hop-interval"] = hopSec
+	}
+	// up_mbps → up, down_mbps → down (Mihomo unitless defaults Mbps)
+	if up, ok := m["up_mbps"]; ok {
+		if n, ok := toFloat(up); ok && n > 0 {
+			proxy["up"] = toNumberOrFloat(n)
+		}
+	}
+	if down, ok := m["down_mbps"]; ok {
+		if n, ok := toFloat(down); ok && n > 0 {
+			proxy["down"] = toNumberOrFloat(n)
+		}
+	}
+	// obfs: nested canonical takes precedence; then legacy scalar
+	convertHY2Obfs(m, proxy)
+	return proxy
+}
+
+// convertServerPorts reads canonical server_ports ([]any, []string, or string)
+// and returns a Mihomo ports scalar: ":" replaced with "-", entries joined with ",".
+func convertServerPorts(m map[string]any) string {
+	v, ok := m["server_ports"]
+	if !ok || v == nil {
+		return ""
+	}
+	var entries []string
+	switch sv := v.(type) {
+	case []any:
+		for _, item := range sv {
+			s := strings.TrimSpace(toString(item))
+			if s == "" {
+				continue
+			}
+			entries = append(entries, strings.ReplaceAll(s, ":", "-"))
+		}
+	case []string:
+		for _, s := range sv {
+			s = strings.TrimSpace(s)
+			if s == "" {
+				continue
+			}
+			entries = append(entries, strings.ReplaceAll(s, ":", "-"))
+		}
+	case string:
+		s := strings.TrimSpace(sv)
+		if s != "" {
+			entries = append(entries, strings.ReplaceAll(s, ":", "-"))
+		}
+	}
+	if len(entries) == 0 {
+		return ""
+	}
+	return strings.Join(entries, ",")
+}
+
+// convertHopInterval reads canonical hop_interval (Go duration string like "12s")
+// and returns the value in seconds. Exact whole seconds return int; fractional
+// seconds return float64. Invalid or nonpositive durations are omitted.
+func convertHopInterval(m map[string]any) (any, bool) {
+	v, ok := m["hop_interval"]
+	if !ok || v == nil {
+		return nil, false
+	}
+	s := toString(v)
+	if s == "" {
+		return nil, false
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return nil, false
+	}
+	secs := d.Seconds()
+	if secs == float64(int64(secs)) {
+		return int(secs), true
+	}
+	return secs, true
+}
+
+// convertHY2Obfs extracts obfs fields from the canonical map and sets them on proxy.
+// Canonical nested obfs ({type, password}) takes precedence over legacy scalar keys.
+func convertHY2Obfs(m map[string]any, proxy map[string]any) {
+	if objs, ok := m["obfs"].(map[string]any); ok {
+		if typ, _ := objs["type"].(string); typ != "" {
+			proxy["obfs"] = typ
+		}
+		if pwd, _ := objs["password"].(string); pwd != "" {
+			proxy["obfs-password"] = pwd
+		}
+		return
+	}
+	// Legacy scalar compatibility
 	if obfs, ok := m["obfs"].(string); ok && obfs != "" {
 		proxy["obfs"] = obfs
 	}
 	if obfsPass, ok := m["obfs-password"].(string); ok && obfsPass != "" {
 		proxy["obfs-password"] = obfsPass
 	}
-	// up / down
-	if up, ok := m["up"].(float64); ok && up > 0 {
-		proxy["up"] = strconv.FormatFloat(up, 'f', -1, 64)
+}
+
+// extractHY2Obfs returns obfs type and password from canonical or legacy scalar storage.
+func extractHY2Obfs(m map[string]any) (obfs, obfsPass string) {
+	if objs, ok := m["obfs"].(map[string]any); ok {
+		typ, _ := objs["type"].(string)
+		pwd, _ := objs["password"].(string)
+		return typ, pwd
 	}
-	if down, ok := m["down"].(float64); ok && down > 0 {
-		proxy["down"] = strconv.FormatFloat(down, 'f', -1, 64)
-	}
-	return proxy
+	obfs, _ = m["obfs"].(string)
+	obfsPass, _ = m["obfs-password"].(string)
+	return
 }
 
 func convertHTTP(tag string, m map[string]any, server string, port int) map[string]any {
-	tls, sni, skipCert, _ := extractTLS(m)
+	ti := extractTLS(m)
 	proxy := map[string]any{
 		"name":   tag,
 		"type":   "http",
@@ -412,10 +889,10 @@ func convertHTTP(tag string, m map[string]any, server string, port int) map[stri
 	if pass, ok := m["password"].(string); ok && pass != "" {
 		proxy["password"] = pass
 	}
-	if tls {
+	if ti.Enabled {
 		proxy["tls"] = true
-		proxy["sni"] = sni
-		if skipCert {
+		proxy["sni"] = ti.SNI
+		if ti.SkipCertVerify {
 			proxy["skip-cert-verify"] = true
 		}
 	}
@@ -439,11 +916,11 @@ func convertSocks(tag string, m map[string]any, server string, port int) map[str
 	if net, ok := m["network"].(string); ok && net == "tcp" {
 		proxy["udp"] = false
 	}
-	tls, sni, skipCert, _ := extractTLS(m)
-	if tls {
+	ti := extractTLS(m)
+	if ti.Enabled {
 		proxy["tls"] = true
-		proxy["sni"] = sni
-		if skipCert {
+		proxy["sni"] = ti.SNI
+		if ti.SkipCertVerify {
 			proxy["skip-cert-verify"] = true
 		}
 	}
@@ -528,8 +1005,8 @@ func uriVMess(tag string, m map[string]any, server string, port int) string {
 	if security == "" {
 		security = "auto"
 	}
-	tls, sni, skipCert, _ := extractTLS(m)
-	network, path, host, serviceName, _, _ := extractTransport(m)
+	ti := extractTLS(m)
+	tr := extractTransport(m)
 
 	v := map[string]any{
 		"v":    "2",
@@ -540,17 +1017,17 @@ func uriVMess(tag string, m map[string]any, server string, port int) string {
 		"aid":  alterID,
 		"scy":  security,
 	}
-	if tls {
+	if ti.Enabled {
 		v["tls"] = "tls"
 	}
-	if sni != "" {
-		v["sni"] = sni
+	if ti.SNI != "" {
+		v["sni"] = ti.SNI
 	}
-	if skipCert {
+	if ti.SkipCertVerify {
 		v["allowInsecure"] = 1
 	}
 
-	net := network
+	net := tr.Network
 	if net == "" {
 		net = "tcp"
 	}
@@ -559,24 +1036,24 @@ func uriVMess(tag string, m map[string]any, server string, port int) string {
 	switch net {
 	case "ws", "websocket":
 		v["type"] = "none"
-		if path != "" {
-			v["path"] = path
+		if tr.Path != "" {
+			v["path"] = tr.Path
 		}
-		if host != "" {
-			v["host"] = host
+		if tr.Host != "" {
+			v["host"] = tr.Host
 		}
 	case "grpc":
-		if serviceName != "" {
-			v["path"] = serviceName
+		if tr.ServiceName != "" {
+			v["path"] = tr.ServiceName
 		}
 		v["type"] = "grpc"
 	case "h2", "http":
 		v["type"] = "none"
-		if path != "" {
-			v["path"] = path
+		if tr.Path != "" {
+			v["path"] = tr.Path
 		}
-		if host != "" {
-			v["host"] = host
+		if tr.Host != "" {
+			v["host"] = tr.Host
 		}
 	case "tcp":
 		v["type"] = "none"
@@ -593,39 +1070,39 @@ func uriTrojan(tag string, m map[string]any, server string, port int) string {
 	if password == "" {
 		return ""
 	}
-	tls, sni, skipCert, _ := extractTLS(m)
+	ti := extractTLS(m)
 
 	var params []string
-	if tls {
+	if ti.Enabled {
 		params = append(params, "security=tls")
 	}
-	if sni != "" {
-		params = append(params, "sni="+url.QueryEscape(sni))
+	if ti.SNI != "" {
+		params = append(params, "sni="+url.QueryEscape(ti.SNI))
 	}
-	if skipCert {
+	if ti.SkipCertVerify {
 		params = append(params, "allowInsecure=1")
 	}
 	params = append(params, "type=tcp")
 
 	// transport
-	network, path, host, _, _, _ := extractTransport(m)
-	if network == "ws" || network == "websocket" {
+	tr := extractTransport(m)
+	if tr.Network == "ws" || tr.Network == "websocket" {
 		params = append(params, "type=ws")
-		if path != "" {
-			params = append(params, "path="+url.QueryEscape(path))
+		if tr.Path != "" {
+			params = append(params, "path="+url.QueryEscape(tr.Path))
 		}
-		if host != "" {
-			params = append(params, "host="+url.QueryEscape(host))
+		if tr.Host != "" {
+			params = append(params, "host="+url.QueryEscape(tr.Host))
 		}
-	} else if network == "grpc" {
+	} else if tr.Network == "grpc" {
 		params = append(params, "type=grpc")
-	} else if network == "h2" || network == "http" {
+	} else if tr.Network == "h2" || tr.Network == "http" {
 		params = append(params, "type=h2")
-		if path != "" {
-			params = append(params, "path="+url.QueryEscape(path))
+		if tr.Path != "" {
+			params = append(params, "path="+url.QueryEscape(tr.Path))
 		}
-		if host != "" {
-			params = append(params, "host="+url.QueryEscape(host))
+		if tr.Host != "" {
+			params = append(params, "host="+url.QueryEscape(tr.Host))
 		}
 	}
 
@@ -641,25 +1118,25 @@ func uriVLess(tag string, m map[string]any, server string, port int) string {
 	if uuid == "" {
 		return ""
 	}
-	tls, sni, skipCert, _ := extractTLS(m)
+	ti := extractTLS(m)
 	flow, _ := m["flow"].(string)
-	network, path, host, serviceName, _, _ := extractTransport(m)
+	tr := extractTransport(m)
 
 	var params []string
-	if tls {
+	if ti.Enabled {
 		params = append(params, "security=tls")
 	}
-	if sni != "" {
-		params = append(params, "sni="+url.QueryEscape(sni))
+	if ti.SNI != "" {
+		params = append(params, "sni="+url.QueryEscape(ti.SNI))
 	}
-	if skipCert {
+	if ti.SkipCertVerify {
 		params = append(params, "allowInsecure=1")
 	}
 	if flow != "" {
 		params = append(params, "flow="+url.QueryEscape(flow))
 	}
 
-	net := network
+	net := tr.Network
 	if net == "" {
 		net = "tcp"
 	}
@@ -667,22 +1144,22 @@ func uriVLess(tag string, m map[string]any, server string, port int) string {
 
 	switch net {
 	case "ws", "websocket":
-		if path != "" {
-			params = append(params, "path="+url.QueryEscape(path))
+		if tr.Path != "" {
+			params = append(params, "path="+url.QueryEscape(tr.Path))
 		}
-		if host != "" {
-			params = append(params, "host="+url.QueryEscape(host))
+		if tr.Host != "" {
+			params = append(params, "host="+url.QueryEscape(tr.Host))
 		}
 	case "grpc":
-		if serviceName != "" {
-			params = append(params, "serviceName="+url.QueryEscape(serviceName))
+		if tr.ServiceName != "" {
+			params = append(params, "serviceName="+url.QueryEscape(tr.ServiceName))
 		}
 	case "h2", "http":
-		if path != "" {
-			params = append(params, "path="+url.QueryEscape(path))
+		if tr.Path != "" {
+			params = append(params, "path="+url.QueryEscape(tr.Path))
 		}
-		if host != "" {
-			params = append(params, "host="+url.QueryEscape(host))
+		if tr.Host != "" {
+			params = append(params, "host="+url.QueryEscape(tr.Host))
 		}
 	}
 
@@ -698,15 +1175,14 @@ func uriHysteria2(tag string, m map[string]any, server string, port int) string 
 	if password == "" {
 		return ""
 	}
-	_, sni, skipCert, _ := extractTLS(m)
-	obfs, _ := m["obfs"].(string)
-	obfsPass, _ := m["obfs-password"].(string)
+	ti := extractTLS(m)
+	obfs, obfsPass := extractHY2Obfs(m)
 
 	var params []string
-	if sni != "" {
-		params = append(params, "sni="+url.QueryEscape(sni))
+	if ti.SNI != "" {
+		params = append(params, "sni="+url.QueryEscape(ti.SNI))
 	}
-	if skipCert {
+	if ti.SkipCertVerify {
 		params = append(params, "insecure=1")
 	}
 	if obfs != "" {

@@ -3701,6 +3701,216 @@ func TestParseGeneralSubscriptionDetailed_FingerprintBrowserVsMalformedMessages(
 // End fingerprint policy tests
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Clash WS max-early-data / early-data-header-name compliance (Phase 3)
+// ---------------------------------------------------------------------------
+
+func TestParseGeneralSubscription_ClashWSMaxEarlyDataAndHeaderName(t *testing.T) {
+	t.Run("direct_fields_no_query", func(t *testing.T) {
+		input := `{"proxies":[{
+			"name":"ws-direct","type":"vmess","server":"example.com","port":443,
+			"uuid":"a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+			"network":"ws",
+			"ws-opts":{"path":"/api","max-early-data":2560,"early-data-header-name":"X-Custom"}
+		}]}`
+		nodes, err := ParseGeneralSubscription([]byte(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(nodes) != 1 {
+			t.Fatalf("expected 1 node, got %d", len(nodes))
+		}
+		obj := parseNodeRaw(t, nodes[0].RawOptions)
+		transport := mustMapField(t, obj, "transport")
+		if got := transport["type"]; got != "ws" {
+			t.Fatalf("transport.type: got %v", got)
+		}
+		if got := transport["path"]; got != "/api" {
+			t.Fatalf("transport.path: got %v, want /api", got)
+		}
+		if got := transport["max_early_data"]; got != float64(2560) {
+			t.Fatalf("transport.max_early_data: got %v (%T), want float64(2560)", got, got)
+		}
+		if got := transport["early_data_header_name"]; got != "X-Custom" {
+			t.Fatalf("transport.early_data_header_name: got %v, want X-Custom", got)
+		}
+	})
+
+	t.Run("direct_override_query", func(t *testing.T) {
+		// Path query ?ed=1280&eh=Old is overridden by direct ws-opts values.
+		input := `{"proxies":[{
+			"name":"ws-override","type":"vmess","server":"example.com","port":443,
+			"uuid":"a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+			"network":"ws",
+			"ws-opts":{"path":"/custom?ed=1280&eh=Old","max-early-data":4096,"early-data-header-name":"New"}
+		}]}`
+		nodes, err := ParseGeneralSubscription([]byte(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(nodes) != 1 {
+			t.Fatalf("expected 1 node, got %d", len(nodes))
+		}
+		obj := parseNodeRaw(t, nodes[0].RawOptions)
+		transport := mustMapField(t, obj, "transport")
+		if got := transport["path"]; got != "/custom" {
+			t.Fatalf("transport.path: got %v, want /custom", got)
+		}
+		if got := transport["max_early_data"]; got != float64(4096) {
+			t.Fatalf("transport.max_early_data: got %v, want float64(4096)", got)
+		}
+		if got := transport["early_data_header_name"]; got != "New" {
+			t.Fatalf("transport.early_data_header_name: got %v, want New", got)
+		}
+	})
+
+	t.Run("invalid_does_not_erase_query", func(t *testing.T) {
+		// Path query ?ed=2560 produces max_early_data; direct max-early-data=0
+		// is invalid (zero) so the query-derived value survives.
+		input := `{"proxies":[{
+			"name":"ws-invalid","type":"vmess","server":"example.com","port":443,
+			"uuid":"a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+			"network":"ws",
+			"ws-opts":{"path":"/ws?ed=2560","max-early-data":0}
+		}]}`
+		nodes, err := ParseGeneralSubscription([]byte(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(nodes) != 1 {
+			t.Fatalf("expected 1 node, got %d", len(nodes))
+		}
+		obj := parseNodeRaw(t, nodes[0].RawOptions)
+		transport := mustMapField(t, obj, "transport")
+		if got := transport["path"]; got != "/ws" {
+			t.Fatalf("transport.path: got %v, want /ws", got)
+		}
+		if got := transport["max_early_data"]; got != float64(2560) {
+			t.Fatalf("transport.max_early_data: got %v, want float64(2560)", got)
+		}
+		if got := transport["early_data_header_name"]; got != "Sec-WebSocket-Protocol" {
+			t.Fatalf("transport.early_data_header_name: got %v, want Sec-WebSocket-Protocol", got)
+		}
+	})
+
+	t.Run("fractional_rejected", func(t *testing.T) {
+		input := `{"proxies":[{
+			"name":"ws-frac","type":"vmess","server":"example.com","port":443,
+			"uuid":"a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+			"network":"ws",
+			"ws-opts":{"path":"/ws","max-early-data":3.14}
+		}]}`
+		nodes, err := ParseGeneralSubscription([]byte(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(nodes) != 1 {
+			t.Fatalf("expected 1 node, got %d", len(nodes))
+		}
+		obj := parseNodeRaw(t, nodes[0].RawOptions)
+		transport := mustMapField(t, obj, "transport")
+		if _, ok := transport["max_early_data"]; ok {
+			t.Fatalf("transport.max_early_data should be absent for fractional, got %v", transport["max_early_data"])
+		}
+	})
+
+	t.Run("overflow_rejected", func(t *testing.T) {
+		input := `{"proxies":[{
+			"name":"ws-over","type":"vmess","server":"example.com","port":443,
+			"uuid":"a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+			"network":"ws",
+			"ws-opts":{"path":"/ws","max-early-data":999999999999}
+		}]}`
+		nodes, err := ParseGeneralSubscription([]byte(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(nodes) != 1 {
+			t.Fatalf("expected 1 node, got %d", len(nodes))
+		}
+		obj := parseNodeRaw(t, nodes[0].RawOptions)
+		transport := mustMapField(t, obj, "transport")
+		if _, ok := transport["max_early_data"]; ok {
+			t.Fatalf("transport.max_early_data should be absent for overflow, got %v", transport["max_early_data"])
+		}
+	})
+
+	t.Run("max_uint32_accepted", func(t *testing.T) {
+		input := `{"proxies":[{
+			"name":"ws-max32","type":"vmess","server":"example.com","port":443,
+			"uuid":"a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+			"network":"ws",
+			"ws-opts":{"path":"/ws","max-early-data":4294967295}
+		}]}`
+		nodes, err := ParseGeneralSubscription([]byte(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(nodes) != 1 {
+			t.Fatalf("expected 1 node, got %d", len(nodes))
+		}
+		obj := parseNodeRaw(t, nodes[0].RawOptions)
+		transport := mustMapField(t, obj, "transport")
+		if got := transport["max_early_data"]; got != float64(4294967295) {
+			t.Fatalf("transport.max_early_data: got %v, want float64(4294967295)", got)
+		}
+	})
+
+	t.Run("underscore_alias_accepted", func(t *testing.T) {
+		input := `{"proxies":[{
+			"name":"ws-ualias","type":"vmess","server":"example.com","port":443,
+			"uuid":"a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+			"network":"ws",
+			"ws-opts":{"path":"/ws","max_early_data":1024,"early_data_header_name":"EH-Underscore"}
+		}]}`
+		nodes, err := ParseGeneralSubscription([]byte(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(nodes) != 1 {
+			t.Fatalf("expected 1 node, got %d", len(nodes))
+		}
+		obj := parseNodeRaw(t, nodes[0].RawOptions)
+		transport := mustMapField(t, obj, "transport")
+		if got := transport["max_early_data"]; got != float64(1024) {
+			t.Fatalf("transport.max_early_data: got %v, want float64(1024)", got)
+		}
+		if got := transport["early_data_header_name"]; got != "EH-Underscore" {
+			t.Fatalf("transport.early_data_header_name: got %v, want EH-Underscore", got)
+		}
+	})
+
+	t.Run("hyphenated_takes_precedence_over_underscore", func(t *testing.T) {
+		// When both hyphenated and underscore keys exist, hyphenated wins.
+		input := `{"proxies":[{
+			"name":"ws-prec","type":"vmess","server":"example.com","port":443,
+			"uuid":"a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+			"network":"ws",
+			"ws-opts":{"path":"/ws","max-early-data":2048,"max_early_data":1024,
+			           "early-data-header-name":"Hyphen","early_data_header_name":"Under"}
+		}]}`
+		nodes, err := ParseGeneralSubscription([]byte(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(nodes) != 1 {
+			t.Fatalf("expected 1 node, got %d", len(nodes))
+		}
+		obj := parseNodeRaw(t, nodes[0].RawOptions)
+		transport := mustMapField(t, obj, "transport")
+		if got := transport["max_early_data"]; got != float64(2048) {
+			t.Fatalf("transport.max_early_data: got %v, want float64(2048)", got)
+		}
+		if got := transport["early_data_header_name"]; got != "Hyphen" {
+			t.Fatalf("transport.early_data_header_name: got %v, want Hyphen", got)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Internal test helpers
+// ---------------------------------------------------------------------------
+
 func parseNodeRaw(t *testing.T, raw json.RawMessage) map[string]any {
 	t.Helper()
 	var obj map[string]any

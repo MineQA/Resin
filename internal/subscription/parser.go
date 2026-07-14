@@ -4312,7 +4312,8 @@ func setWSTransportFromClash(outbound map[string]any, proxy map[string]any) {
 		return
 	}
 	transport := map[string]any{"type": "ws"}
-	if wsOpts, ok := getMap(proxy, "ws-opts", "ws_opts"); ok {
+	wsOpts, hasWSOpts := getMap(proxy, "ws-opts", "ws_opts")
+	if hasWSOpts {
 		if path := strings.TrimSpace(getString(wsOpts, "path")); path != "" {
 			setWSPathAndEarlyData(transport, path)
 		}
@@ -4325,6 +4326,21 @@ func setWSTransportFromClash(outbound map[string]any, proxy map[string]any) {
 	}
 	if headers, ok := getMap(proxy, "ws-headers", "ws_headers"); ok && len(headers) > 0 {
 		transport["headers"] = headers
+	}
+	// Apply direct ws-opts values after all setWSPathAndEarlyData calls so
+	// valid direct fields override any ?ed= / ?eh= query-derived values.
+	// Invalid direct values are silently ignored and do not erase valid
+	// legacy query-derived values.
+	if hasWSOpts {
+		// Hyphenated max-early-data takes precedence over underscore alias.
+		if medStr := getString(wsOpts, "max-early-data", "max_early_data"); medStr != "" {
+			if med, err := strconv.ParseUint(medStr, 10, 32); err == nil && med > 0 {
+				transport["max_early_data"] = med
+			}
+		}
+		if eh := strings.TrimSpace(getString(wsOpts, "early-data-header-name", "early_data_header_name")); eh != "" {
+			transport["early_data_header_name"] = eh
+		}
 	}
 	outbound["transport"] = transport
 }

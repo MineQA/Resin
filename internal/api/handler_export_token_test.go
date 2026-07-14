@@ -16,6 +16,7 @@ import (
 	"github.com/Resinat/Resin/internal/service"
 	"github.com/Resinat/Resin/internal/subscription"
 	"github.com/Resinat/Resin/internal/testutil"
+	"gopkg.in/yaml.v3"
 )
 
 func TestExportTokenCRUD(t *testing.T) {
@@ -817,4 +818,123 @@ func doTestRequest(t *testing.T, srv *Server, req *http.Request) *httptest.Respo
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	return rec
+}
+
+func TestNodePoolExport_ClashTrojanWS_QuotedPassword(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	const rawTrojanWS = `{
+		"type":"trojan","server":"tr-ws-666.example.com","server_port":443,
+		"password":"666",
+		"tls":{"enabled":true,"server_name":"tr-ws.example.com"},
+		"transport":{"type":"ws","path":"/mypath","headers":{"Host":"tr-ws.example.com"}}
+	}`
+	addNodeForNodeListTestWithTag(t, cp, sub, rawTrojanWS, "203.0.113.50", "trojan-ws-666")
+	markNodeHealthyForNodeListTest(t, cp, rawTrojanWS)
+
+	createResp := doJSONRequest(t, srv, http.MethodPost, "/api/v1/export-tokens", map[string]any{
+		"name": "export-token",
+	}, true)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("create export token: got status %d, want %d, body=%s", createResp.Code, http.StatusCreated, createResp.Body.String())
+	}
+	createBody := decodeJSONMap(t, createResp)
+	tokenValue, _ := createBody["token"].(string)
+
+	resp := doJSONRequest(t, srv, http.MethodGet,
+		"/api/v1/node-pool/export?format=clash&export_token="+tokenValue, nil, false)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("export clash trojan ws: got status %d, want 200, body=%s", resp.Code, resp.Body.String())
+	}
+
+	ct := resp.Header().Get("Content-Type")
+	if !strings.Contains(ct, "text/yaml") && !strings.Contains(ct, "application/x-yaml") {
+		t.Fatalf("export clash trojan ws: content-type=%q, want text/yaml", ct)
+	}
+
+	var doc struct {
+		Proxies []map[string]any `yaml:"proxies"`
+	}
+	if err := yaml.Unmarshal(resp.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("yaml unmarshal: %v body=%q", err, resp.Body.String())
+	}
+
+	const wantName = "sub-a/trojan-ws-666"
+	var proxy map[string]any
+	for _, p := range doc.Proxies {
+		if name, _ := p["name"].(string); name == wantName {
+			proxy = p
+			break
+		}
+	}
+	if proxy == nil {
+		t.Fatalf("proxy %q not found in YAML proxies: %+v", wantName, doc.Proxies)
+	}
+
+	// Password is dynamic type string with value "666"
+	pwd, ok := proxy["password"].(string)
+	if !ok {
+		t.Fatalf("password type: got %T, want string", proxy["password"])
+	}
+	if pwd != "666" {
+		t.Fatalf("password value: got %q, want %q", pwd, "666")
+	}
+
+	// WS transport assertions
+	if network, _ := proxy["network"].(string); network != "ws" {
+		t.Fatalf("network: got %q, want %q", network, "ws")
+	}
+	wsOpts, ok := proxy["ws-opts"].(map[string]any)
+	if !ok {
+		t.Fatalf("ws-opts missing or not a map, got %T", proxy["ws-opts"])
+	}
+	wsPath, _ := wsOpts["path"].(string)
+	if wsPath != "/mypath" {
+		t.Fatalf("ws-opts.path: got %q, want %q", wsPath, "/mypath")
+	}
+	wsHeaders, ok := wsOpts["headers"].(map[string]any)
+	if !ok {
+		t.Fatalf("ws-opts.headers missing or not a map, got %T", wsOpts["headers"])
+	}
+	if host, _ := wsHeaders["Host"].(string); host != "tr-ws.example.com" {
+		t.Fatalf("ws-opts.headers.Host: got %q, want %q", host, "tr-ws.example.com")
+	}
+
+	// Top-level ws-path and ws-headers should be absent (data is nested only)
+	if _, exists := proxy["ws-path"]; exists {
+		t.Fatal("top-level ws-path should not exist")
+	}
+	if _, exists := proxy["ws-headers"]; exists {
+		t.Fatal("top-level ws-headers should not exist")
+	}
+
+	// Raw YAML must use a quoted scalar for the numeric-looking password
+	body := resp.Body.String()
+	if !strings.Contains(body, `password: "666"`) {
+		t.Fatalf("raw YAML password should be a quoted scalar, got body=%q", body)
+	}
+}
+
+func TestWriteClash_EmptyProxies(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeClash(rec, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("writeClash empty: got status %d, want 200", rec.Code)
+	}
+	ct := rec.Header().Get("Content-Type")
+	if !strings.Contains(ct, "text/yaml") {
+		t.Fatalf("content-type: %q, want text/yaml", ct)
+	}
+	var doc struct {
+		Proxies []map[string]any `yaml:"proxies"`
+	}
+	if err := yaml.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("yaml unmarshal: %v body=%q", err, rec.Body.String())
+	}
+	if len(doc.Proxies) != 0 {
+		t.Fatalf("expected empty proxies, got %d", len(doc.Proxies))
+	}
 }
