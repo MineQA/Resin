@@ -4,7 +4,6 @@ import { AlertTriangle, CheckCircle2, Copy, Download, Eraser, Globe, RefreshCw, 
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useLocation } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge";
-import type { BadgeVariant } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { DataTable } from "../../components/ui/DataTable";
 import { Card } from "../../components/ui/Card";
@@ -23,7 +22,19 @@ import {
   PROTOCOL_PILL_SELECTED_STYLE,
   PROTOCOL_PILL_STYLE,
 } from "../../lib/protocolPillStyles";
-import { listPlatforms } from "../platforms/api";
+import {
+  CF_STATUS_TOKENS,
+  cfStatusLabel,
+  gradeBadgeVariant,
+  isCFContradiction,
+  normalizeCFStatus,
+  normalizeCFStatusSet,
+  type CloudflareStatusToken,
+} from "../../lib/cloudflareStatus";
+import {
+  CloudflareStatusBadge,
+  ScoreBreakdownExplanation,
+} from "../../components/ScoreBreakdown";import { listPlatforms } from "../platforms/api";
 import type { Platform } from "../platforms/types";
 import { listSubscriptions } from "../subscriptions/api";
 import { buildNodePoolExportURL, exportNodePoolText, getNode, listNodes, probeEgress, probeLatency } from "./api";
@@ -68,6 +79,7 @@ type NodeFilterDraft = {
   quality_grade: string;
   quality_min_score: string;
   quality_cloudflare_challenged: string;
+  quality_cloudflare_status: CloudflareStatusToken[];
   quality_checked_since: string;
   quality_profile: string;
 };
@@ -85,6 +97,7 @@ const defaultFilterDraft: NodeFilterDraft = {
   quality_grade: "",
   quality_min_score: "",
   quality_cloudflare_challenged: "any",
+  quality_cloudflare_status: [],
   quality_checked_since: "",
   quality_profile: "",
 };
@@ -299,6 +312,10 @@ function draftFromQuery(search: string, settings: NodeListSettings = DEFAULT_NOD
   const qualityCloudflare = params.get("quality_cloudflare_challenged");
   const qualityCloudflareVal = qualityCloudflare === null ? "any" : (parseBoolParam(qualityCloudflare) === undefined ? "any" : String(parseBoolParam(qualityCloudflare)));
 
+  // Parse repeated quality_cloudflare_status keys (OR within values).
+  const cfStatusValues = params.getAll("quality_cloudflare_status");
+  const cfStatusDraft = normalizeCFStatusSet(cfStatusValues);
+
   return {
     platform_id: trimQueryValue(params, "platform_id"),
     subscription_id: trimQueryValue(params, "subscription_id"),
@@ -312,6 +329,7 @@ function draftFromQuery(search: string, settings: NodeListSettings = DEFAULT_NOD
     quality_grade: trimQueryValue(params, "quality_grade").toUpperCase(),
     quality_min_score: trimQueryValue(params, "quality_min_score"),
     quality_cloudflare_challenged: qualityCloudflareVal,
+    quality_cloudflare_status: cfStatusDraft,
     quality_checked_since: trimQueryValue(params, "quality_checked_since"),
     quality_profile: trimQueryValue(params, "quality_profile"),
   };
@@ -379,6 +397,10 @@ function draftToActiveFilters(draft: NodeFilterDraft): NodeListFilters {
     filters.quality_cloudflare_challenged = draft.quality_cloudflare_challenged === "true";
   }
 
+  if (draft.quality_cloudflare_status.length > 0) {
+    filters.quality_cloudflare_status = normalizeCFStatusSet(draft.quality_cloudflare_status);
+  }
+
   const checkedSince = draft.quality_checked_since.trim();
   if (checkedSince) {
     filters.quality_checked_since = checkedSince;
@@ -390,6 +412,11 @@ function draftToActiveFilters(draft: NodeFilterDraft): NodeListFilters {
   }
 
   return filters;
+}
+
+/** Detect contradiction between legacy challenged bool and detailed status filter. */
+function cfContradiction(draft: NodeFilterDraft): boolean {
+  return isCFContradiction(draft.quality_cloudflare_status, draft.quality_cloudflare_challenged);
 }
 
 function firstTag(node: { display_tag?: string; tags: { tag: string }[] }): string {
@@ -500,23 +527,6 @@ function formatNodeProtocol(protocol?: string): string {
       return "SOCKS";
     default:
       return value;
-  }
-}
-
-/** Grade badge variant consistent with ProxyCheckPage grade colors. */
-function gradeBadgeVariant(grade: string): BadgeVariant {
-  switch (grade) {
-    case "A":
-      return "success";
-    case "B":
-      return "info";
-    case "C":
-      return "warning";
-    case "D":
-    case "F":
-      return "danger";
-    default:
-      return "neutral";
   }
 }
 
@@ -768,9 +778,24 @@ export function NodesPage() {
     }
   };
 
-  const handleFilterChange = (key: Exclude<keyof NodeFilterDraft, "protocolInclude" | "protocolExclude">, value: string) => {
+  const handleFilterChange = (key: Exclude<keyof NodeFilterDraft, "protocolInclude" | "protocolExclude" | "quality_cloudflare_status">, value: string) => {
     setDraftFilters((prev) => {
       const next = { ...prev, [key]: value } as NodeFilterDraft;
+      setActiveFilters(draftToActiveFilters(next));
+      setSelectedNodeHash("");
+      setDrawerOpen(false);
+      setPage(0);
+      return next;
+    });
+  };
+
+  const toggleCFStatusFilter = (token: CloudflareStatusToken) => {
+    setDraftFilters((prev) => {
+      const current = prev.quality_cloudflare_status;
+      const nextStatus = current.includes(token)
+        ? current.filter((t) => t !== token)
+        : [...current, token];
+      const next = { ...prev, quality_cloudflare_status: nextStatus };
       setActiveFilters(draftToActiveFilters(next));
       setSelectedNodeHash("");
       setDrawerOpen(false);
@@ -1078,17 +1103,14 @@ export function NodesPage() {
         if (!q) {
           return <span style={{ color: "var(--text-muted)" }}>-</span>;
         }
+        const cfStatus = q.quality_cloudflare_status ?? normalizeCFStatus("");
         return (
           <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "nowrap" }}>
             <Badge variant={gradeBadgeVariant(q.quality_grade)}>{q.quality_grade}</Badge>
             <span style={{ color: qualityScoreColor(q.quality_score), fontWeight: 600, fontSize: "0.8rem" }}>
               {Math.round(q.quality_score)}
             </span>
-            {q.quality_cloudflare_status === "ng" ? (
-              <Badge variant="danger" style={{ fontSize: "0.65rem", padding: "2px 5px" }} title={t("服务不可达")}>NG</Badge>
-            ) : q.quality_cloudflare_challenged ? (
-              <Badge variant="warning" style={{ fontSize: "0.65rem", padding: "2px 5px" }}>CF</Badge>
-            ) : null}
+            <CloudflareStatusBadge status={cfStatus} compact />
           </div>
         );
       },
@@ -1411,6 +1433,47 @@ export function NodesPage() {
                 <option value="true">{t("被拦截")}</option>
                 <option value="false">{t("未拦截")}</option>
               </Select>
+            </div>
+
+            <div style={{ ...NODE_FILTER_ITEM_STYLE, flex: "1 1 220px" }}>
+              <label style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                {t("Cloudflare 详细状态")}
+              </label>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "4px", padding: "4px 6px", minHeight: "32px", border: "1px solid var(--border)", borderRadius: "6px", background: "var(--surface-sunken, rgba(0,0,0,0.02))" }}>
+                {CF_STATUS_TOKENS.map((token) => {
+                  const selected = draftFilters.quality_cloudflare_status.includes(token);
+                  return (
+                    <button
+                      key={token}
+                      type="button"
+                      onClick={() => toggleCFStatusFilter(token)}
+                      style={{
+                        padding: "2px 6px",
+                        borderRadius: "4px",
+                        fontSize: "0.7rem",
+                        fontWeight: 600,
+                        border: selected ? "1px solid var(--primary)" : "1px solid var(--border)",
+                        background: selected ? "var(--primary)" : "transparent",
+                        color: selected ? "#fff" : "var(--text-secondary)",
+                        cursor: "pointer",
+                      }}
+                      title={t(cfStatusLabel(token))}
+                      aria-pressed={selected}
+                    >
+                      {t(cfStatusLabel(token))}
+                    </button>
+                  );
+                })}
+              </div>
+              {cfContradiction(draftFilters) ? (
+                <small style={{ color: "var(--danger)", fontSize: 11, marginTop: 2, display: "block" }}>
+                  {t("与“Cloudflare 拦截”筛选矛盾，结果为空。")}
+                </small>
+              ) : (
+                <small style={{ color: "var(--text-muted)", fontSize: 11, marginTop: 2, display: "block" }}>
+                  {t("多选 OR，与上方“Cloudflare 拦截”取交集。")}
+                </small>
+              )}
             </div>
 
             <div style={NODE_FILTER_ITEM_STYLE}>
@@ -1875,22 +1938,19 @@ export function NodesPage() {
                           </p>
                         </div>
                         <div>
-                          <span>{t("Cloudflare 拦截")}</span>
+                          <span>{t("Cloudflare 状态")}</span>
                           <p>
-                            {q.quality_cloudflare_status === "ng" ? (
-                              <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "var(--danger)" }}>
-                                <XCircle size={14} /> {t("不可达")}
-                              </span>
-                            ) : q.quality_cloudflare_challenged ? (
-                              <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "var(--warning)" }}>
-                                <Badge variant="warning">CF</Badge>
-                                {q.quality_cloudflare_challenge_type ? (
-                                  <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{q.quality_cloudflare_challenge_type}</span>
-                                ) : null}
-                              </span>
-                            ) : (
-                              <span style={{ color: "var(--text-muted)" }}>{t("未拦截")}</span>
-                            )}
+                            {(() => {
+                              const cfStatus = q.quality_cloudflare_status ?? normalizeCFStatus("");
+                              return (
+                                <span style={{ display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                                  <CloudflareStatusBadge status={cfStatus} />
+                                  <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                                    {t(cfStatusLabel(cfStatus))}
+                                  </span>
+                                </span>
+                              );
+                            })()}
                           </p>
                         </div>
                         <div>
@@ -1909,6 +1969,14 @@ export function NodesPage() {
                       {q.quality_last_error ? (
                         <div className="callout callout-error">{t("质量检测错误：{{message}}", { message: q.quality_last_error })}</div>
                       ) : null}
+
+                      <div className="platform-drawer-section-head" style={{ marginTop: 12 }}>
+                        <h5 style={{ margin: 0, fontSize: "0.85rem" }}>{t("评分解释")}</h5>
+                      </div>
+                      <ScoreBreakdownExplanation
+                        breakdown={q.quality_score_breakdown}
+                        policyVersion={q.quality_scoring_policy_version}
+                      />
                     </>
                   );
                 })()}

@@ -218,10 +218,10 @@ func TestEngine_WeakPersist_NodeQuality_FlushAndLoad(t *testing.T) {
 	}
 
 	readers := CacheReaders{
-		ReadNodeStatic:  func(h string) *model.NodeStatic { return nil },
-		ReadNodeDynamic: func(h string) *model.NodeDynamic { return nil },
-		ReadNodeLatency: func(k NodeLatencyDirtyKey) *model.NodeLatency { return nil },
-		ReadNodeQuality: func(k NodeQualityDirtyKey) *model.NodeQuality { return qualityStore[k] },
+		ReadNodeStatic:       func(h string) *model.NodeStatic { return nil },
+		ReadNodeDynamic:      func(h string) *model.NodeDynamic { return nil },
+		ReadNodeLatency:      func(k NodeLatencyDirtyKey) *model.NodeLatency { return nil },
+		ReadNodeQuality:      func(k NodeQualityDirtyKey) *model.NodeQuality { return qualityStore[k] },
 		ReadLease:            func(k LeaseDirtyKey) *model.Lease { return nil },
 		ReadSubscriptionNode: func(k SubscriptionNodeDirtyKey) *model.SubscriptionNode { return nil },
 	}
@@ -275,10 +275,10 @@ func TestEngine_WeakPersist_NodeQuality_DeleteFlush(t *testing.T) {
 	}
 
 	readers := CacheReaders{
-		ReadNodeStatic:  func(h string) *model.NodeStatic { return nil },
-		ReadNodeDynamic: func(h string) *model.NodeDynamic { return nil },
-		ReadNodeLatency: func(k NodeLatencyDirtyKey) *model.NodeLatency { return nil },
-		ReadNodeQuality: func(k NodeQualityDirtyKey) *model.NodeQuality { return qualityStore[k] },
+		ReadNodeStatic:       func(h string) *model.NodeStatic { return nil },
+		ReadNodeDynamic:      func(h string) *model.NodeDynamic { return nil },
+		ReadNodeLatency:      func(k NodeLatencyDirtyKey) *model.NodeLatency { return nil },
+		ReadNodeQuality:      func(k NodeQualityDirtyKey) *model.NodeQuality { return qualityStore[k] },
 		ReadLease:            func(k LeaseDirtyKey) *model.Lease { return nil },
 		ReadSubscriptionNode: func(k SubscriptionNodeDirtyKey) *model.SubscriptionNode { return nil },
 	}
@@ -311,10 +311,10 @@ func TestEngine_WeakPersist_NodeQuality_UpsertMissTreatedAsDelete(t *testing.T) 
 	}
 
 	readers := CacheReaders{
-		ReadNodeStatic:  func(h string) *model.NodeStatic { return nil },
-		ReadNodeDynamic: func(h string) *model.NodeDynamic { return nil },
-		ReadNodeLatency: func(k NodeLatencyDirtyKey) *model.NodeLatency { return nil },
-		ReadNodeQuality: func(k NodeQualityDirtyKey) *model.NodeQuality { return qualityStore[k] },
+		ReadNodeStatic:       func(h string) *model.NodeStatic { return nil },
+		ReadNodeDynamic:      func(h string) *model.NodeDynamic { return nil },
+		ReadNodeLatency:      func(k NodeLatencyDirtyKey) *model.NodeLatency { return nil },
+		ReadNodeQuality:      func(k NodeQualityDirtyKey) *model.NodeQuality { return qualityStore[k] },
 		ReadLease:            func(k LeaseDirtyKey) *model.Lease { return nil },
 		ReadSubscriptionNode: func(k SubscriptionNodeDirtyKey) *model.SubscriptionNode { return nil },
 	}

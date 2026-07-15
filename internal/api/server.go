@@ -129,7 +129,7 @@ func NewServerWithAddress(
 		authed.Handle("GET /api/v1/proxy-sources", HandleListProxySources())
 		authed.Handle("POST /api/v1/proxy-sources/fetch", HandleFetchProxySources(cp))
 
-	// Proxy check import (caller-provided proxies, no proxy checks).
+		// Proxy check import (caller-provided proxies, no proxy checks).
 		// Requires confirm_checked=true in request body.
 		authed.Handle("POST /api/v1/proxy-check/import", HandleProxyCheckImport(cp))
 

@@ -45,11 +45,12 @@ type Platform struct {
 
 	// Quality filter configuration.
 	// Empty/zero/nil values mean "no filter".
-	QualityGrade                string  // empty = no filter, else A/B/C/D/F
-	QualityMinScore             float64 // 0 = no filter, else 0..100
-	QualityCloudflareChallenged *bool   // nil = no filter, true/false = explicit match
-	QualityCheckedSinceNs       int64   // 0 = no filter, else nanoseconds timestamp
-	QualityProfile              string  // empty = no filter, else built-in profile name
+	QualityGrade                string   // empty = no filter, else A/B/C/D/F
+	QualityMinScore             float64  // 0 = no filter, else 0..100
+	QualityCloudflareChallenged *bool    // nil = no filter, true/false = explicit match
+	QualityCloudflareStatuses   []string // canonical status tokens; empty = no filter
+	QualityCheckedSinceNs       int64    // 0 = no filter, else nanoseconds timestamp
+	QualityProfile              string   // empty = no filter, else built-in profile name
 
 	// Other config fields.
 	StickyTTLNs                      int64
@@ -222,7 +223,8 @@ func (p *Platform) matchProtocolFilters(entry *node.NodeEntry) bool {
 // node passes regardless of quality state.
 func (p *Platform) matchQualityFilters(entry *node.NodeEntry) bool {
 	if p.QualityGrade == "" && p.QualityMinScore == 0 &&
-		p.QualityCloudflareChallenged == nil && p.QualityCheckedSinceNs == 0 &&
+		p.QualityCloudflareChallenged == nil && len(p.QualityCloudflareStatuses) == 0 &&
+		p.QualityCheckedSinceNs == 0 &&
 		p.QualityProfile == "" {
 		return true // no quality filters active
 	}
@@ -245,6 +247,25 @@ func (p *Platform) matchQualityFilters(entry *node.NodeEntry) bool {
 	// Cloudflare challenged filter: nil means no filter, true/false = explicit match.
 	if p.QualityCloudflareChallenged != nil && q.CloudflareChallenged != *p.QualityCloudflareChallenged {
 		return false
+	}
+
+	// Quality cloudflare statuses filter: OR within selected statuses.
+	// Empty persisted status normalizes to "unchecked" for matching.
+	if len(p.QualityCloudflareStatuses) > 0 {
+		cfStatus := q.CloudflareStatus
+		if cfStatus == "" {
+			cfStatus = "unchecked"
+		}
+		matched := false
+		for _, s := range p.QualityCloudflareStatuses {
+			if s == cfStatus {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
 	}
 
 	// Checked since filter: 0 means no filter, otherwise nanoseconds timestamp.

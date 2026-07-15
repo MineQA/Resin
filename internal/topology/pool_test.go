@@ -1088,7 +1088,7 @@ func TestRecordNodeQuality_NotifiesPlatforms(t *testing.T) {
 	pool.AddNodeFromSub(h, raw, "s1")
 	entry, _ := pool.GetEntry(h)
 
-	// Set outbound, egress, latency so node is otherwise fully routable.
+	// Set outbound, egress, latency, and close circuit so node is fully routable.
 	ob := testutil.NewNoopOutbound()
 	entry.Outbound.Store(&ob)
 	entry.SetEgressIP(netip.MustParseAddr("1.2.3.4"))
@@ -1096,6 +1096,7 @@ func TestRecordNodeQuality_NotifiesPlatforms(t *testing.T) {
 		Ewma:        100 * time.Millisecond,
 		LastUpdated: time.Now(),
 	})
+	entry.CircuitOpenSince.Store(0)
 
 	// Register a platform with a quality grade filter.
 	p := platform.NewPlatform("plat-q", "QualityFilter", nil, nil)
@@ -1129,5 +1130,80 @@ func TestRecordNodeQuality_NotifiesPlatforms(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if p.View().Size() != 0 {
 		t.Fatalf("expected 0 routable nodes after quality downgrade, got %d", p.View().Size())
+	}
+}
+
+// TestRecordNodeQuality_NotifiesPlatforms_CFStatusFilter verifies that
+// RecordNodeQuality triggers platform dirty notification with CF status filter.
+func TestRecordNodeQuality_NotifiesPlatforms_CFStatusFilter(t *testing.T) {
+	subMgr := NewSubscriptionManager()
+	sub := subscription.NewSubscription("s1", "Sub1", "url", true, false)
+	subMgr.Register(sub)
+
+	pool := newTestPool(subMgr)
+	raw := json.RawMessage(`{"type":"ss","server":"1.1.1.1"}`)
+	h := node.HashFromRawOptions(raw)
+
+	mn := subscription.NewManagedNodes()
+	mn.StoreNode(h, subscription.ManagedNode{Tags: []string{"node-1"}})
+	sub.SwapManagedNodes(mn)
+
+	pool.AddNodeFromSub(h, raw, "s1")
+	entry, _ := pool.GetEntry(h)
+
+	// Set outbound, egress, latency, and close circuit so node is fully routable.
+	ob := testutil.NewNoopOutbound()
+	entry.Outbound.Store(&ob)
+	entry.SetEgressIP(netip.MustParseAddr("1.2.3.4"))
+	entry.LatencyTable.LoadEntry("example.com", node.DomainLatencyStats{
+		Ewma:        100 * time.Millisecond,
+		LastUpdated: time.Now(),
+	})
+	entry.CircuitOpenSince.Store(0)
+
+	// Register a platform with CF status filter.
+	p := platform.NewPlatform("plat-cf", "CFStatusFilter", nil, nil)
+	p.QualityCloudflareStatuses = []string{"clean", "not_detected"}
+	pool.RegisterPlatform(p)
+
+	// Initially, no quality -> platform view should be empty.
+	if p.View().Size() != 0 {
+		t.Fatal("expected empty view before quality recorded")
+	}
+
+	// Record quality with non-matching status "block".
+	pool.RecordNodeQuality(h, &model.NodeQuality{
+		Grade: "A", Score: 95, ServiceReachable: true,
+		CloudflareStatus: "block", Profile: "generic",
+	})
+
+	time.Sleep(50 * time.Millisecond)
+	if p.View().Size() != 0 {
+		t.Fatalf("expected 0 routable nodes after block status, got %d", p.View().Size())
+	}
+
+	// Record quality with matching status "clean".
+	pool.RecordNodeQuality(h, &model.NodeQuality{
+		Grade: "A", Score: 95, ServiceReachable: true,
+		CloudflareStatus: "clean", Profile: "generic",
+	})
+
+	time.Sleep(50 * time.Millisecond)
+	if p.View().Size() != 1 {
+		t.Fatalf("expected 1 routable node after clean status, got %d", p.View().Size())
+	}
+	if !p.View().Contains(h) {
+		t.Fatal("expected platform view to contain the quality-updated node")
+	}
+
+	// Record quality with empty legacy status -> "unchecked" not in filter -> remove.
+	pool.RecordNodeQuality(h, &model.NodeQuality{
+		Grade: "A", Score: 95, ServiceReachable: true,
+		CloudflareStatus: "", Profile: "generic",
+	})
+
+	time.Sleep(50 * time.Millisecond)
+	if p.View().Size() != 0 {
+		t.Fatalf("expected 0 routable nodes after empty legacy status, got %d", p.View().Size())
 	}
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Resinat/Resin/internal/cloudflare"
 	"github.com/Resinat/Resin/internal/model"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/platform"
@@ -38,6 +39,7 @@ type PlatformResponse struct {
 	QualityGrade                     string   `json:"quality_grade,omitempty"`
 	QualityMinScore                  float64  `json:"quality_min_score,omitempty"`
 	QualityCloudflareChallenged      *bool    `json:"quality_cloudflare_challenged,omitempty"`
+	QualityCloudflareStatuses        []string `json:"quality_cloudflare_statuses,omitempty"`
 	QualityCheckedSinceNs            int64    `json:"quality_checked_since_ns,omitempty"`
 	QualityProfile                   string   `json:"quality_profile,omitempty"`
 	UpdatedAt                        string   `json:"updated_at"`
@@ -68,6 +70,7 @@ func platformToResponse(p model.Platform) PlatformResponse {
 		QualityGrade:                     p.QualityGrade,
 		QualityMinScore:                  p.QualityMinScore,
 		QualityCloudflareChallenged:      qualityCF,
+		QualityCloudflareStatuses:        append([]string(nil), p.QualityCloudflareStatuses...),
 		QualityCheckedSinceNs:            p.QualityCheckedSinceNs,
 		QualityProfile:                   p.QualityProfile,
 		UpdatedAt:                        time.Unix(0, p.UpdatedAtNs).UTC().Format(time.RFC3339Nano),
@@ -101,6 +104,7 @@ type platformConfig struct {
 	QualityGrade                     string
 	QualityMinScore                  float64
 	QualityCloudflareChallenged      *bool
+	QualityCloudflareStatuses        []string
 	QualityCheckedSinceNs            int64
 	QualityProfile                   string
 }
@@ -135,12 +139,13 @@ func (s *ControlPlaneService) defaultPlatformConfig(name string) platformConfig 
 		ReverseProxyFixedAccountHeader: normalizeHeaderFieldName(
 			s.EnvCfg.DefaultPlatformReverseProxyFixedAccountHeader,
 		),
-		AllocationPolicy:              s.EnvCfg.DefaultPlatformAllocationPolicy,
-		QualityGrade:                  "",
-		QualityMinScore:               0,
-		QualityCloudflareChallenged:   nil,
-		QualityCheckedSinceNs:         0,
-		QualityProfile:                "",
+		AllocationPolicy:            s.EnvCfg.DefaultPlatformAllocationPolicy,
+		QualityGrade:                "",
+		QualityMinScore:             0,
+		QualityCloudflareChallenged: nil,
+		QualityCloudflareStatuses:   []string{},
+		QualityCheckedSinceNs:       0,
+		QualityProfile:              "",
 	}
 }
 
@@ -165,6 +170,7 @@ func platformConfigFromModel(mp model.Platform) platformConfig {
 		QualityGrade:                     mp.QualityGrade,
 		QualityMinScore:                  mp.QualityMinScore,
 		QualityCloudflareChallenged:      qualityCF,
+		QualityCloudflareStatuses:        append([]string(nil), mp.QualityCloudflareStatuses...),
 		QualityCheckedSinceNs:            mp.QualityCheckedSinceNs,
 		QualityProfile:                   mp.QualityProfile,
 	}
@@ -192,6 +198,7 @@ func (cfg platformConfig) toModel(id string, updatedAtNs int64) model.Platform {
 		QualityGrade:                     cfg.QualityGrade,
 		QualityMinScore:                  cfg.QualityMinScore,
 		QualityCloudflareChallenged:      qualityCF,
+		QualityCloudflareStatuses:        append([]string(nil), cfg.QualityCloudflareStatuses...),
 		QualityCheckedSinceNs:            cfg.QualityCheckedSinceNs,
 		QualityProfile:                   cfg.QualityProfile,
 		UpdatedAtNs:                      updatedAtNs,
@@ -219,6 +226,7 @@ func (cfg platformConfig) toRuntime(id string) (*platform.Platform, error) {
 		cfg.QualityGrade,
 		cfg.QualityMinScore,
 		cfg.QualityCloudflareChallenged,
+		cfg.QualityCloudflareStatuses,
 		cfg.QualityCheckedSinceNs,
 		cfg.QualityProfile,
 	), nil
@@ -460,6 +468,7 @@ type CreatePlatformRequest struct {
 	QualityGrade                     *string  `json:"quality_grade"`
 	QualityMinScore                  *float64 `json:"quality_min_score"`
 	QualityCloudflareChallenged      *bool    `json:"quality_cloudflare_challenged,omitempty"`
+	QualityCloudflareStatuses        []string `json:"quality_cloudflare_statuses,omitempty"`
 	QualityCheckedSinceNs            *int64   `json:"quality_checked_since_ns"`
 	QualityProfile                   *string  `json:"quality_profile"`
 }
@@ -552,6 +561,13 @@ func (s *ControlPlaneService) CreatePlatform(req CreatePlatformRequest) (*Platfo
 			return nil, err
 		}
 		cfg.QualityProfile = *req.QualityProfile
+	}
+	if req.QualityCloudflareStatuses != nil {
+		normalized, err := cloudflare.NormalizeSet(req.QualityCloudflareStatuses)
+		if err != nil {
+			return nil, invalidArg(err.Error())
+		}
+		cfg.QualityCloudflareStatuses = normalized
 	}
 	if err := validatePlatformConfig(&cfg, true); err != nil {
 		return nil, err
@@ -724,6 +740,15 @@ func (s *ControlPlaneService) UpdatePlatform(id string, patchJSON json.RawMessag
 		}
 		cfg.QualityProfile = profileStr
 	}
+	if statusesPatch, ok, err := patch.optionalStringSlice("quality_cloudflare_statuses"); err != nil {
+		return nil, err
+	} else if ok {
+		normalized, err := cloudflare.NormalizeSet(statusesPatch)
+		if err != nil {
+			return nil, invalidArg(err.Error())
+		}
+		cfg.QualityCloudflareStatuses = normalized
+	}
 	if err := validatePlatformConfig(&cfg, regionFiltersPatched); err != nil {
 		return nil, err
 	}
@@ -806,6 +831,7 @@ type PlatformSpecFilter struct {
 	QualityGrade                string   `json:"quality_grade,omitempty"`
 	QualityMinScore             float64  `json:"quality_min_score,omitempty"`
 	QualityCloudflareChallenged *bool    `json:"quality_cloudflare_challenged,omitempty"`
+	QualityCloudflareStatuses   []string `json:"quality_cloudflare_statuses,omitempty"`
 	QualityCheckedSinceNs       int64    `json:"quality_checked_since_ns,omitempty"`
 	QualityProfile              string   `json:"quality_profile,omitempty"`
 }
@@ -847,11 +873,21 @@ type NodeQualitySummary struct {
 	AvgLatencyMs            float64 `json:"quality_avg_latency_ms,omitempty"`
 	LastChecked             string  `json:"quality_last_checked,omitempty"`
 	LastError               string  `json:"quality_last_error,omitempty"`
-	// QualityCloudflareStatus is a derived display-only field.
-	// Values: "challenged" (explicit CF challenge detected),
-	// "clean" (service reachable and no challenge), "ng" (service unreachable).
-	// Omitted when quality is nil (no check performed).
+	// QualityCloudflareStatus is the canonical aggregate CF observation outcome.
+	// Accepted public values: "clean", "not_detected", "js_challenge",
+	// "captcha_challenge", "block", "challenge", "ng", "unchecked".
+	// Empty/unchecked legacy rows are normalized to "unchecked" for display.
+	// This is the persisted authoritative status, replacing the old
+	// service-reachability derivation.
 	QualityCloudflareStatus string `json:"quality_cloudflare_status,omitempty"`
+	// QualityScoringPolicyVersion records the scoring policy version that
+	// produced this result. 0 means legacy (no breakdown available).
+	QualityScoringPolicyVersion int `json:"quality_scoring_policy_version,omitempty"`
+	// QualityScoreBreakdown is the compact JSON breakdown from the scoring engine.
+	// It is typed as json.RawMessage for direct serialization without
+	// double-encoding the JSON string. Omitted when nil or empty.
+	// Invalid stored JSON is omitted so it cannot break the outer API response.
+	QualityScoreBreakdown *json.RawMessage `json:"quality_score_breakdown,omitempty"`
 }
 
 // IsHealthyAndEnabled follows the node-summary health rule used by API/UI
@@ -940,19 +976,32 @@ func (s *ControlPlaneService) nodeEntryToSummary(h node.Hash, entry *node.NodeEn
 	}
 	// Quality check summary.
 	if q := entry.GetQuality(); q != nil {
-		cfStatus := deriveCloudflareStatus(q)
+		// Normalize empty/legacy cloudflare_status to "unchecked" for display.
+		cfStatus := q.CloudflareStatus
+		if cfStatus == "" {
+			cfStatus = "unchecked"
+		}
+		// Decode score_breakdown for API projection. Invalid persisted JSON is
+		// omitted so json.Marshal of the surrounding response cannot fail.
+		var breakdown *json.RawMessage
+		if q.ScoreBreakdown != "" && json.Valid([]byte(q.ScoreBreakdown)) {
+			raw := json.RawMessage(q.ScoreBreakdown)
+			breakdown = &raw
+		}
 		quality := &NodeQualitySummary{
-			Profile:                 q.Profile,
-			Grade:                   q.Grade,
-			Score:                   q.Score,
-			Unstable:                q.Unstable,
-			ServiceReachable:        q.ServiceReachable,
-			APIReachable:            q.APIReachable,
-			CloudflareChallenged:    q.CloudflareChallenged,
-			CloudflareChallengeType: q.CloudflareChallengeType,
-			AvgLatencyMs:            q.AvgLatencyMs,
-			LastError:               q.LastError,
-			QualityCloudflareStatus: cfStatus,
+			Profile:                     q.Profile,
+			Grade:                       q.Grade,
+			Score:                       q.Score,
+			Unstable:                    q.Unstable,
+			ServiceReachable:            q.ServiceReachable,
+			APIReachable:                q.APIReachable,
+			CloudflareChallenged:        q.CloudflareChallenged,
+			CloudflareChallengeType:     q.CloudflareChallengeType,
+			AvgLatencyMs:                q.AvgLatencyMs,
+			LastError:                   q.LastError,
+			QualityCloudflareStatus:     cfStatus,
+			QualityScoringPolicyVersion: q.ScoringPolicyVersion,
+			QualityScoreBreakdown:       breakdown,
 		}
 		if q.LastCheckedNs > 0 {
 			quality.LastChecked = time.Unix(0, q.LastCheckedNs).UTC().Format(time.RFC3339Nano)
@@ -982,6 +1031,7 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 	var qualityGrade string
 	var qualityMinScore float64
 	var qualityCloudflareChallenged *bool
+	var qualityCloudflareStatuses []string
 	var qualityCheckedSinceNs int64
 	var qualityProfile string
 
@@ -997,6 +1047,7 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 		qualityGrade = plat.QualityGrade
 		qualityMinScore = plat.QualityMinScore
 		qualityCloudflareChallenged = plat.QualityCloudflareChallenged
+		qualityCloudflareStatuses = plat.QualityCloudflareStatuses
 		qualityCheckedSinceNs = plat.QualityCheckedSinceNs
 		qualityProfile = plat.QualityProfile
 	} else {
@@ -1030,6 +1081,13 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 		if req.PlatformSpec.QualityCloudflareChallenged != nil {
 			v := *req.PlatformSpec.QualityCloudflareChallenged
 			qualityCloudflareChallenged = &v
+		}
+		if req.PlatformSpec.QualityCloudflareStatuses != nil {
+			normalized, err := cloudflare.NormalizeSet(req.PlatformSpec.QualityCloudflareStatuses)
+			if err != nil {
+				return nil, invalidArg(err.Error())
+			}
+			qualityCloudflareStatuses = normalized
 		}
 		if err := validateQualityCheckedSinceNs(req.PlatformSpec.QualityCheckedSinceNs); err != nil {
 			return nil, err
@@ -1077,16 +1135,16 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 					return true
 				}
 			}
-		if len(excludeProtocolFilters) > 0 {
-			for _, f := range excludeProtocolFilters {
-				if f == canonical {
-					return true
+			if len(excludeProtocolFilters) > 0 {
+				for _, f := range excludeProtocolFilters {
+					if f == canonical {
+						return true
+					}
 				}
 			}
 		}
-		}
 		// Quality filters.
-		if !matchNodeQualityFilters(entry, qualityGrade, qualityMinScore, qualityCloudflareChallenged, qualityCheckedSinceNs, qualityProfile) {
+		if !matchNodeQualityFilters(entry, qualityGrade, qualityMinScore, qualityCloudflareChallenged, qualityCloudflareStatuses, qualityCheckedSinceNs, qualityProfile) {
 			return true
 		}
 		result = append(result, s.nodeEntryToSummary(h, entry))
@@ -1097,9 +1155,10 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 
 // matchNodeQualityFilters checks a node entry against quality filter criteria.
 // This mirrors platform.matchQualityFilters for use in PreviewFilter.
-func matchNodeQualityFilters(entry *node.NodeEntry, qualityGrade string, qualityMinScore float64, qualityCloudflareChallenged *bool, qualityCheckedSinceNs int64, qualityProfile string) bool {
+func matchNodeQualityFilters(entry *node.NodeEntry, qualityGrade string, qualityMinScore float64, qualityCloudflareChallenged *bool, qualityCloudflareStatuses []string, qualityCheckedSinceNs int64, qualityProfile string) bool {
 	if qualityGrade == "" && qualityMinScore == 0 &&
-		qualityCloudflareChallenged == nil && qualityCheckedSinceNs == 0 &&
+		qualityCloudflareChallenged == nil && len(qualityCloudflareStatuses) == 0 &&
+		qualityCheckedSinceNs == 0 &&
 		qualityProfile == "" {
 		return true
 	}
@@ -1115,6 +1174,23 @@ func matchNodeQualityFilters(entry *node.NodeEntry, qualityGrade string, quality
 	}
 	if qualityCloudflareChallenged != nil && q.CloudflareChallenged != *qualityCloudflareChallenged {
 		return false
+	}
+	// Quality cloudflare statuses filter: OR within selected statuses.
+	if len(qualityCloudflareStatuses) > 0 {
+		cfStatus := q.CloudflareStatus
+		if cfStatus == "" {
+			cfStatus = "unchecked"
+		}
+		matched := false
+		for _, s := range qualityCloudflareStatuses {
+			if s == cfStatus {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
 	}
 	if qualityCheckedSinceNs > 0 && q.LastCheckedNs < qualityCheckedSinceNs {
 		return false
@@ -1171,19 +1247,13 @@ func validateQualityProfile(profile string) *ServiceError {
 	return nil
 }
 
-// deriveCloudflareStatus computes the display-only quality_cloudflare_status
-// field. This is a derived value and does not change persisted semantics.
-//
-// Rules:
-//   - CloudflareChallenged == true               → "challenged"
-//   - ServiceReachable == true && !Challenged     → "clean"
-//   - ServiceReachable == false                   → "ng"
+// deriveCloudflareStatus is retained as a compatibility shim for existing
+// callers but is no longer used in the main nodeEntryToSummary path.
+// The authoritative status is now the persisted CloudflareStatus field.
+// Legacy rows with empty status normalize to "unchecked".
 func deriveCloudflareStatus(q *model.NodeQuality) string {
-	if q.CloudflareChallenged {
-		return "challenged"
+	if q.CloudflareStatus != "" {
+		return q.CloudflareStatus
 	}
-	if q.ServiceReachable {
-		return "clean"
-	}
-	return "ng"
+	return "unchecked"
 }

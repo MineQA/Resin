@@ -1,6 +1,7 @@
 package probe
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/Resinat/Resin/internal/model"
@@ -28,6 +29,11 @@ type QualityProbeConfig struct {
 
 	// Opts returns the ProxyCheckOptions to use for quality checks.
 	Opts func() ProxyCheckOptions
+
+	// ScoringPolicy returns the canonical nested scoring policy (Phase 3B1).
+	// When nil, legacy flat-option scoring behavior is used. When non-nil,
+	// the new weighted scoring engine is used with custom CF target_url support.
+	ScoringPolicy func() *ScoringPolicy
 
 	// TriggerOnNewNode controls whether newly added or re-enabled nodes
 	// automatically trigger an immediate quality check.
@@ -204,7 +210,21 @@ func (m *ProbeManager) performQualityCheck(hash node.Hash, entry *node.NodeEntry
 	profile := LookupProfile(m.currentQualityProfile())
 	opts := m.currentQualityOptions()
 
-	score, err := CheckProxy(m.fetcher, hash, profile, opts)
+	// Inject scoring policy from runtime config (Phase 3B1).
+	if m.qualityCfg != nil && m.qualityCfg.ScoringPolicy != nil {
+		policy := m.qualityCfg.ScoringPolicy()
+		opts.ScoringPolicy = policy
+	}
+
+	var score *ProxyScore
+	var err error
+
+	// Use response-aware CheckProxy when a ResponseFetcher is configured.
+	if m.responseFetcher != nil {
+		score, err = CheckProxyWithResponse(m.fetcher, hash, profile, opts, m.responseFetcher)
+	} else {
+		score, err = CheckProxy(m.fetcher, hash, profile, opts)
+	}
 
 	// Map ProxyScore to model.NodeQuality and record via pool.
 	nq := ProxyScoreToNodeQuality(profile.Name, score, err)
@@ -222,6 +242,17 @@ func (m *ProbeManager) performQualityCheck(hash node.Hash, entry *node.NodeEntry
 // the profile, last error, and default aggregate values is returned so the
 // node's quality state reflects the attempt even on total failure.
 // RecordNodeQuality sets NodeHash and LastCheckedNs internally.
+//
+// Phase 3B2:
+//   - Stores aggregate canonical CloudflareStatus as string.
+//   - Derives compatibility CloudflareChallenged and CloudflareChallengeType
+//     from challenge statuses only (js_challenge, captcha_challenge, block,
+//     challenge); false/empty type otherwise.
+//   - When ScoringBreakdown != nil, serializes a COMPACT breakdown JSON
+//     (version, effective weights, sub-scores, unavailable dims, applied caps,
+//     grade_from_score, final_grade, terminal_reason) and sets
+//     ScoringPolicyVersion. Legacy/nil breakdown produces version 0 and empty
+//     breakdown string.
 func ProxyScoreToNodeQuality(profile string, score *ProxyScore, err error) *model.NodeQuality {
 	nq := &model.NodeQuality{
 		Profile: profile,
@@ -235,9 +266,39 @@ func ProxyScoreToNodeQuality(profile string, score *ProxyScore, err error) *mode
 		nq.Unstable = score.Unstable
 		nq.ServiceReachable = score.ServiceReachable
 		nq.APIReachable = score.APIReachable
-		nq.CloudflareChallenged = score.CloudflareChallenged
-		nq.CloudflareChallengeType = score.CloudflareChallengeType
 		nq.AvgLatencyMs = score.AvgLatencyMs
+
+		// Store aggregate canonical CloudflareStatus.
+		nq.CloudflareStatus = string(score.CloudflareStatus)
+
+		// Derive compatibility fields from challenge statuses only.
+		if isChallengeStatus(score.CloudflareStatus) {
+			nq.CloudflareChallenged = true
+			nq.CloudflareChallengeType = string(score.CloudflareStatus)
+		} else {
+			nq.CloudflareChallenged = false
+			nq.CloudflareChallengeType = ""
+		}
+
+		// Serialize compact breakdown when available (Phase 3B1 scoring path).
+		if score.ScoringBreakdown != nil {
+			nq.ScoringPolicyVersion = score.ScoringBreakdown.Version
+			nq.ScoreBreakdown = serializeCompactBreakdown(score.ScoringBreakdown)
+		} else {
+			nq.ScoringPolicyVersion = 0
+			nq.ScoreBreakdown = ""
+		}
+
+		// If no top-level error but round results have transport errors,
+		// propagate the first as LastError (Phase 3A: LastError on failure).
+		if nq.LastError == "" {
+			for _, r := range score.RoundResults {
+				if r.Error != "" {
+					nq.LastError = r.Error
+					break
+				}
+			}
+		}
 	} else {
 		// No score means total failure — record grade F / score 0.
 		nq.Grade = "F"
@@ -247,4 +308,43 @@ func ProxyScoreToNodeQuality(profile string, score *ProxyScore, err error) *mode
 		}
 	}
 	return nq
+}
+
+// serializeCompactBreakdown produces a compact JSON representation of the
+// scoring breakdown suitable for persistence. It includes only:
+// version, effective_weights, sub_scores, unavailable_dimensions, applied_caps,
+// grade_from_score, final_grade, terminal_reason.
+// It does NOT include response bodies, headers, round results, raw policy, or
+// redundant Grade field.
+// Marshal errors are silently handled — an empty string is returned so the
+// quality recording is not blocked.
+func serializeCompactBreakdown(sr *ScoringResult) string {
+	if sr == nil {
+		return ""
+	}
+	type compactBreakdown struct {
+		Version          int                       `json:"version"`
+		EffectiveWeights map[string]int            `json:"effective_weights"`
+		SubScores        map[string]*SubScoreEntry `json:"sub_scores"`
+		UnavailableDims  []string                  `json:"unavailable_dimensions"`
+		AppliedCaps      []CapApplication          `json:"applied_caps"`
+		GradeFromScore   string                    `json:"grade_from_score"`
+		FinalGrade       string                    `json:"final_grade"`
+		TerminalReason   string                    `json:"terminal_reason,omitempty"`
+	}
+	cb := compactBreakdown{
+		Version:          sr.Version,
+		EffectiveWeights: sr.EffectiveWeights,
+		SubScores:        sr.SubScores,
+		UnavailableDims:  sr.UnavailableDims,
+		AppliedCaps:      sr.AppliedCaps,
+		GradeFromScore:   sr.GradeFromScore,
+		FinalGrade:       sr.FinalGrade,
+		TerminalReason:   sr.TerminalReason,
+	}
+	b, err := json.Marshal(cb)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }

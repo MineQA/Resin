@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { normalizeCFStatusSet } from "../../lib/cloudflareStatus";
 import { normalizeProtocolList } from "../../lib/protocolOptions";
 import { allocationPolicies, emptyAccountBehaviors, missActions, qualityCloudflareFilterOptions } from "./constants";
 import { parseHeaderLines, parseLinesToList } from "./formParsers";
@@ -65,6 +66,7 @@ export const platformFormSchema = z.object({
   quality_grade: z.string().optional(),
   quality_min_score_text: z.string().optional(),
   quality_cloudflare_filter: z.enum(qualityCloudflareFilterOptions),
+  quality_cloudflare_statuses: z.array(z.string()),
   quality_checked_since_text: z.string().optional(),
   quality_profile: z.string().optional(),
 }).superRefine((value, ctx) => {
@@ -97,6 +99,7 @@ export const defaultPlatformFormValues: PlatformFormValues = {
   quality_grade: "",
   quality_min_score_text: "",
   quality_cloudflare_filter: "any",
+  quality_cloudflare_statuses: [],
   quality_checked_since_text: "",
   quality_profile: "",
 };
@@ -128,6 +131,7 @@ export function platformToFormValues(platform: Platform): PlatformFormValues {
     quality_grade: platform.quality_grade || "",
     quality_min_score_text: platform.quality_min_score > 0 ? String(platform.quality_min_score) : "",
     quality_cloudflare_filter: cfFilter,
+    quality_cloudflare_statuses: normalizeCFStatusSet(platform.quality_cloudflare_statuses),
     quality_checked_since_text: nsToDatetimeLocal(platform.quality_checked_since_ns),
     quality_profile: platform.quality_profile || "",
   };
@@ -152,6 +156,9 @@ function toPlatformPayloadBase(values: PlatformFormValues) {
     quality_cloudflare_challenged = false;
   }
 
+  // Normalize detailed status array; [] clears the filter.
+  const quality_cloudflare_statuses = normalizeCFStatusSet(values.quality_cloudflare_statuses);
+
   return {
     name: values.name.trim(),
     regex_filters: parseLinesToList(values.regex_filters_text),
@@ -166,6 +173,7 @@ function toPlatformPayloadBase(values: PlatformFormValues) {
     quality_grade: (values.quality_grade || "").trim(),
     quality_min_score,
     quality_cloudflare_challenged,
+    quality_cloudflare_statuses,
     quality_checked_since_ns: datetimeLocalToNs(values.quality_checked_since_text || ""),
     quality_profile: (values.quality_profile || "").trim(),
   };

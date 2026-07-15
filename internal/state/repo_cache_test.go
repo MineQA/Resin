@@ -419,3 +419,175 @@ func TestCacheRepo_FlushTx_RollbackOnFailure(t *testing.T) {
 		t.Fatalf("expected pre-existing node, got %s", loaded[0].Hash)
 	}
 }
+
+// --- node_quality round-trip with Phase 3B2 metadata ---
+
+// TestCacheRepo_NodeQuality_MetadataFieldsRoundTrip verifies that the three
+// additive Phase 3B2 fields (cloudflare_status, scoring_policy_version,
+// score_breakdown) are persisted and loaded correctly, including empty legacy
+// defaults.
+func TestCacheRepo_NodeQuality_MetadataFieldsRoundTrip(t *testing.T) {
+	repo := newTestCacheRepo(t)
+
+	entries := []model.NodeQuality{
+		{
+			NodeHash:             "n1",
+			Profile:              "generic",
+			Grade:                "A",
+			Score:                95,
+			CloudflareStatus:     "clean",
+			ScoringPolicyVersion: 1,
+			ScoreBreakdown:       `{"version":1,"effective_weights":{"service":100},"sub_scores":{"service":{"value":100}},"final_grade":"A","grade_from_score":"A"}`,
+		},
+		{
+			NodeHash:             "n2",
+			Profile:              "generic",
+			Grade:                "B",
+			Score:                75,
+			CloudflareStatus:     "js_challenge",
+			ScoringPolicyVersion: 1,
+			ScoreBreakdown:       `{"version":1,"sub_scores":{"service":{"value":75}},"final_grade":"B","grade_from_score":"B"}`,
+		},
+		// Legacy row: all new fields at zero/empty default.
+		{
+			NodeHash:  "n3",
+			Profile:   "generic",
+			Grade:     "F",
+			Score:     0,
+			LastError: "timed out",
+		},
+	}
+	if err := repo.BulkUpsertNodeQuality(entries); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := repo.LoadAllNodeQuality()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(loaded))
+	}
+
+	for _, e := range loaded {
+		switch e.NodeHash {
+		case "n1":
+			if e.CloudflareStatus != "clean" {
+				t.Fatalf("n1 CloudflareStatus = %q, want clean", e.CloudflareStatus)
+			}
+			if e.ScoringPolicyVersion != 1 {
+				t.Fatalf("n1 ScoringPolicyVersion = %d, want 1", e.ScoringPolicyVersion)
+			}
+			if e.ScoreBreakdown == "" {
+				t.Fatal("n1 ScoreBreakdown should not be empty")
+			}
+		case "n2":
+			if e.CloudflareStatus != "js_challenge" {
+				t.Fatalf("n2 CloudflareStatus = %q, want js_challenge", e.CloudflareStatus)
+			}
+			if e.ScoringPolicyVersion != 1 {
+				t.Fatalf("n2 ScoringPolicyVersion = %d, want 1", e.ScoringPolicyVersion)
+			}
+		case "n3":
+			if e.CloudflareStatus != "" {
+				t.Fatalf("n3 CloudflareStatus = %q, want empty legacy", e.CloudflareStatus)
+			}
+			if e.ScoringPolicyVersion != 0 {
+				t.Fatalf("n3 ScoringPolicyVersion = %d, want 0", e.ScoringPolicyVersion)
+			}
+			if e.ScoreBreakdown != "" {
+				t.Fatalf("n3 ScoreBreakdown = %q, want empty legacy", e.ScoreBreakdown)
+			}
+		}
+	}
+}
+
+// TestCacheRepo_FlushTx_NodeQualityMetadata verifies that FlushTx bulk upsert
+// correctly round-trips the three Phase 3B2 metadata fields.
+func TestCacheRepo_FlushTx_NodeQualityMetadata(t *testing.T) {
+	repo := newTestCacheRepo(t)
+
+	nq := model.NodeQuality{
+		NodeHash:             "hash-flush",
+		Profile:              "generic",
+		Grade:                "A",
+		Score:                100,
+		CloudflareStatus:     "clean",
+		ScoringPolicyVersion: 1,
+		ScoreBreakdown:       `{"version":1,"grade_from_score":"A","final_grade":"A"}`,
+	}
+
+	if err := repo.FlushTx(FlushOps{
+		UpsertNodeQuality: []model.NodeQuality{nq},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := repo.LoadAllNodeQuality()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1 quality entry, got %d", len(loaded))
+	}
+	e := loaded[0]
+	if e.CloudflareStatus != "clean" {
+		t.Fatalf("CloudflareStatus = %q, want clean", e.CloudflareStatus)
+	}
+	if e.ScoringPolicyVersion != 1 {
+		t.Fatalf("ScoringPolicyVersion = %d, want 1", e.ScoringPolicyVersion)
+	}
+	if e.ScoreBreakdown != nq.ScoreBreakdown {
+		t.Fatalf("ScoreBreakdown = %q, want %q", e.ScoreBreakdown, nq.ScoreBreakdown)
+	}
+}
+
+func TestCacheMigration000004DownDropsScoringMetadata(t *testing.T) {
+	dir := t.TempDir()
+	db, err := OpenDB(dir + "/cache.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := MigrateCacheDB(db); err != nil {
+		t.Fatal(err)
+	}
+
+	downSQL, err := migrationsFS.ReadFile("migrations/cache/000004_node_quality_scoring_metadata.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(downSQL)); err != nil {
+		t.Fatalf("apply cache migration 000004 down: %v", err)
+	}
+
+	rows, err := db.Query(`PRAGMA table_info(node_quality)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	removed := map[string]bool{
+		"cloudflare_status":      false,
+		"scoring_policy_version": false,
+		"score_breakdown":        false,
+	}
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			t.Fatal(err)
+		}
+		if _, tracked := removed[name]; tracked {
+			removed[name] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for column, stillPresent := range removed {
+		if stillPresent {
+			t.Fatalf("column %s still present after cache migration 000004 down", column)
+		}
+	}
+}

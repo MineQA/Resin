@@ -206,6 +206,9 @@ func (r *CacheRepo) BulkUpsertNodeQuality(entries []model.NodeQuality) error {
 				e.AvgLatencyMs,
 				e.LastCheckedNs,
 				e.LastError,
+				e.CloudflareStatus,
+				e.ScoringPolicyVersion,
+				e.ScoreBreakdown,
 			)
 			return err
 		},
@@ -230,7 +233,7 @@ func (r *CacheRepo) LoadAllNodeQuality() ([]model.NodeQuality, error) {
 	rows, err := r.db.Query(`
 		SELECT node_hash, profile, grade, score, unstable, service_reachable, api_reachable,
 		       cloudflare_challenged, cloudflare_challenge_type, avg_latency_ms,
-		       last_checked_ns, last_error
+		       last_checked_ns, last_error, cloudflare_status, scoring_policy_version, score_breakdown
 		FROM node_quality`)
 	if err != nil {
 		return nil, err
@@ -254,6 +257,9 @@ func (r *CacheRepo) LoadAllNodeQuality() ([]model.NodeQuality, error) {
 			&e.AvgLatencyMs,
 			&e.LastCheckedNs,
 			&e.LastError,
+			&e.CloudflareStatus,
+			&e.ScoringPolicyVersion,
+			&e.ScoreBreakdown,
 		); err != nil {
 			return nil, err
 		}
@@ -518,6 +524,9 @@ func (r *CacheRepo) FlushTx(ops FlushOps) error {
 				e.AvgLatencyMs,
 				e.LastCheckedNs,
 				e.LastError,
+				e.CloudflareStatus,
+				e.ScoringPolicyVersion,
+				e.ScoreBreakdown,
 			)
 			return err
 		}},
@@ -609,9 +618,10 @@ const (
 	upsertNodeQualitySQL = `INSERT INTO node_quality (
 			node_hash, profile, grade, score,
 			unstable, service_reachable, api_reachable, cloudflare_challenged,
-			cloudflare_challenge_type, avg_latency_ms, last_checked_ns, last_error
+			cloudflare_challenge_type, avg_latency_ms, last_checked_ns, last_error,
+			cloudflare_status, scoring_policy_version, score_breakdown
 		)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(node_hash, profile) DO UPDATE SET
 			grade                  = excluded.grade,
 			score                  = excluded.score,
@@ -622,7 +632,10 @@ const (
 			cloudflare_challenge_type = excluded.cloudflare_challenge_type,
 			avg_latency_ms         = excluded.avg_latency_ms,
 			last_checked_ns        = excluded.last_checked_ns,
-			last_error             = excluded.last_error`
+			last_error             = excluded.last_error,
+			cloudflare_status      = excluded.cloudflare_status,
+			scoring_policy_version = excluded.scoring_policy_version,
+			score_breakdown        = excluded.score_breakdown`
 
 	deleteNodesStaticSQL       = "DELETE FROM nodes_static WHERE hash = ?"
 	deleteNodesDynamicSQL      = "DELETE FROM nodes_dynamic WHERE hash = ?"

@@ -13,6 +13,8 @@ import { ToastContainer } from "../../components/ui/Toast";
 import { useToast } from "../../hooks/useToast";
 import { useI18n } from "../../i18n";
 import { formatApiErrorMessage } from "../../lib/error-message";
+import { cfStatusLabel, normalizeCFStatus, type CloudflareStatusToken } from "../../lib/cloudflareStatus";
+import { CloudflareStatusBadge, ScoreBreakdownExplanation } from "../../components/ScoreBreakdown";
 import {
   createProxyCheckTask,
   fetchProxySources,
@@ -26,6 +28,7 @@ import type {
   ProxyCheckPreset,
   ProxyCheckResultItem,
   ProxyCheckTask,
+  ProxyScore,
   SourceProxyCandidate,
 } from "./types";
 
@@ -366,6 +369,16 @@ export function ProxyCheckPage() {
         },
       }),
       ch.accessor("score", {
+        id: "cf_status",
+        header: "CF",
+        cell: (info) => {
+          const s = info.getValue() as ProxyScore | null | undefined;
+          if (!s) return "-";
+          const cfStatus = normalizeCFStatus(s.cloudflare_status) as CloudflareStatusToken;
+          return <CloudflareStatusBadge status={cfStatus} compact />;
+        },
+      }),
+      ch.accessor("score", {
         id: "service",
         header: "Svc",
         cell: (info) => {
@@ -386,8 +399,6 @@ export function ProxyCheckPage() {
           if (!s) return "-";
           return s.APIReachable ? (
             <CheckCircle2 size={14} style={{ color: "var(--color-success)" }} />
-          ) : s.CloudflareChallenged ? (
-            <Badge variant="warning">CF</Badge>
           ) : (
             <XCircle size={14} style={{ color: "var(--color-danger)" }} />
           );
@@ -400,6 +411,36 @@ export function ProxyCheckPage() {
           const s = info.getValue();
           if (!s) return "-";
           return <span>{s.AvgLatencyMs.toFixed(0)}ms</span>;
+        },
+      }),
+      ch.display({
+        id: "breakdown",
+        header: t("评分解释") as string,
+        cell: ({ row }) => {
+          const s = row.original.score;
+          if (!s || (!s.scoring_breakdown && !s.cloudflare_status)) return null;
+          return (
+            <details className="proxy-check-breakdown-details">
+              <summary className="proxy-check-breakdown-summary" style={{ cursor: "pointer", fontSize: "0.75rem", color: "var(--primary)" }}>
+                {t("展开")}
+              </summary>
+              <div style={{ marginTop: 8, minWidth: 320 }}>
+                {s.cloudflare_status ? (
+                  <div style={{ marginBottom: 8, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>{t("Cloudflare 状态")}</span>
+                    <CloudflareStatusBadge status={normalizeCFStatus(s.cloudflare_status) as CloudflareStatusToken} />
+                    <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                      {t(cfStatusLabel(normalizeCFStatus(s.cloudflare_status) as CloudflareStatusToken))}
+                    </span>
+                  </div>
+                ) : null}
+                <ScoreBreakdownExplanation
+                  breakdown={s.scoring_breakdown}
+                  policyVersion={s.scoring_breakdown?.version}
+                />
+              </div>
+            </details>
+          );
         },
       }),
       ch.accessor("error", {

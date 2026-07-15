@@ -303,6 +303,43 @@ func newTopologyRuntime(
 				},
 			})
 		},
+		ResponseFetcher: func(hash node.Hash, url string) (probe.FetchResponse, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), envCfg.ProbeTimeout)
+			defer cancel()
+			entry, ok := pool.GetEntry(hash)
+			if !ok {
+				return probe.FetchResponse{}, fmt.Errorf("node not found")
+			}
+			outboundPtr := entry.Outbound.Load()
+			if outboundPtr == nil {
+				return probe.FetchResponse{}, outbound.ErrOutboundNotReady
+			}
+			resp, err := netutil.HTTPGetViaOutboundWithResponse(ctx, *outboundPtr, url, netutil.OutboundHTTPOptions{
+				RequireStatusOK: false,
+				CheckRedirect:   netutil.SafeRedirectPolicy,
+				OnConnLifecycle: func(op netutil.ConnLifecycleOp) {
+					if onProbeConnLifecycle != nil {
+						onProbeConnLifecycle(op)
+					}
+				},
+			})
+			if err != nil {
+				return probe.FetchResponse{
+					Body:       resp.Body,
+					Latency:    resp.Latency,
+					StatusCode: resp.StatusCode,
+					Header:     resp.Header,
+					FinalURL:   resp.FinalURL,
+				}, err
+			}
+			return probe.FetchResponse{
+				Body:       resp.Body,
+				Latency:    resp.Latency,
+				StatusCode: resp.StatusCode,
+				Header:     resp.Header,
+				FinalURL:   resp.FinalURL,
+			}, nil
+		},
 		MaxEgressTestInterval: func() time.Duration {
 			return time.Duration(runtimeConfigSnapshot(runtimeCfg).MaxEgressTestInterval)
 		},
@@ -339,6 +376,20 @@ func newTopologyRuntime(
 					Rounds:              cfg.ProxyCheckRounds,
 					IPInfoEnrichment:    false, // placeholder, reserved
 				}
+			},
+			ScoringPolicy: func() *probe.ScoringPolicy {
+				cfg := runtimeConfigSnapshot(runtimeCfg)
+				if cfg.ProxyCheckScoring != nil && cfg.ProxyCheckScoring.Version >= 1 {
+					return cfg.ProxyCheckScoring
+				}
+				// Normalize from legacy flat options.
+				normalized := config.NormalizeScoringPolicy(nil, config.NormalizeOpts{
+					ServiceReachability: cfg.ProxyCheckServiceReachability,
+					APIReachability:     cfg.ProxyCheckAPIReachability,
+					CloudflareDetection: cfg.ProxyCheckCloudflareDetection,
+					MultiRound:          cfg.ProxyCheckMultiRound,
+				})
+				return &normalized
 			},
 			TriggerOnNewNode: func() bool {
 				return runtimeConfigSnapshot(runtimeCfg).ProxyCheckTriggerOnNewNode

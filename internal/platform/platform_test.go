@@ -13,7 +13,11 @@ import (
 
 // makeFullyRoutableEntry creates a NodeEntry that passes all 5 filter conditions.
 func makeFullyRoutableEntry(hash node.Hash, subIDs ...string) *node.NodeEntry {
-	e := node.NewNodeEntry(hash, nil, time.Now(), 16)
+	return makeFullyRoutableEntryWithRawOptions(hash, nil, subIDs...)
+}
+
+func makeFullyRoutableEntryWithRawOptions(hash node.Hash, rawOptions []byte, subIDs ...string) *node.NodeEntry {
+	e := node.NewNodeEntry(hash, rawOptions, time.Now(), 16)
 	for _, id := range subIDs {
 		e.AddSubscriptionID(id)
 	}
@@ -322,6 +326,55 @@ func TestPlatform_NotifyDirty_AddRemove(t *testing.T) {
 	}
 }
 
+func TestPlatform_NotifyDirty_QualityStatusChange(t *testing.T) {
+	p := NewPlatform("p1", "Test", nil, nil)
+	p.QualityCloudflareStatuses = []string{"clean"}
+	h := makeHash(`{"type":"ss"}`)
+	entry := makeFullyRoutableEntry(h, "sub1")
+
+	entryStore := map[node.Hash]*node.NodeEntry{h: entry}
+	getEntry := func(hash node.Hash) (*node.NodeEntry, bool) {
+		e, ok := entryStore[hash]
+		return e, ok
+	}
+
+	// No quality -> reject.
+	p.NotifyDirty(h, getEntry, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 0 {
+		t.Fatal("NotifyDirty should reject node with no quality")
+	}
+
+	// Set quality with matching status -> add.
+	entry.SetQuality(&model.NodeQuality{
+		Grade: "A", Score: 90, ServiceReachable: true,
+		CloudflareStatus: "clean", Profile: "generic",
+	})
+	p.NotifyDirty(h, getEntry, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 1 {
+		t.Fatal("NotifyDirty should add node with matching status")
+	}
+
+	// Change quality to non-matching status -> remove.
+	entry.SetQuality(&model.NodeQuality{
+		Grade: "B", Score: 70, ServiceReachable: true,
+		CloudflareStatus: "block", Profile: "generic",
+	})
+	p.NotifyDirty(h, getEntry, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 0 {
+		t.Fatal("NotifyDirty should remove node with non-matching status")
+	}
+
+	// Change back to matching -> re-add.
+	entry.SetQuality(&model.NodeQuality{
+		Grade: "A", Score: 90, ServiceReachable: true,
+		CloudflareStatus: "clean", Profile: "generic",
+	})
+	p.NotifyDirty(h, getEntry, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 1 {
+		t.Fatal("NotifyDirty should re-add node with matching status")
+	}
+}
+
 func TestPlatform_FullRebuild_ClearsOld(t *testing.T) {
 	p := NewPlatform("p1", "Test", nil, nil)
 	h1 := makeHash(`{"type":"ss","n":1}`)
@@ -355,8 +408,9 @@ func TestPlatform_FullRebuild_ClearsOld(t *testing.T) {
 func TestPlatform_EvaluateNode_ProtocolFilterInclude(t *testing.T) {
 	p := NewPlatform("p1", "Test", nil, nil)
 	p.ProtocolFilters = []string{"shadowsocks"}
-	h := makeHash(`{"type":"ss"}`)
-	entry := makeFullyRoutableEntry(h, "sub1")
+	rawOptions := []byte(`{"type":"ss"}`)
+	h := makeHash(string(rawOptions))
+	entry := makeFullyRoutableEntryWithRawOptions(h, rawOptions, "sub1")
 
 	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
 		fn(h, entry)
@@ -370,8 +424,9 @@ func TestPlatform_EvaluateNode_ProtocolFilterInclude(t *testing.T) {
 func TestPlatform_EvaluateNode_ProtocolFilterIncludeReject(t *testing.T) {
 	p := NewPlatform("p1", "Test", nil, nil)
 	p.ProtocolFilters = []string{"vmess"}
-	h := makeHash(`{"type":"ss"}`)
-	entry := makeFullyRoutableEntry(h, "sub1")
+	rawOptions := []byte(`{"type":"ss"}`)
+	h := makeHash(string(rawOptions))
+	entry := makeFullyRoutableEntryWithRawOptions(h, rawOptions, "sub1")
 
 	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
 		fn(h, entry)
@@ -385,8 +440,9 @@ func TestPlatform_EvaluateNode_ProtocolFilterIncludeReject(t *testing.T) {
 func TestPlatform_EvaluateNode_ProtocolFilterExclude(t *testing.T) {
 	p := NewPlatform("p1", "Test", nil, nil)
 	p.ExcludeProtocolFilters = []string{"shadowsocks"}
-	h := makeHash(`{"type":"ss"}`)
-	entry := makeFullyRoutableEntry(h, "sub1")
+	rawOptions := []byte(`{"type":"ss"}`)
+	h := makeHash(string(rawOptions))
+	entry := makeFullyRoutableEntryWithRawOptions(h, rawOptions, "sub1")
 
 	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
 		fn(h, entry)
@@ -400,8 +456,9 @@ func TestPlatform_EvaluateNode_ProtocolFilterExclude(t *testing.T) {
 func TestPlatform_EvaluateNode_ProtocolFilterExcludePassesOthers(t *testing.T) {
 	p := NewPlatform("p1", "Test", nil, nil)
 	p.ExcludeProtocolFilters = []string{"vmess"}
-	h := makeHash(`{"type":"ss"}`)
-	entry := makeFullyRoutableEntry(h, "sub1")
+	rawOptions := []byte(`{"type":"ss"}`)
+	h := makeHash(string(rawOptions))
+	entry := makeFullyRoutableEntryWithRawOptions(h, rawOptions, "sub1")
 
 	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
 		fn(h, entry)
@@ -417,10 +474,11 @@ func TestPlatform_EvaluateNode_ProtocolFilterIncludeAndExclude(t *testing.T) {
 	p := NewPlatform("p1", "Test", nil, nil)
 	p.ProtocolFilters = []string{"shadowsocks"}
 	p.ExcludeProtocolFilters = []string{"shadowsocks"}
-	h := makeHash(`{"type":"ss"}`)
-	entry := makeFullyRoutableEntry(h, "sub1")
+	rawOptions := []byte(`{"type":"ss"}`)
+	h := makeHash(string(rawOptions))
+	entry := makeFullyRoutableEntryWithRawOptions(h, rawOptions, "sub1")
 
-	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool {
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
 		fn(h, entry)
 	}, alwaysLookup, usGeoLookup)
 
@@ -432,10 +490,11 @@ func TestPlatform_EvaluateNode_ProtocolFilterIncludeAndExclude(t *testing.T) {
 func TestPlatform_EvaluateNode_UnknownProtocolIncludeRejected(t *testing.T) {
 	p := NewPlatform("p1", "Test", nil, nil)
 	p.ProtocolFilters = []string{"shadowsocks"}
-	h := makeHash(`{"type":"unknown_proto"}`)
-	entry := makeFullyRoutableEntry(h, "sub1")
+	rawOptions := []byte(`{"type":"unknown_proto"}`)
+	h := makeHash(string(rawOptions))
+	entry := makeFullyRoutableEntryWithRawOptions(h, rawOptions, "sub1")
 
-	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool {
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
 		fn(h, entry)
 	}, alwaysLookup, usGeoLookup)
 
@@ -448,7 +507,7 @@ func TestPlatform_EvaluateNode_UnknownProtocolIncludeRejected(t *testing.T) {
 func TestPlatform_EvaluateNode_QualityGradeFilter(t *testing.T) {
 	p := NewPlatform("p1", "Test", nil, nil)
 	p.QualityGrade = "A"
-	p.QualityMinScore = 0    // no min score filter
+	p.QualityMinScore = 0 // no min score filter
 	p.QualityCloudflareChallenged = nil
 	p.QualityCheckedSinceNs = 0
 	p.QualityProfile = ""
@@ -531,6 +590,104 @@ func TestPlatform_EvaluateNode_QualityMinScoreFilter(t *testing.T) {
 	}, alwaysLookup, usGeoLookup)
 	if p.View().Size() != 1 {
 		t.Fatal("node with score 90 should pass min score 80 filter")
+	}
+}
+
+// TestPlatform_EvaluateNode_QualityCloudflareStatusesFilter verifies detailed
+// CF status filter: OR within selected statuses, empty→unchecked normalization,
+// missing quality rejection, and intersection with existing bool filter.
+func TestPlatform_EvaluateNode_QualityCloudflareStatusesFilter(t *testing.T) {
+	p := NewPlatform("p1", "Test", nil, nil)
+	p.QualityCloudflareStatuses = []string{"clean", "not_detected"}
+
+	h := makeHash(`{"type":"ss"}`)
+	entry := makeFullyRoutableEntry(h, "sub1")
+
+	// No quality -> reject.
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 0 {
+		t.Fatal("node without quality should be rejected by CF status filter")
+	}
+
+	// Status "block" not in {clean, not_detected} -> reject.
+	entry.SetQuality(&model.NodeQuality{
+		Grade: "A", Score: 90, ServiceReachable: true,
+		CloudflareStatus: "block", Profile: "generic",
+	})
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 0 {
+		t.Fatal("node with block status should not match clean/not_detected filter")
+	}
+
+	// Status "clean" in filter -> pass.
+	entry.SetQuality(&model.NodeQuality{
+		Grade: "A", Score: 90, ServiceReachable: true,
+		CloudflareStatus: "clean", Profile: "generic",
+	})
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 1 {
+		t.Fatal("node with clean status should match clean/not_detected filter")
+	}
+
+	// Empty legacy status normalizes to "unchecked" -> reject (not in filter).
+	entry.SetQuality(&model.NodeQuality{
+		Grade: "A", Score: 90, ServiceReachable: true,
+		CloudflareStatus: "", Profile: "generic",
+	})
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 0 {
+		t.Fatal("node with empty legacy status should normalize to unchecked and not match clean/not_detected")
+	}
+
+	// Single status filter with "unchecked" should match empty status.
+	p2 := NewPlatform("p2", "Test2", nil, nil)
+	p2.QualityCloudflareStatuses = []string{"unchecked"}
+	entry.SetQuality(&model.NodeQuality{
+		Grade: "A", Score: 90, ServiceReachable: true,
+		CloudflareStatus: "", Profile: "generic", // empty -> unchecked
+	})
+	p2.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+	if p2.View().Size() != 1 {
+		t.Fatal("node with empty status should match unchecked filter")
+	}
+
+	// Intersection with CloudflareChallenged filter.
+	trueVal := true
+	p3 := NewPlatform("p3", "Test3", nil, nil)
+	p3.QualityCloudflareStatuses = []string{"block", "js_challenge"}
+	p3.QualityCloudflareChallenged = &trueVal // must be challenged
+
+	entry.SetQuality(&model.NodeQuality{
+		Grade: "A", Score: 90, ServiceReachable: true,
+		CloudflareStatus: "block", CloudflareChallenged: true, Profile: "generic",
+	})
+	p3.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+	if p3.View().Size() != 1 {
+		t.Fatal("node with block status and challenged=true should pass intersection filter")
+	}
+
+	// Same but clean (not in status filter) -> reject.
+	entry.SetQuality(&model.NodeQuality{
+		Grade: "A", Score: 90, ServiceReachable: true,
+		CloudflareStatus: "clean", CloudflareChallenged: true, Profile: "generic",
+	})
+	p3.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+	if p3.View().Size() != 0 {
+		t.Fatal("node with clean status should be rejected by block/js_challenge filter")
 	}
 }
 
@@ -675,10 +832,11 @@ func TestPlatform_EvaluateNode_QualityFilters_NoFilter_IgnoresQuality(t *testing
 func TestPlatform_EvaluateNode_UnknownProtocolExcludeOnlyRejected(t *testing.T) {
 	p := NewPlatform("p1", "Test", nil, nil)
 	p.ExcludeProtocolFilters = []string{"vmess"}
-	h := makeHash(`{"type":"unknown_proto"}`)
-	entry := makeFullyRoutableEntry(h, "sub1")
+	rawOptions := []byte(`{"type":"unknown_proto"}`)
+	h := makeHash(string(rawOptions))
+	entry := makeFullyRoutableEntryWithRawOptions(h, rawOptions, "sub1")
 
-	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool {
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
 		fn(h, entry)
 	}, alwaysLookup, usGeoLookup)
 

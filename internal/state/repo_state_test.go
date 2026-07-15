@@ -10,6 +10,7 @@ import (
 
 	"github.com/Resinat/Resin/internal/config"
 	"github.com/Resinat/Resin/internal/model"
+	"github.com/Resinat/Resin/internal/platform"
 )
 
 // helper: create a state.db in a temp dir, init DDL, return StateRepo + cleanup.
@@ -106,8 +107,8 @@ func TestMigrateStateDB_LegacyBaselineAdvancesToLatest(t *testing.T) {
 	if dirty {
 		t.Fatalf("schema_migrations dirty=true")
 	}
-	if version != stateVersionAddClashFingerprintPolicy {
-		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddClashFingerprintPolicy)
+	if version != stateVersionAddQualityCloudflareStatuses {
+		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddQualityCloudflareStatuses)
 	}
 	if ok, err := hasTableColumn(db, "subscriptions", "incremental_alive_nodes"); err != nil || !ok {
 		t.Fatalf("expected migrated column subscriptions.incremental_alive_nodes, ok=%v err=%v", ok, err)
@@ -170,7 +171,7 @@ func TestMigrateStateDB_LegacyV8AdvancesToLatest(t *testing.T) {
 		t.Fatalf("MigrateStateDB: %v", err)
 	}
 
-	// Must end at the latest version (v9).
+	// Must end at the latest state migration version.
 	var version int
 	var dirty bool
 	err = db.QueryRow("SELECT version, dirty FROM schema_migrations LIMIT 1").Scan(&version, &dirty)
@@ -180,8 +181,8 @@ func TestMigrateStateDB_LegacyV8AdvancesToLatest(t *testing.T) {
 	if dirty {
 		t.Fatalf("schema_migrations dirty=true")
 	}
-	if version != stateVersionAddClashFingerprintPolicy {
-		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddClashFingerprintPolicy)
+	if version != stateVersionAddQualityCloudflareStatuses {
+		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddQualityCloudflareStatuses)
 	}
 
 	// v8 columns must still be present.
@@ -254,8 +255,8 @@ func TestMigrateStateDB_AddsIncrementalAliveNodesToLegacySubscriptions(t *testin
 	if dirty {
 		t.Fatalf("schema_migrations dirty=true")
 	}
-	if version != stateVersionAddClashFingerprintPolicy {
-		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddClashFingerprintPolicy)
+	if version != stateVersionAddQualityCloudflareStatuses {
+		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddQualityCloudflareStatuses)
 	}
 	if ok, err := hasTableColumn(db, "platforms", "passive_circuit_breaker_disabled"); err != nil || !ok {
 		t.Fatalf("expected migrated column platforms.passive_circuit_breaker_disabled, ok=%v err=%v", ok, err)
@@ -332,8 +333,8 @@ func TestMigrateStateDB_NormalizesLegacyRandomMissAction(t *testing.T) {
 	if dirty {
 		t.Fatalf("schema_migrations dirty=true")
 	}
-	if version != stateVersionAddClashFingerprintPolicy {
-		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddClashFingerprintPolicy)
+	if version != stateVersionAddQualityCloudflareStatuses {
+		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddQualityCloudflareStatuses)
 	}
 	if ok, err := hasTableColumn(db, "subscriptions", "incremental_alive_nodes"); err != nil || !ok {
 		t.Fatalf("expected migrated column subscriptions.incremental_alive_nodes, ok=%v err=%v", ok, err)
@@ -914,11 +915,11 @@ func TestPlatformCRUD_WithQualityFilters(t *testing.T) {
 
 	// Create platform with nil CF challenged (no filter).
 	p1 := model.Platform{
-		ID:                  "plat-q-1",
-		Name:                "Quality-Platform-1",
-		StickyTTLNs:         30000000000,
-		RegexFilters:        []string{},
-		RegionFilters:       []string{},
+		ID:                               "plat-q-1",
+		Name:                             "Quality-Platform-1",
+		StickyTTLNs:                      30000000000,
+		RegexFilters:                     []string{},
+		RegionFilters:                    []string{},
 		ReverseProxyMissAction:           "TREAT_AS_EMPTY",
 		ReverseProxyEmptyAccountBehavior: "RANDOM",
 		AllocationPolicy:                 "BALANCED",
@@ -1050,5 +1051,144 @@ func TestPlatformDefaultPlatform_QualityFiltersZero(t *testing.T) {
 	}
 	if got.QualityProfile != "" {
 		t.Fatalf("Default QualityProfile should be empty, got %q", got.QualityProfile)
+	}
+}
+
+// TestMigrateStateDB_AddsQualityCFStatusesColumn verifies that migration 000011
+// creates the quality_cloudflare_statuses_json column on platforms.
+func TestMigrateStateDB_AddsQualityCFStatusesColumn(t *testing.T) {
+	dir := t.TempDir()
+	db, err := OpenDB(dir + "/state.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if err := MigrateStateDB(db); err != nil {
+		t.Fatalf("MigrateStateDB: %v", err)
+	}
+
+	if ok, err := hasTableColumn(db, "platforms", "quality_cloudflare_statuses_json"); err != nil || !ok {
+		t.Fatalf("expected column quality_cloudflare_statuses_json, ok=%v err=%v", ok, err)
+	}
+}
+
+// TestPlatformCRUD_WithQualityCFStatuses verifies round-trip of quality CF
+// statuses field with empty, nil, and populated values.
+func TestPlatformCRUD_WithQualityCFStatuses(t *testing.T) {
+	repo := newTestStateRepo(t)
+
+	// Create platform with empty statuses.
+	p1 := model.Platform{
+		ID:                               "plat-cf-1",
+		Name:                             "CF-Statuses-1",
+		StickyTTLNs:                      30000000000,
+		RegexFilters:                     []string{},
+		RegionFilters:                    []string{},
+		ReverseProxyMissAction:           "TREAT_AS_EMPTY",
+		ReverseProxyEmptyAccountBehavior: "RANDOM",
+		AllocationPolicy:                 "BALANCED",
+		UpdatedAtNs:                      time.Now().UnixNano(),
+		QualityCloudflareStatuses:        []string{},
+	}
+	if err := repo.UpsertPlatform(p1); err != nil {
+		t.Fatalf("UpsertPlatform with empty statuses: %v", err)
+	}
+	got1, err := repo.GetPlatform("plat-cf-1")
+	if err != nil {
+		t.Fatalf("GetPlatform: %v", err)
+	}
+	if len(got1.QualityCloudflareStatuses) != 0 {
+		t.Fatalf("QualityCloudflareStatuses should be empty, got %v", got1.QualityCloudflareStatuses)
+	}
+
+	// Create platform with populated statuses.
+	p2 := model.Platform{
+		ID:                               "plat-cf-2",
+		Name:                             "CF-Statuses-2",
+		StickyTTLNs:                      30000000000,
+		RegexFilters:                     []string{},
+		RegionFilters:                    []string{},
+		ReverseProxyMissAction:           "TREAT_AS_EMPTY",
+		ReverseProxyEmptyAccountBehavior: "RANDOM",
+		AllocationPolicy:                 "BALANCED",
+		UpdatedAtNs:                      time.Now().UnixNano(),
+		QualityCloudflareStatuses:        []string{"clean", "not_detected", "block"},
+	}
+	if err := repo.UpsertPlatform(p2); err != nil {
+		t.Fatalf("UpsertPlatform with statuses: %v", err)
+	}
+	got2, err := repo.GetPlatform("plat-cf-2")
+	if err != nil {
+		t.Fatalf("GetPlatform: %v", err)
+	}
+	if len(got2.QualityCloudflareStatuses) != 3 {
+		t.Fatalf("expected 3 statuses, got %d: %v", len(got2.QualityCloudflareStatuses), got2.QualityCloudflareStatuses)
+	}
+	if got2.QualityCloudflareStatuses[0] != "block" || got2.QualityCloudflareStatuses[1] != "clean" || got2.QualityCloudflareStatuses[2] != "not_detected" {
+		t.Fatalf("statuses mismatch: got %v", got2.QualityCloudflareStatuses)
+	}
+
+	// List includes statuses.
+	all, err := repo.ListPlatforms()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, p := range all {
+		if p.ID == "plat-cf-2" {
+			found = true
+			if len(p.QualityCloudflareStatuses) != 3 {
+				t.Fatalf("ListPlatforms: expected 3 statuses, got %d", len(p.QualityCloudflareStatuses))
+			}
+		}
+	}
+	if !found {
+		t.Fatal("ListPlatforms did not return plat-cf-2")
+	}
+
+	// Update - clear statuses.
+	p1.QualityCloudflareStatuses = []string{"ng"}
+	p1.UpdatedAtNs = time.Now().UnixNano()
+	if err := repo.UpsertPlatform(p1); err != nil {
+		t.Fatalf("UpsertPlatform update statuses: %v", err)
+	}
+	got1b, err := repo.GetPlatform("plat-cf-1")
+	if err != nil {
+		t.Fatalf("GetPlatform after update: %v", err)
+	}
+	if len(got1b.QualityCloudflareStatuses) != 1 || got1b.QualityCloudflareStatuses[0] != "ng" {
+		t.Fatalf("after update, expected [ng], got %v", got1b.QualityCloudflareStatuses)
+	}
+
+	p1.QualityCloudflareStatuses = []string{"bogus"}
+	if err := repo.UpsertPlatform(p1); err == nil {
+		t.Fatal("expected invalid quality cloudflare status to be rejected")
+	}
+}
+
+// TestMigrateStateDB_000011DownDropsCFStatusesColumn verifies rollback of
+// migration 000011.
+func TestMigrateStateDB_000011DownDropsCFStatusesColumn(t *testing.T) {
+	dir := t.TempDir()
+	db, err := OpenDB(dir + "/state.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := MigrateStateDB(db); err != nil {
+		t.Fatal(err)
+	}
+	downSQL, err := migrationsFS.ReadFile("migrations/state/000011_platforms_add_quality_cloudflare_statuses.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(downSQL)); err != nil {
+		t.Fatalf("apply state migration 000011 down: %v", err)
+	}
+	if ok, err := hasTableColumn(db, "platforms", "quality_cloudflare_statuses_json"); err != nil {
+		t.Fatal(err)
+	} else if ok {
+		t.Fatal("quality_cloudflare_statuses_json still present after migration down")
 	}
 }

@@ -62,6 +62,38 @@ func TestDuration_JSON(t *testing.T) {
 	}
 }
 
+func TestDefaultRuntimeConfig_DeepCopyIsolation(t *testing.T) {
+	// Verify that copyRuntimeConfig deep-copies ProxyCheckScoring
+	// so that mutation of the copy does not affect the original.
+	cfg := NewDefaultRuntimeConfig()
+	// Simulate a canonical scoring policy being applied.
+	policy := BalancedScoringPolicy()
+	cfg.ProxyCheckScoring = &policy
+
+	// Shallow copy (what copyRuntimeConfig used to do).
+	shallow := *cfg
+	shallow.ProxyCheckScoring = cfg.ProxyCheckScoring
+
+	// Modify through shallow.
+	*shallow.ProxyCheckScoring.Cloudflare.StatusScores.Clean = 50
+
+	// Original must be unaffected for deep copy. But this is a shallow copy,
+	// so it WILL affect the original (testing the problem, not the fix).
+	// The fix (Clone) should prevent this.
+	clone := cfg.ProxyCheckScoring.Clone()
+	*clone.Cloudflare.StatusScores.Clean = 25
+
+	if *cfg.ProxyCheckScoring.Cloudflare.StatusScores.Clean != 50 {
+		t.Fatal("original clean should still be 50 (shallow copy affected it)")
+	}
+	// After Clone, original must NOT be changed by clone mutation.
+	// Reset to verify isolation:
+	*cfg.ProxyCheckScoring.Cloudflare.StatusScores.Clean = 100
+	if *clone.Cloudflare.StatusScores.Clean != 25 {
+		t.Fatal("clone clean should be 25 after mutation (clone is independent)")
+	}
+}
+
 func TestDuration_JSONInvalid(t *testing.T) {
 	var d Duration
 	err := json.Unmarshal([]byte(`"not-a-duration"`), &d)

@@ -2,6 +2,7 @@ package probe
 
 import (
 	"errors"
+	"net/http"
 	"net/netip"
 	"sync"
 	"sync/atomic"
@@ -967,6 +968,99 @@ func TestParseCloudflareTrace_WithoutLoc(t *testing.T) {
 }
 
 // TestParseCloudflareTrace_NoIP verifies error when ip= field is missing.
+// TestCheckProxySync_PrefersResponseFetcher verifies that CheckProxySync
+// uses ResponseFetcher when available, providing full metadata.
+func TestCheckProxySync_PrefersResponseFetcher(t *testing.T) {
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+	})
+
+	hash := node.HashFromRawOptions([]byte(`{"type":"checkproxy-resp"}`))
+	pool.AddNodeFromSub(hash, []byte(`{"type":"checkproxy-resp"}`), "sub1")
+
+	entry, ok := pool.GetEntry(hash)
+	if !ok {
+		t.Fatal("entry not found")
+	}
+	storeOutbound(entry)
+
+	var fetcherUsed bool
+	var respFetcherUsed bool
+
+	mgr := NewProbeManager(ProbeConfig{
+		Pool: pool,
+		Fetcher: func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+			fetcherUsed = true
+			return []byte("plain"), 10 * time.Millisecond, nil
+		},
+		ResponseFetcher: func(_ node.Hash, url string) (FetchResponse, error) {
+			respFetcherUsed = true
+			return FetchResponse{
+				Body:       []byte("metadata"),
+				Latency:    10 * time.Millisecond,
+				StatusCode: 200,
+				Header:     make(http.Header),
+				FinalURL:   url,
+			}, nil
+		},
+	})
+
+	score, err := mgr.CheckProxySync(hash, ProfileGeneric, DefaultOptions())
+	if err != nil {
+		t.Fatalf("CheckProxySync: %v", err)
+	}
+	if !respFetcherUsed {
+		t.Fatal("expected ResponseFetcher to be used")
+	}
+	if fetcherUsed {
+		t.Fatal("expected plain Fetcher NOT to be used when ResponseFetcher is available")
+	}
+	if score == nil {
+		t.Fatal("expected non-nil score")
+	}
+}
+
+// TestCheckProxySync_FallsBackToFetcher verifies that CheckProxySync falls
+// back to the legacy adapter when no ResponseFetcher is configured.
+func TestCheckProxySync_FallsBackToFetcher(t *testing.T) {
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+	})
+
+	hash := node.HashFromRawOptions([]byte(`{"type":"checkproxy-legacy"}`))
+	pool.AddNodeFromSub(hash, []byte(`{"type":"checkproxy-legacy"}`), "sub1")
+
+	entry, ok := pool.GetEntry(hash)
+	if !ok {
+		t.Fatal("entry not found")
+	}
+	storeOutbound(entry)
+
+	var fetcherUsed bool
+
+	mgr := NewProbeManager(ProbeConfig{
+		Pool: pool,
+		Fetcher: func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+			fetcherUsed = true
+			return []byte("plain"), 10 * time.Millisecond, nil
+		},
+		// No ResponseFetcher configured.
+	})
+
+	score, err := mgr.CheckProxySync(hash, ProfileGeneric, DefaultOptions())
+	if err != nil {
+		t.Fatalf("CheckProxySync: %v", err)
+	}
+	if !fetcherUsed {
+		t.Fatal("expected plain Fetcher to be used via legacy adapter")
+	}
+	if score == nil {
+		t.Fatal("expected non-nil score")
+	}
+}
+
 func TestParseCloudflareTrace_NoIP(t *testing.T) {
 	body := []byte("fl=abc\nts=12345")
 	_, _, err := ParseCloudflareTrace(body)

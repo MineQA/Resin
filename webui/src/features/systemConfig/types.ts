@@ -1,3 +1,5 @@
+import type { ScoringPolicy } from "../../lib/cloudflareStatus";
+
 export type ProxyCheckProfile = "generic" | "openai" | "grok" | "gemini" | "claude";
 
 export type RuntimeConfig = {
@@ -26,6 +28,8 @@ export type RuntimeConfig = {
   proxy_check_multi_round: boolean;
   proxy_check_rounds: number;
   proxy_check_trigger_on_new_node: boolean;
+  /** Canonical v1 scoring policy. May be null/missing when backend still uses legacy flat fields. */
+  proxy_check_scoring: ScoringPolicy | null;
 };
 
 export type EnvConfig = {

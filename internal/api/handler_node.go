@@ -224,6 +224,11 @@ func HandleListNodes(cp *service.ControlPlaneService) http.HandlerFunc {
 			}
 			filters.QualityCloudflareChallenged = &b
 		}
+		if cfStatuses, ok := parseCloudflareStatusesQuery(w, q); !ok {
+			return
+		} else if cfStatuses != nil {
+			filters.QualityCloudflareStatuses = cfStatuses
+		}
 		if v := q.Get("quality_checked_since"); v != "" {
 			t, err := time.Parse(time.RFC3339Nano, v)
 			if err != nil {

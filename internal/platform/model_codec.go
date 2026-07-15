@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/Resinat/Resin/internal/cloudflare"
 	"github.com/Resinat/Resin/internal/model"
 	"github.com/Resinat/Resin/internal/node"
 )
@@ -64,7 +65,7 @@ func NewConfiguredPlatform(
 		id, name, regexFilters, regionFilters, protocolFilters, excludeProtocolFilters,
 		stickyTTLNs, missAction, emptyAccountBehavior, fixedAccountHeader, allocationPolicy,
 		passiveCircuitBreakerDisabled,
-		"", 0, nil, 0, "",
+		"", 0, nil, nil, 0, "",
 	)
 }
 
@@ -86,6 +87,7 @@ func NewConfiguredPlatformWithQuality(
 	qualityGrade string,
 	qualityMinScore float64,
 	qualityCloudflareChallenged *bool,
+	qualityCloudflareStatuses []string,
 	qualityCheckedSinceNs int64,
 	qualityProfile string,
 ) *Platform {
@@ -107,6 +109,7 @@ func NewConfiguredPlatformWithQuality(
 	plat.QualityGrade = qualityGrade
 	plat.QualityMinScore = qualityMinScore
 	plat.QualityCloudflareChallenged = qualityCloudflareChallenged
+	plat.QualityCloudflareStatuses = append([]string(nil), qualityCloudflareStatuses...)
 	plat.QualityCheckedSinceNs = qualityCheckedSinceNs
 	plat.QualityProfile = qualityProfile
 	return plat
@@ -202,6 +205,11 @@ func BuildFromModel(mp model.Platform) (*Platform, error) {
 		v := *mp.QualityCloudflareChallenged
 		qualityCF = &v
 	}
+	// Validate and normalize quality cloudflare statuses.
+	cfStatuses, err := cloudflare.NormalizeSet(mp.QualityCloudflareStatuses)
+	if err != nil {
+		return nil, fmt.Errorf("decode platform %s quality_cloudflare_statuses: %w", mp.ID, err)
+	}
 
 	return NewConfiguredPlatformWithQuality(
 		mp.ID,
@@ -219,6 +227,7 @@ func BuildFromModel(mp model.Platform) (*Platform, error) {
 		mp.QualityGrade,
 		mp.QualityMinScore,
 		qualityCF,
+		cfStatuses,
 		mp.QualityCheckedSinceNs,
 		mp.QualityProfile,
 	), nil

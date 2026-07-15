@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/Resinat/Resin/internal/cloudflare"
 	"github.com/Resinat/Resin/internal/node"
 )
 
@@ -164,4 +165,20 @@ func parseProtocolValues(w http.ResponseWriter, rawValues []string, paramName st
 		return nil, true
 	}
 	return canonical, true
+}
+
+// parseCloudflareStatusesQuery reads all repeated quality_cloudflare_status
+// query values, validates each token, and returns them normalized and
+// deduplicated. Unknown or empty explicit tokens return 400.
+func parseCloudflareStatusesQuery(w http.ResponseWriter, q url.Values) ([]string, bool) {
+	values := q["quality_cloudflare_status"]
+	if len(values) == 0 {
+		return nil, true // no filter
+	}
+	normalized, err := cloudflare.NormalizeSet(values)
+	if err != nil {
+		writeInvalidArgument(w, err.Error())
+		return nil, false
+	}
+	return normalized, true
 }

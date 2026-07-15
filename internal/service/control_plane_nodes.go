@@ -33,6 +33,7 @@ type NodeFilters struct {
 	QualityGrade                *string
 	QualityMinScore             *float64
 	QualityCloudflareChallenged *bool
+	QualityCloudflareStatuses   []string // non-empty = filter nodes matching any of these statuses
 	QualityCheckedSince         *time.Time
 	QualityProfile              *string
 }
@@ -304,6 +305,28 @@ func nodeEntryMatchesQualityFilters(entry *node.NodeEntry, filters NodeFilters) 
 	// quality_cloudflare_challenged: check the challenged flag.
 	if filters.QualityCloudflareChallenged != nil {
 		if q == nil || q.CloudflareChallenged != *filters.QualityCloudflareChallenged {
+			return false
+		}
+	}
+
+	// quality_cloudflare_statuses: OR within selected detailed statuses.
+	// Empty persisted status normalizes to "unchecked" for matching.
+	if len(filters.QualityCloudflareStatuses) > 0 {
+		if q == nil {
+			return false
+		}
+		cfStatus := q.CloudflareStatus
+		if cfStatus == "" {
+			cfStatus = "unchecked"
+		}
+		matched := false
+		for _, s := range filters.QualityCloudflareStatuses {
+			if s == cfStatus {
+				matched = true
+				break
+			}
+		}
+		if !matched {
 			return false
 		}
 	}

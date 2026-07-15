@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Resinat/Resin/internal/cloudflare"
 	"github.com/Resinat/Resin/internal/config"
 	"github.com/Resinat/Resin/internal/model"
 	"github.com/Resinat/Resin/internal/platform"
@@ -152,6 +153,15 @@ func (r *StateRepo) UpsertPlatform(p model.Platform) error {
 	if err != nil {
 		return fmt.Errorf("encode platform %s exclude_protocol_filters: %w", p.ID, err)
 	}
+	normalizedCFStatuses, err := cloudflare.NormalizeSet(p.QualityCloudflareStatuses)
+	if err != nil {
+		return fmt.Errorf("platform %s quality_cloudflare_statuses: %w", p.ID, err)
+	}
+	p.QualityCloudflareStatuses = normalizedCFStatuses
+	cfStatusesJSON, err := encodeStringSliceJSON(p.QualityCloudflareStatuses)
+	if err != nil {
+		return fmt.Errorf("encode platform %s quality_cloudflare_statuses: %w", p.ID, err)
+	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -172,9 +182,10 @@ func (r *StateRepo) UpsertPlatform(p model.Platform) error {
 		                       reverse_proxy_fixed_account_header, allocation_policy,
 		                       passive_circuit_breaker_disabled,
 		                       quality_grade, quality_min_score, quality_cloudflare_challenged,
+		                       quality_cloudflare_statuses_json,
 		                       quality_checked_since_ns, quality_profile,
 		                       updated_at_ns)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name                     = excluded.name,
 			sticky_ttl_ns            = excluded.sticky_ttl_ns,
@@ -190,6 +201,7 @@ func (r *StateRepo) UpsertPlatform(p model.Platform) error {
 			quality_grade           = excluded.quality_grade,
 			quality_min_score       = excluded.quality_min_score,
 			quality_cloudflare_challenged = excluded.quality_cloudflare_challenged,
+			quality_cloudflare_statuses_json = excluded.quality_cloudflare_statuses_json,
 			quality_checked_since_ns = excluded.quality_checked_since_ns,
 			quality_profile         = excluded.quality_profile,
 			updated_at_ns            = excluded.updated_at_ns
@@ -198,6 +210,7 @@ func (r *StateRepo) UpsertPlatform(p model.Platform) error {
 		p.ReverseProxyMissAction, p.ReverseProxyEmptyAccountBehavior, p.ReverseProxyFixedAccountHeader,
 		p.AllocationPolicy, p.PassiveCircuitBreakerDisabled,
 		p.QualityGrade, p.QualityMinScore, cfChallengedInt,
+		cfStatusesJSON,
 		p.QualityCheckedSinceNs, p.QualityProfile,
 		p.UpdatedAtNs)
 	if err != nil {
@@ -258,12 +271,14 @@ func (r *StateRepo) GetPlatform(id string) (*model.Platform, error) {
 			reverse_proxy_fixed_account_header, allocation_policy,
 			passive_circuit_breaker_disabled,
 			quality_grade, quality_min_score, quality_cloudflare_challenged,
+			quality_cloudflare_statuses_json,
 			quality_checked_since_ns, quality_profile,
 			updated_at_ns
 			FROM platforms WHERE id = ?`, id)
 
 	var p model.Platform
 	var regexFiltersJSON, regionFiltersJSON, protocolFiltersJSON, excludeProtocolFiltersJSON string
+	var cfStatusesJSON string
 	var passiveCircuitBreakerDisabled int
 	var cfChallengedNull sql.NullInt64
 	if err := row.Scan(&p.ID, &p.Name, &p.StickyTTLNs, &regexFiltersJSON,
@@ -271,6 +286,7 @@ func (r *StateRepo) GetPlatform(id string) (*model.Platform, error) {
 		&p.ReverseProxyMissAction, &p.ReverseProxyEmptyAccountBehavior,
 		&p.ReverseProxyFixedAccountHeader, &p.AllocationPolicy, &passiveCircuitBreakerDisabled,
 		&p.QualityGrade, &p.QualityMinScore, &cfChallengedNull,
+		&cfStatusesJSON,
 		&p.QualityCheckedSinceNs, &p.QualityProfile,
 		&p.UpdatedAtNs); err != nil {
 		if err == sql.ErrNoRows {
@@ -299,10 +315,15 @@ func (r *StateRepo) GetPlatform(id string) (*model.Platform, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode platform %s exclude_protocol_filters_json: %w", p.ID, err)
 	}
+	cfStatuses, err := decodeStringSliceJSON(cfStatusesJSON)
+	if err != nil {
+		return nil, fmt.Errorf("decode platform %s quality_cloudflare_statuses_json: %w", p.ID, err)
+	}
 	p.RegexFilters = regexFilters
 	p.RegionFilters = regionFilters
 	p.ProtocolFilters = protocolFilters
 	p.ExcludeProtocolFilters = excludeProtocolFilters
+	p.QualityCloudflareStatuses = cfStatuses
 	return &p, nil
 }
 
@@ -314,6 +335,7 @@ func (r *StateRepo) ListPlatforms() ([]model.Platform, error) {
 		reverse_proxy_fixed_account_header, allocation_policy,
 		passive_circuit_breaker_disabled,
 		quality_grade, quality_min_score, quality_cloudflare_challenged,
+		quality_cloudflare_statuses_json,
 		quality_checked_since_ns, quality_profile,
 		updated_at_ns FROM platforms`)
 	if err != nil {
@@ -325,6 +347,7 @@ func (r *StateRepo) ListPlatforms() ([]model.Platform, error) {
 	for rows.Next() {
 		var p model.Platform
 		var regexFiltersJSON, regionFiltersJSON, protocolFiltersJSON, excludeProtocolFiltersJSON string
+		var cfStatusesJSON string
 		var passiveCircuitBreakerDisabled int
 		var cfChallengedNull sql.NullInt64
 		if err := rows.Scan(&p.ID, &p.Name, &p.StickyTTLNs, &regexFiltersJSON,
@@ -332,6 +355,7 @@ func (r *StateRepo) ListPlatforms() ([]model.Platform, error) {
 			&p.ReverseProxyMissAction, &p.ReverseProxyEmptyAccountBehavior,
 			&p.ReverseProxyFixedAccountHeader, &p.AllocationPolicy, &passiveCircuitBreakerDisabled,
 			&p.QualityGrade, &p.QualityMinScore, &cfChallengedNull,
+			&cfStatusesJSON,
 			&p.QualityCheckedSinceNs, &p.QualityProfile,
 			&p.UpdatedAtNs); err != nil {
 			return nil, err
@@ -357,10 +381,15 @@ func (r *StateRepo) ListPlatforms() ([]model.Platform, error) {
 		if err != nil {
 			return nil, fmt.Errorf("decode platform %s exclude_protocol_filters_json: %w", p.ID, err)
 		}
+		cfStatuses, err := decodeStringSliceJSON(cfStatusesJSON)
+		if err != nil {
+			return nil, fmt.Errorf("decode platform %s quality_cloudflare_statuses_json: %w", p.ID, err)
+		}
 		p.RegexFilters = regexFilters
 		p.RegionFilters = regionFilters
 		p.ProtocolFilters = protocolFilters
 		p.ExcludeProtocolFilters = excludeProtocolFilters
+		p.QualityCloudflareStatuses = cfStatuses
 		result = append(result, p)
 	}
 	return result, rows.Err()

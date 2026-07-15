@@ -3295,3 +3295,88 @@ a {
     transform: translateY(-20px) scale(0.92);
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Phase 4: scoring policy editor, score breakdown, CF status multi-select
+   --------------------------------------------------------------------------- */
+
+.scoring-policy-editor {
+  font-size: 0.85rem;
+}
+
+.scoring-expert {
+  animation: scoring-expert-reveal 0.2s ease-out;
+}
+
+@keyframes scoring-expert-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.score-breakdown {
+  animation: score-breakdown-reveal 0.18s ease-out;
+}
+
+@keyframes score-breakdown-reveal {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.score-breakdown-dim {
+  transition: border-color 0.15s ease;
+}
+
+.score-breakdown-dim:hover {
+  border-color: var(--primary, #3b82f6);
+}
+
+/* CF status multi-select pill row (platform forms + node filters) */
+.cf-status-multiselect {
+  width: 100%;
+}
+
+.cf-status-multiselect > div:first-child {
+  transition: border-color 0.15s ease;
+}
+
+.cf-status-multiselect > div:first-child:focus-within {
+  border-color: var(--primary, #3b82f6);
+}
+
+/* Proxy-check breakdown details/summary */
+.proxy-check-breakdown-details {
+  min-width: 320px;
+}
+
+.proxy-check-breakdown-summary {
+  user-select: none;
+  transition: color 0.15s ease;
+}
+
+.proxy-check-breakdown-summary:hover {
+  opacity: 0.8;
+}
+
+.proxy-check-breakdown-details[open] .proxy-check-breakdown-summary {
+  margin-bottom: 4px;
+}
+
+/* Responsive: collapse expert editor grids on narrow screens */
+@media (max-width: 640px) {
+  .scoring-expert {
+    padding: 8px;
+  }
+  .score-breakdown-weights > div:last-child {
+    grid-template-columns: 1fr !important;
+  }
+}

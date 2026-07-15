@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Resinat/Resin/internal/config"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/probe"
 	"github.com/Resinat/Resin/internal/subscription"
@@ -192,6 +193,90 @@ func TestCheckProxyCheck_WithInvalidHashString(t *testing.T) {
 	_, err = cp.CheckProxyCheck("zzz", ProxyCheckRequest{})
 	if err == nil {
 		t.Fatal("expected error for invalid hex")
+	}
+}
+
+func TestCheckProxyCheck_InvalidScoringPolicy_Version(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	pool, hash := newNodeAndProbeTestPool(t, subMgr)
+	cp := &ControlPlaneService{Pool: pool}
+
+	policy := &config.ScoringPolicy{Version: 0} // invalid
+	_, err := cp.CheckProxyCheck(hash.Hex(), ProxyCheckRequest{
+		Profile:       "generic",
+		ScoringPolicy: policy,
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid scoring policy version")
+	}
+	svcErr, ok := err.(*ServiceError)
+	if !ok {
+		t.Fatalf("expected ServiceError, got %T", err)
+	}
+	if svcErr.Code != "INVALID_ARGUMENT" {
+		t.Fatalf("code = %q, want INVALID_ARGUMENT", svcErr.Code)
+	}
+}
+
+func TestCheckProxyCheck_InvalidScoringPolicy_InvalidTargetURL(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	pool, hash := newNodeAndProbeTestPool(t, subMgr)
+	cp := &ControlPlaneService{Pool: pool}
+
+	policy := &config.ScoringPolicy{
+		Version: 1,
+		Weights: config.Weights{Service: 40},
+		Cloudflare: config.CFScoringConfig{
+			Policy:    config.CFPolicyObserveOnly,
+			TargetURL: "http://custom-cf.example.com", // not https
+		},
+	}
+	_, err := cp.CheckProxyCheck(hash.Hex(), ProxyCheckRequest{
+		Profile:       "generic",
+		ScoringPolicy: policy,
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid target URL")
+	}
+	svcErr, ok := err.(*ServiceError)
+	if !ok {
+		t.Fatalf("expected ServiceError, got %T", err)
+	}
+	if svcErr.Code != "INVALID_ARGUMENT" {
+		t.Fatalf("code = %q, want INVALID_ARGUMENT", svcErr.Code)
+	}
+}
+
+func TestCheckProxyCheck_ValidScoringPolicy(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	pool, hash := newNodeAndProbeTestPool(t, subMgr)
+	mockFetcher := newMockFetcher([]byte("ok"), 50*time.Millisecond, nil)
+	cp := &ControlPlaneService{
+		Pool:   pool,
+		SubMgr: subMgr,
+		ProbeMgr: probe.NewProbeManager(probe.ProbeConfig{
+			Pool:    pool,
+			Fetcher: mockFetcher,
+		}),
+	}
+
+	p := config.BalancedScoringPolicy()
+	result, err := cp.CheckProxyCheck(hash.Hex(), ProxyCheckRequest{
+		Profile:       "generic",
+		ScoringPolicy: &p,
+		Options: &probe.ProxyCheckOptions{
+			ServiceReachability: true,
+			Rounds:              1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.ScoringBreakdown == nil {
+		t.Fatal("expected scoring breakdown when policy is provided")
 	}
 }
 

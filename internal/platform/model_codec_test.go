@@ -194,6 +194,7 @@ func TestBuildFromModel_WithQualityFilters(t *testing.T) {
 		QualityGrade:                     "A",
 		QualityMinScore:                  80.0,
 		QualityCloudflareChallenged:      &trueVal,
+		QualityCloudflareStatuses:        []string{"clean", "block", "clean"},
 		QualityCheckedSinceNs:            1000000,
 		QualityProfile:                   "openai",
 	}
@@ -211,6 +212,9 @@ func TestBuildFromModel_WithQualityFilters(t *testing.T) {
 	}
 	if plat.QualityCloudflareChallenged == nil || *plat.QualityCloudflareChallenged != true {
 		t.Fatal("QualityCloudflareChallenged should be true")
+	}
+	if len(plat.QualityCloudflareStatuses) != 2 || plat.QualityCloudflareStatuses[0] != "block" || plat.QualityCloudflareStatuses[1] != "clean" {
+		t.Fatalf("QualityCloudflareStatuses = %v, want [block clean]", plat.QualityCloudflareStatuses)
 	}
 	if plat.QualityCheckedSinceNs != 1000000 {
 		t.Fatalf("QualityCheckedSinceNs = %d, want 1000000", plat.QualityCheckedSinceNs)

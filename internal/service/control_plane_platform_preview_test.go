@@ -1,7 +1,9 @@
 package service
 
 import (
+	"errors"
 	"net/netip"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -364,7 +366,7 @@ func TestPreviewFilter_ProtocolExcludeWithPlatformID(t *testing.T) {
 	platID := "plat-preview-exclude"
 	plat := platform.NewConfiguredPlatform(
 		platID, "ExcludePreview",
-		nil, nil,          // regex, region
+		nil, nil, // regex, region
 		nil,               // protocolFilters (include all)
 		[]string{"vmess"}, // excludeProtocolFilters
 		int64(30*time.Minute),
@@ -384,9 +386,7 @@ func TestPreviewFilter_ProtocolExcludeWithPlatformID(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpsertPlatform: %v", err)
 	}
-	if err := svc.Pool.ReplacePlatform(plat); err != nil {
-		t.Fatalf("ReplacePlatform: %v", err)
-	}
+	svc.Pool.RegisterPlatform(plat)
 
 	result, err := svc.PreviewFilter(PreviewFilterRequest{
 		PlatformID: &platID,
@@ -516,5 +516,204 @@ func TestPreviewFilter_QualityProfileFilter(t *testing.T) {
 	}
 	if len(result) != 0 {
 		t.Fatalf("expected 0 nodes for openai profile, got %d", len(result))
+	}
+}
+
+// --- PreviewFilter quality_cloudflare_statuses tests ---
+
+func TestPreviewFilter_QualityCloudflareStatusOR(t *testing.T) {
+	svc, ssHash, vmessHash := newPreviewFilterTestService(t)
+
+	ssEntry, ok := svc.Pool.GetEntry(ssHash)
+	if !ok {
+		t.Fatal("ss entry not found")
+	}
+	ssEntry.SetQuality(&model.NodeQuality{
+		Grade: "A", Score: 95, ServiceReachable: true, Profile: "generic",
+		CloudflareStatus: "clean",
+	})
+
+	vmessEntry, ok := svc.Pool.GetEntry(vmessHash)
+	if !ok {
+		t.Fatal("vmess entry not found")
+	}
+	vmessEntry.SetQuality(&model.NodeQuality{
+		Grade: "A", Score: 95, ServiceReachable: true, Profile: "generic",
+		CloudflareStatus: "block",
+	})
+
+	// Single status: only "clean" node matches.
+	result, err := svc.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			QualityCloudflareStatuses: []string{"clean"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 node for status clean, got %d", len(result))
+	}
+	if result[0].NodeHash != ssHash.Hex() {
+		t.Fatalf("expected node %s, got %s", ssHash.Hex(), result[0].NodeHash)
+	}
+
+	// OR filter ["clean", "block"]: both nodes match.
+	result, err = svc.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			QualityCloudflareStatuses: []string{"clean", "block"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter (OR): %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("expected 2 nodes for OR filter, got %d", len(result))
+	}
+
+	// Status that no node has: zero matches.
+	result, err = svc.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			QualityCloudflareStatuses: []string{"js_challenge"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter (no match): %v", err)
+	}
+	if len(result) != 0 {
+		t.Fatalf("expected 0 nodes for non-matching status, got %d", len(result))
+	}
+}
+
+func TestPreviewFilter_QualityCloudflareStatusUncheckedMatchesLegacyEmpty(t *testing.T) {
+	svc, ssHash, _ := newPreviewFilterTestService(t)
+
+	ssEntry, ok := svc.Pool.GetEntry(ssHash)
+	if !ok {
+		t.Fatal("ss entry not found")
+	}
+	ssEntry.SetQuality(&model.NodeQuality{
+		Grade: "A", Score: 95, ServiceReachable: true, Profile: "generic",
+		CloudflareStatus: "", // legacy empty
+	})
+
+	// "unchecked" matches empty/legacy status.
+	result, err := svc.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			QualityCloudflareStatuses: []string{"unchecked"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter (unchecked): %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 node for unchecked filter, got %d", len(result))
+	}
+	if result[0].NodeHash != ssHash.Hex() {
+		t.Fatalf("expected node %s, got %s", ssHash.Hex(), result[0].NodeHash)
+	}
+
+	// "clean" does NOT match empty/legacy status.
+	result, err = svc.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			QualityCloudflareStatuses: []string{"clean"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter (clean): %v", err)
+	}
+	if len(result) != 0 {
+		t.Fatalf("expected 0 nodes for clean filter with legacy empty, got %d", len(result))
+	}
+}
+
+func TestPreviewFilter_QualityCloudflareStatusRejectsUnknown(t *testing.T) {
+	svc, _, _ := newPreviewFilterTestService(t)
+
+	_, err := svc.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			QualityCloudflareStatuses: []string{"bogus"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for unknown cloudflare status in platform_spec")
+	}
+	var svcErr *ServiceError
+	if !errors.As(err, &svcErr) {
+		t.Fatalf("expected ServiceError, got %T", err)
+	}
+	if svcErr.Code != "INVALID_ARGUMENT" {
+		t.Fatalf("expected INVALID_ARGUMENT, got %s", svcErr.Code)
+	}
+	if !strings.Contains(svcErr.Message, "unknown status") {
+		t.Fatalf("error message = %q, expected unknown status", svcErr.Message)
+	}
+}
+
+func TestPreviewFilter_QualityCloudflareStatusWithPlatformID(t *testing.T) {
+	svc, ssHash, vmessHash := newPreviewFilterTestService(t)
+
+	ssEntry, ok := svc.Pool.GetEntry(ssHash)
+	if !ok {
+		t.Fatal("ss entry not found")
+	}
+	ssEntry.SetQuality(&model.NodeQuality{
+		Grade: "A", Score: 95, ServiceReachable: true, Profile: "generic",
+		CloudflareStatus: "clean",
+	})
+
+	vmessEntry, ok := svc.Pool.GetEntry(vmessHash)
+	if !ok {
+		t.Fatal("vmess entry not found")
+	}
+	vmessEntry.SetQuality(&model.NodeQuality{
+		Grade: "A", Score: 95, ServiceReachable: true, Profile: "generic",
+		CloudflareStatus: "block",
+	})
+
+	// Create a platform with quality_cloudflare_statuses = ["clean"].
+	engine, closer, err := state.PersistenceBootstrap(t.TempDir(), t.TempDir())
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	platID := "plat-cf-filter"
+	plat := platform.NewConfiguredPlatformWithQuality(
+		platID, "CFStatusPlatform",
+		nil, nil,
+		nil, nil,
+		int64(30*time.Minute),
+		"TREAT_AS_EMPTY", "RANDOM", "", "BALANCED", false,
+		"", 0, nil,
+		[]string{"clean"}, 0, "",
+	)
+	if err := engine.UpsertPlatform(model.Platform{
+		ID:                        platID,
+		Name:                      "CFStatusPlatform",
+		StickyTTLNs:               int64(30 * time.Minute),
+		ReverseProxyMissAction:    "TREAT_AS_EMPTY",
+		AllocationPolicy:          "BALANCED",
+		QualityCloudflareStatuses: []string{"clean"},
+		UpdatedAtNs:               time.Now().UnixNano(),
+	}); err != nil {
+		t.Fatalf("UpsertPlatform: %v", err)
+	}
+	svc.Pool.RegisterPlatform(plat)
+	svc.Pool.RebuildPlatform(plat)
+
+	// PreviewFilter with platform_id uses the registered platform's status list.
+	result, err := svc.PreviewFilter(PreviewFilterRequest{
+		PlatformID: &platID,
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter: %v", err)
+	}
+	// Only the "clean" status node should match.
+	if len(result) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(result))
+	}
+	if result[0].NodeHash != ssHash.Hex() {
+		t.Fatalf("expected node %s, got %s", ssHash.Hex(), result[0].NodeHash)
 	}
 }

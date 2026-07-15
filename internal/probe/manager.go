@@ -32,6 +32,15 @@ type ProbeConfig struct {
 	// Fetcher executes HTTP via node hash. Injectable for testing.
 	Fetcher Fetcher
 
+	// ResponseFetcher is an optional quality-specific fetcher that returns
+	// full HTTP response metadata (status code, headers, final URL).
+	// When non-nil, quality checks prefer this over Fetcher for service/CF
+	// observation. When nil, quality checks wrap Fetcher with a legacy
+	// adapter that has limited metadata confidence.
+	//
+	// Egress and latency probes continue to use Fetcher exclusively.
+	ResponseFetcher ResponseFetcher
+
 	// Interval thresholds — closures for hot-reload from RuntimeConfig.
 	MaxEgressTestInterval           func() time.Duration
 	MaxLatencyTestInterval          func() time.Duration
@@ -59,14 +68,15 @@ type ProbeConfig struct {
 // ProbeManager schedules and executes active probes against nodes in the pool.
 // It holds a direct reference to *topology.GlobalNodePool (no interface).
 type ProbeManager struct {
-	pool        *topology.GlobalNodePool
-	stopCh      chan struct{}
-	stopOnce    sync.Once
-	wg          sync.WaitGroup
-	fetcher     Fetcher
-	workerCount int
-	taskQueue   *probeTaskQueue
-	taskStates  *xsync.Map[probeTaskKey, *probeTaskState]
+	pool            *topology.GlobalNodePool
+	stopCh          chan struct{}
+	stopOnce        sync.Once
+	wg              sync.WaitGroup
+	fetcher         Fetcher
+	responseFetcher ResponseFetcher
+	workerCount     int
+	taskQueue       *probeTaskQueue
+	taskStates      *xsync.Map[probeTaskKey, *probeTaskState]
 
 	maxEgressTestInterval           func() time.Duration
 	maxLatencyTestInterval          func() time.Duration
@@ -276,6 +286,7 @@ func NewProbeManager(cfg ProbeConfig) *ProbeManager {
 		pool:                            cfg.Pool,
 		stopCh:                          make(chan struct{}),
 		fetcher:                         cfg.Fetcher,
+		responseFetcher:                 cfg.ResponseFetcher,
 		workerCount:                     conc,
 		taskQueue:                       newProbeTaskQueue(queueCap, queueCap, cfg.ChooseNormalWhenBoth),
 		taskStates:                      xsync.NewMap[probeTaskKey, *probeTaskState](),
@@ -859,6 +870,14 @@ func (m *ProbeManager) currentLatencyTestURL() string {
 // CheckProxySync validates node state (existence, outbound readiness, manager
 // liveness) then delegates to the package-level CheckProxy function for the
 // actual proxy check. It is synchronous and does not enqueue or schedule.
+//
+// When the manager has a ResponseFetcher configured, CheckProxyWithResponse
+// is used with full response metadata. Otherwise the plain Fetcher is wrapped
+// in a legacy adapter.
+//
+// Phase 3B1: If opts.ScoringPolicy is nil, the method attempts to inject the
+// manager's quality config scoring policy. This ensures manual/sync checks
+// use the same policy as background checks when no explicit policy is set.
 func (m *ProbeManager) CheckProxySync(hash node.Hash, profile TargetProfile, opts ProxyCheckOptions) (*ProxyScore, error) {
 	if m.fetcher == nil {
 		return nil, fmt.Errorf("no probe fetcher configured")
@@ -877,5 +896,15 @@ func (m *ProbeManager) CheckProxySync(hash node.Hash, profile TargetProfile, opt
 		return nil, fmt.Errorf("node outbound not ready")
 	}
 
-	return CheckProxy(m.fetcher, hash, profile, opts)
+	// Inject scoring policy from quality config when none is explicitly set.
+	if opts.ScoringPolicy == nil && m.qualityCfg != nil && m.qualityCfg.ScoringPolicy != nil {
+		policy := m.qualityCfg.ScoringPolicy()
+		opts.ScoringPolicy = policy
+	}
+
+	// Prefer response-aware path when available.
+	if m.responseFetcher != nil {
+		return CheckProxyWithResponse(m.fetcher, hash, profile, opts, m.responseFetcher)
+	}
+	return CheckProxyWithResponse(m.fetcher, hash, profile, opts, nil)
 }

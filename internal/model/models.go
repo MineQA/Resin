@@ -12,17 +12,18 @@ type Platform struct {
 	RegionFilters                    []string
 	ProtocolFilters                  []string
 	ExcludeProtocolFilters           []string
-	ReverseProxyMissAction           string `json:"reverse_proxy_miss_action"`
-	ReverseProxyEmptyAccountBehavior string `json:"reverse_proxy_empty_account_behavior"`
-	ReverseProxyFixedAccountHeader   string `json:"reverse_proxy_fixed_account_header"`
-	AllocationPolicy                 string `json:"allocation_policy"`
-	PassiveCircuitBreakerDisabled    bool   `json:"passive_circuit_breaker_disabled"`
-	QualityGrade                     string `json:"quality_grade"`
-	QualityMinScore                  float64 `json:"quality_min_score"`
-	QualityCloudflareChallenged      *bool  `json:"quality_cloudflare_challenged,omitempty"`
-	QualityCheckedSinceNs            int64  `json:"quality_checked_since_ns"`
-	QualityProfile                   string `json:"quality_profile"`
-	UpdatedAtNs                      int64  `json:"updated_at_ns"`
+	ReverseProxyMissAction           string   `json:"reverse_proxy_miss_action"`
+	ReverseProxyEmptyAccountBehavior string   `json:"reverse_proxy_empty_account_behavior"`
+	ReverseProxyFixedAccountHeader   string   `json:"reverse_proxy_fixed_account_header"`
+	AllocationPolicy                 string   `json:"allocation_policy"`
+	PassiveCircuitBreakerDisabled    bool     `json:"passive_circuit_breaker_disabled"`
+	QualityGrade                     string   `json:"quality_grade"`
+	QualityMinScore                  float64  `json:"quality_min_score"`
+	QualityCloudflareChallenged      *bool    `json:"quality_cloudflare_challenged,omitempty"`
+	QualityCloudflareStatuses        []string `json:"quality_cloudflare_statuses,omitempty"`
+	QualityCheckedSinceNs            int64    `json:"quality_checked_since_ns"`
+	QualityProfile                   string   `json:"quality_profile"`
+	UpdatedAtNs                      int64    `json:"updated_at_ns"`
 }
 
 // Subscription represents a node subscription source.
@@ -104,6 +105,16 @@ type NodeQuality struct {
 	AvgLatencyMs            float64 `json:"avg_latency_ms"`
 	LastCheckedNs           int64   `json:"last_checked_ns"`
 	LastError               string  `json:"last_error"`
+	// CloudflareStatus is the canonical aggregate CF observation outcome.
+	// Empty string means legacy/unchecked (no breakdown available).
+	CloudflareStatus string `json:"cloudflare_status"`
+	// ScoringPolicyVersion records the version of the scoring policy that
+	// produced this result. 0 means legacy (before Phase 3B scoring).
+	ScoringPolicyVersion int `json:"scoring_policy_version"`
+	// ScoreBreakdown is compact JSON of the scoring breakdown (sub-scores,
+	// effective weights, caps, etc.). Empty string means no breakdown
+	// (legacy/nil ScoringBreakdown).
+	ScoreBreakdown string `json:"score_breakdown"`
 }
 
 // Lease represents a sticky routing lease.

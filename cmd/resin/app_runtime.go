@@ -405,12 +405,29 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 				}
 			}()
 
-			fetcher := func(_ node.Hash, url string) ([]byte, time.Duration, error) {
-				timeout := a.envCfg.ProbeTimeout
-				if timeout <= 0 {
-					timeout = 12 * time.Second
+			// Inject scoring policy from runtime config when not explicitly set.
+			if opts.ScoringPolicy == nil {
+				cfg := a.runtimeCfg.Load()
+				if cfg != nil && cfg.ProxyCheckScoring != nil && cfg.ProxyCheckScoring.Version >= 1 {
+					opts.ScoringPolicy = cfg.ProxyCheckScoring
+				} else if cfg != nil {
+					normalized := config.NormalizeScoringPolicy(nil, config.NormalizeOpts{
+						ServiceReachability: cfg.ProxyCheckServiceReachability,
+						APIReachability:     cfg.ProxyCheckAPIReachability,
+						CloudflareDetection: cfg.ProxyCheckCloudflareDetection,
+						MultiRound:          cfg.ProxyCheckMultiRound,
+					})
+					opts.ScoringPolicy = &normalized
 				}
-				ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			}
+
+			probeTimeout := a.envCfg.ProbeTimeout
+			if probeTimeout <= 0 {
+				probeTimeout = 12 * time.Second
+			}
+
+			fetcher := func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+				ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 				defer cancel()
 				return netutil.HTTPGetViaOutbound(ctx, ob, url, netutil.OutboundHTTPOptions{
 					RequireStatusOK: false,
@@ -420,7 +437,35 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 				})
 			}
 
-			return probe.CheckProxy(fetcher, node.Zero, profile, opts)
+			respFetcher := probe.ResponseFetcher(func(_ node.Hash, url string) (probe.FetchResponse, error) {
+				ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+				defer cancel()
+				resp, err := netutil.HTTPGetViaOutboundWithResponse(ctx, ob, url, netutil.OutboundHTTPOptions{
+					RequireStatusOK: false,
+					CheckRedirect:   netutil.SafeRedirectPolicy,
+					OnConnLifecycle: func(op netutil.ConnLifecycleOp) {
+						a.onProbeConnectionLifecycle(op)
+					},
+				})
+				if err != nil {
+					return probe.FetchResponse{
+						Body:       resp.Body,
+						Latency:    resp.Latency,
+						StatusCode: resp.StatusCode,
+						Header:     resp.Header,
+						FinalURL:   resp.FinalURL,
+					}, err
+				}
+				return probe.FetchResponse{
+					Body:       resp.Body,
+					Latency:    resp.Latency,
+					StatusCode: resp.StatusCode,
+					Header:     resp.Header,
+					FinalURL:   resp.FinalURL,
+				}, nil
+			})
+
+			return probe.CheckProxyWithResponse(fetcher, node.Zero, profile, opts, respFetcher)
 		},
 	}
 

@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Resinat/Resin/internal/config"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/probe"
 	"github.com/Resinat/Resin/internal/subscription"
@@ -32,8 +33,9 @@ type RawProxyChecker func(rawOptions json.RawMessage, profile probe.TargetProfil
 
 // ProxyCheckRequest is the optional request body for the node action endpoint.
 type ProxyCheckRequest struct {
-	Profile string                   `json:"profile,omitempty"`
-	Options *probe.ProxyCheckOptions `json:"options,omitempty"`
+	Profile       string                   `json:"profile,omitempty"`
+	Options       *probe.ProxyCheckOptions `json:"options,omitempty"`
+	ScoringPolicy *probe.ScoringPolicy     `json:"proxy_check_scoring,omitempty"`
 }
 
 // CheckProxyCheck performs a synchronous proxy check for a single node.
@@ -48,15 +50,28 @@ func (s *ControlPlaneService) CheckProxyCheck(hashStr string, req ProxyCheckRequ
 	if _, ok := s.Pool.GetEntry(h); !ok {
 		return nil, notFound("node not found")
 	}
-	if s.ProbeMgr == nil {
-		return nil, internal("proxy check not available", fmt.Errorf("probe manager not initialized"))
-	}
-
 	profile := probe.LookupProfile(req.Profile)
 
 	opts := resolveOptions(req.Options)
 	if opts.Rounds > maxProxyCheckRounds {
 		opts.Rounds = maxProxyCheckRounds
+	}
+
+	// Apply and validate explicit scoring policy from request (Phase 3B1).
+	if req.ScoringPolicy != nil {
+		if err := req.ScoringPolicy.Validate(); err != nil {
+			return nil, invalidArg("proxy_check_scoring: " + err.Error())
+		}
+		if req.ScoringPolicy.Cloudflare.TargetURL != "" {
+			if err := config.ValidateCustomTargetURL(req.ScoringPolicy.Cloudflare.TargetURL); err != nil {
+				return nil, invalidArg("proxy_check_scoring.cloudflare.target_url: " + err.Error())
+			}
+		}
+		opts.ScoringPolicy = req.ScoringPolicy
+	}
+
+	if s.ProbeMgr == nil {
+		return nil, internal("proxy check not available", fmt.Errorf("probe manager not initialized"))
 	}
 
 	result, err := s.ProbeMgr.CheckProxySync(h, profile, opts)

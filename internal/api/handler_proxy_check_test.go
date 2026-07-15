@@ -148,7 +148,7 @@ func TestHandleNodeActionProxyCheck_NodeNotFound(t *testing.T) {
 
 // TestHandleNodeActionProxyCheck_InvalidHash tests 400 for bad hash.
 func TestHandleNodeActionProxyCheck_InvalidHash(t *testing.T) {
-	srv, cp, _ := newControlPlaneTestServer(t)
+	srv, _, _ := newControlPlaneTestServer(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/not-a-valid-hex/actions/proxy-check", nil)
 	req.Header.Set("Authorization", "Bearer test-admin-token")
@@ -683,7 +683,7 @@ func TestHandleCreateProxyCheckTask_RawProxies(t *testing.T) {
 	// via a synthetic fetcher.
 	cp.RawProxyChecker = func(raw json.RawMessage, profile probe.TargetProfile, opts probe.ProxyCheckOptions) (*probe.ProxyScore, error) {
 		fetcher := func(_ node.Hash, _ string) ([]byte, time.Duration, error) {
-			return []byte("raw-proxy-ok"), 5*time.Millisecond, nil
+			return []byte("raw-proxy-ok"), 5 * time.Millisecond, nil
 		}
 		return probe.CheckProxy(fetcher, node.Zero, profile, opts)
 	}

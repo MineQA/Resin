@@ -1,3 +1,5 @@
+import type { CloudflareStatusToken } from "../../lib/cloudflareStatus";
+
 export type PlatformMissAction = "TREAT_AS_EMPTY" | "REJECT";
 export type PlatformEmptyAccountBehavior = "RANDOM" | "FIXED_HEADER" | "ACCOUNT_HEADER_RULE";
 export type PlatformAllocationPolicy = "BALANCED" | "PREFER_LOW_LATENCY" | "PREFER_IDLE_IP";
@@ -22,6 +24,8 @@ export type Platform = {
   quality_grade: string;
   quality_min_score: number;
   quality_cloudflare_challenged: boolean | null;
+  /** Detailed CF status filter array (repeated query keys, OR within values). */
+  quality_cloudflare_statuses: CloudflareStatusToken[];
   quality_checked_since_ns: number;
   quality_profile: string;
   updated_at: string;
@@ -49,6 +53,7 @@ export type PlatformCreateInput = {
   quality_grade?: string;
   quality_min_score?: number;
   quality_cloudflare_challenged?: boolean | null;
+  quality_cloudflare_statuses?: CloudflareStatusToken[];
   quality_checked_since_ns?: number;
   quality_profile?: string;
 };
@@ -68,6 +73,7 @@ export type PlatformUpdateInput = {
   quality_grade?: string;
   quality_min_score?: number;
   quality_cloudflare_challenged?: boolean | null;
+  quality_cloudflare_statuses?: CloudflareStatusToken[];
   quality_checked_since_ns?: number;
   quality_profile?: string;
 };

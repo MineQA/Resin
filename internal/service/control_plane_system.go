@@ -106,6 +106,7 @@ var runtimeConfigAllowedFields = map[string]bool{
 	"proxy_check_multi_round":          true,
 	"proxy_check_rounds":               true,
 	"proxy_check_trigger_on_new_node":  true,
+	"proxy_check_scoring":              true,
 }
 
 var platformPatchAllowedFields = map[string]bool{
@@ -123,6 +124,7 @@ var platformPatchAllowedFields = map[string]bool{
 	"quality_grade":                        true,
 	"quality_min_score":                    true,
 	"quality_cloudflare_challenged":        true,
+	"quality_cloudflare_statuses":          true,
 	"quality_checked_since_ns":             true,
 	"quality_profile":                      true,
 }
@@ -170,6 +172,8 @@ func copyRuntimeConfig(cfg *config.RuntimeConfig) *config.RuntimeConfig {
 	}
 	out := *cfg
 	out.LatencyAuthorities = append([]string(nil), cfg.LatencyAuthorities...)
+	// Deep-copy the scoring policy to avoid sharing mutable pointer state.
+	out.ProxyCheckScoring = cfg.ProxyCheckScoring.Clone()
 	return &out
 }
 
@@ -310,11 +314,29 @@ func validateRuntimeConfig(cfg *config.RuntimeConfig) *ServiceError {
 	}
 
 	// When enabled, at least one check type must be active.
+	// A canonical scoring policy (Version >= 1) is sufficient even when all
+	// legacy flat booleans are false, because the policy may enable latency,
+	// stability, or custom CF target dimensions independently.
+	hasCanonicalPolicy := cfg.ProxyCheckScoring != nil && cfg.ProxyCheckScoring.Version >= 1
 	if cfg.ProxyCheckEnabled &&
+		!hasCanonicalPolicy &&
 		!cfg.ProxyCheckServiceReachability &&
 		!cfg.ProxyCheckAPIReachability &&
 		!cfg.ProxyCheckCloudflareDetection {
 		return invalidArg("proxy_check: at least one of service_reachability, api_reachability, or cloudflare_detection must be enabled")
+	}
+
+	// Validate scoring policy when present.
+	if cfg.ProxyCheckScoring != nil {
+		if err := cfg.ProxyCheckScoring.Validate(); err != nil {
+			return invalidArg("proxy_check_scoring: " + err.Error())
+		}
+		// Validate custom target URL when non-empty.
+		if cfg.ProxyCheckScoring.Cloudflare.TargetURL != "" {
+			if err := config.ValidateCustomTargetURL(cfg.ProxyCheckScoring.Cloudflare.TargetURL); err != nil {
+				return invalidArg("proxy_check_scoring.cloudflare.target_url: " + err.Error())
+			}
+		}
 	}
 
 	return nil

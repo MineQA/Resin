@@ -1,3 +1,7 @@
+import type {
+  ScoreBreakdown,
+} from "../../lib/cloudflareStatus";
+
 /** A built-in proxy source returned by GET /api/v1/proxy-sources. */
 export type ProxySource = {
   id: string;
@@ -27,13 +31,18 @@ export type ProxyCheckOptions = {
 /** Preset names mapped to ProxyCheckOptions. */
 export type ProxyCheckPreset = "quick" | "standard" | "deep";
 
-/** ProxyScore as returned by the backend (no json tags — PascalCase field names). */
+/** ProxyScore as returned by the backend.
+ * Most fields have no JSON tags so they marshal as PascalCase (Go default).
+ * `cloudflare_status` and `scoring_breakdown` have explicit snake_case JSON tags.
+ */
 export type ProxyRoundResult = {
   Latency: number;
   ServiceReachable: boolean;
   APIReachable: boolean;
   CloudflareChallenged: boolean;
   CloudflareChallengeType: string;
+  /** Canonical 8-value CF status (snake_case JSON tag from backend). */
+  cloudflare_status?: string;
   Error: string;
 };
 
@@ -45,6 +54,10 @@ export type ProxyScore = {
   APIReachable: boolean;
   CloudflareChallenged: boolean;
   CloudflareChallengeType: string;
+  /** Canonical 8-value aggregate CF status (snake_case JSON tag from backend). */
+  cloudflare_status?: string;
+  /** Compact scoring breakdown from the weighted engine (snake_case JSON tag, omitempty). */
+  scoring_breakdown?: ScoreBreakdown | null;
   AvgLatencyMs: number;
   RoundResults?: ProxyRoundResult[];
 };

@@ -17,6 +17,8 @@ import { useToast } from "../../hooks/useToast";
 import { useI18n } from "../../i18n";
 import { formatApiErrorMessage } from "../../lib/error-message";
 import { formatGoDuration, formatRelativeTime } from "../../lib/time";
+import type { CloudflareStatusToken } from "../../lib/cloudflareStatus";
+import { CloudflareStatusMultiSelect } from "../../components/ScoreBreakdown";
 import { createPlatform, listPlatforms } from "./api";
 import {
   allocationPolicies,
@@ -84,6 +86,16 @@ export function PlatformPage() {
     defaultValues: defaultPlatformFormValues,
   });
   const createEmptyAccountBehavior = createForm.watch("reverse_proxy_empty_account_behavior");
+  const createCfFilter = createForm.watch("quality_cloudflare_filter");
+  const createCfStatuses = createForm.watch("quality_cloudflare_statuses");
+
+  const toggleCreateCfStatus = (token: CloudflareStatusToken) => {
+    const current = (createForm.getValues("quality_cloudflare_statuses") ?? []) as CloudflareStatusToken[];
+    const next = current.includes(token)
+      ? current.filter((v) => v !== token)
+      : [...current, token];
+    createForm.setValue("quality_cloudflare_statuses", next, { shouldDirty: true, shouldValidate: true, shouldTouch: true });
+  };
 
   const createMutation = useMutation({
     mutationFn: createPlatform,
@@ -432,6 +444,18 @@ export function PlatformPage() {
                         </option>
                       ))}
                     </Select>
+                  </div>
+
+                  <div className="field-group" style={{ margin: 0 }}>
+                    <label className="field-label">
+                      {t("Cloudflare 详细状态")}
+                    </label>
+                    <CloudflareStatusMultiSelect
+                      selected={createCfStatuses as CloudflareStatusToken[]}
+                      onToggle={toggleCreateCfStatus}
+                      showContradictionHint
+                      legacyChallenged={createCfFilter}
+                    />
                   </div>
 
                   <div className="field-group" style={{ margin: 0 }}>

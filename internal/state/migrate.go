@@ -29,6 +29,7 @@ const (
 	stateVersionAddProtocolFilters               = 8
 	stateVersionAddClashFingerprintPolicy        = 9
 	stateVersionAddPlatformQualityFilters        = 10
+	stateVersionAddQualityCloudflareStatuses     = 11
 	stateLegacyBaselineVersion                   = stateVersionAddFixedAccountHeader
 
 	stateBaseSchemaMigration = stateMigrationsPath + "/000001_state_base.up.sql"
@@ -136,8 +137,14 @@ func prepareLegacyStateBaseline(db *sql.DB, driver migratedb.Driver) error {
 	if err != nil {
 		return err
 	}
+	hasQualityCFStatuses, err := hasTableColumn(db, "platforms", "quality_cloudflare_statuses_json")
+	if err != nil {
+		return err
+	}
 
 	switch {
+	case hasEmptyBehavior && hasFixedHeader && hasIncrementalAliveNodes && hasPassiveCircuitBreakerDisabled && hasClashFingerprintPolicy && hasProtocolFilters && hasExcludeProtocolFilters && hasQualityGrade && hasQualityCFStatuses:
+		return setLegacyMigrationVersion(db, driver, stateVersionAddQualityCloudflareStatuses)
 	case hasEmptyBehavior && hasFixedHeader && hasIncrementalAliveNodes && hasPassiveCircuitBreakerDisabled && hasClashFingerprintPolicy && hasProtocolFilters && hasExcludeProtocolFilters && hasQualityGrade:
 		return setLegacyMigrationVersion(db, driver, stateVersionAddPlatformQualityFilters)
 	case hasEmptyBehavior && hasFixedHeader && hasIncrementalAliveNodes && hasPassiveCircuitBreakerDisabled && hasClashFingerprintPolicy && hasProtocolFilters && hasExcludeProtocolFilters:

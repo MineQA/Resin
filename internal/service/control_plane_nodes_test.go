@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"net/netip"
 	"sync/atomic"
 	"testing"
@@ -840,5 +841,398 @@ func TestNodeEntryMatchesQualityFilters_Multiple(t *testing.T) {
 	entry.SetQuality(&model.NodeQuality{Grade: "B", Score: 85})
 	if nodeEntryMatchesQualityFilters(entry, filters) {
 		t.Fatal("expected false when score >= min but grade doesn't match")
+	}
+}
+
+// TestNodeEntryMatchesQualityFilters_CFStatuses verifies the OR-within-statuses
+// and intersection-with-bool semantics for QualityCloudflareStatuses.
+func TestNodeEntryMatchesQualityFilters_CFStatuses(t *testing.T) {
+	entry := node.NewNodeEntry(node.Hash{}, nil, time.Now(), 16)
+	q := &model.NodeQuality{}
+
+	t.Run("no filter always matches", func(t *testing.T) {
+		if !nodeEntryMatchesQualityFilters(entry, NodeFilters{}) {
+			t.Fatal("expected true when no filters set")
+		}
+	})
+
+	t.Run("nil quality when filter active returns false", func(t *testing.T) {
+		entry.SetQuality(nil)
+		if nodeEntryMatchesQualityFilters(entry, NodeFilters{QualityCloudflareStatuses: []string{"clean"}}) {
+			t.Fatal("expected false when quality is nil")
+		}
+	})
+
+	t.Run("single status match", func(t *testing.T) {
+		q.CloudflareStatus = "clean"
+		entry.SetQuality(q)
+		if !nodeEntryMatchesQualityFilters(entry, NodeFilters{QualityCloudflareStatuses: []string{"clean"}}) {
+			t.Fatal("expected true when status matches single filter")
+		}
+	})
+
+	t.Run("OR within selected statuses", func(t *testing.T) {
+		q.CloudflareStatus = "block"
+		entry.SetQuality(q)
+		if !nodeEntryMatchesQualityFilters(entry, NodeFilters{QualityCloudflareStatuses: []string{"clean", "block", "ng"}}) {
+			t.Fatal("expected true when status is in multi-select filter")
+		}
+	})
+
+	t.Run("non-matching status returns false", func(t *testing.T) {
+		q.CloudflareStatus = "clean"
+		entry.SetQuality(q)
+		if nodeEntryMatchesQualityFilters(entry, NodeFilters{QualityCloudflareStatuses: []string{"block", "ng"}}) {
+			t.Fatal("expected false when status is not in filter")
+		}
+	})
+
+	t.Run("empty legacy status normalizes to unchecked", func(t *testing.T) {
+		q.CloudflareStatus = ""
+		entry.SetQuality(q)
+		// "unchecked" is a filter value for display matching
+		if nodeEntryMatchesQualityFilters(entry, NodeFilters{QualityCloudflareStatuses: []string{"clean"}}) {
+			t.Fatal("expected false: empty legacy status normalizes to unchecked, not clean")
+		}
+	})
+
+	t.Run("intersection with bool filter - both pass", func(t *testing.T) {
+		trueVal := true
+		q.CloudflareStatus = "block"
+		q.CloudflareChallenged = true
+		entry.SetQuality(q)
+		if !nodeEntryMatchesQualityFilters(entry, NodeFilters{
+			QualityCloudflareStatuses:   []string{"block", "js_challenge"},
+			QualityCloudflareChallenged: &trueVal,
+		}) {
+			t.Fatal("expected true when both filters match")
+		}
+	})
+
+	t.Run("intersection with bool filter - bool rejects", func(t *testing.T) {
+		falseVal := false
+		q.CloudflareStatus = "block"
+		q.CloudflareChallenged = true
+		entry.SetQuality(q)
+		if nodeEntryMatchesQualityFilters(entry, NodeFilters{
+			QualityCloudflareStatuses:   []string{"block"},
+			QualityCloudflareChallenged: &falseVal,
+		}) {
+			t.Fatal("expected false when bool filter rejects")
+		}
+	})
+
+	t.Run("intersection with bool filter - status rejects", func(t *testing.T) {
+		trueVal := true
+		q.CloudflareStatus = "clean"
+		q.CloudflareChallenged = true // clean but challenged=false normally - testing intersection
+		entry.SetQuality(q)
+		if nodeEntryMatchesQualityFilters(entry, NodeFilters{
+			QualityCloudflareStatuses:   []string{"block"},
+			QualityCloudflareChallenged: &trueVal,
+		}) {
+			t.Fatal("expected false when status filter rejects")
+		}
+	})
+}
+
+// TestNodeQualitySummary_ProjectsMetadataFields verifies that the node
+// summary correctly projects the three Phase 3B2 metadata fields:
+// quality_cloudflare_status (persisted, not derived),
+// quality_scoring_policy_version, and quality_score_breakdown.
+// Legacy empty status normalizes to "unchecked".
+func TestNodeQualitySummary_ProjectsMetadataFields(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	sub := subscription.NewSubscription("sub-q", "SubQ", "https://example.com/q", true, false)
+	subMgr.Register(sub)
+	pool := newNodeListTestPool(subMgr)
+
+	raw := []byte(`{"type":"ss","server":"1.2.3.4","port":443}`)
+	hash := addRoutableNodeForSubscription(t, pool, sub, raw, "5.6.7.8")
+
+	entry, ok := pool.GetEntry(hash)
+	if !ok {
+		t.Fatal("entry not found")
+	}
+
+	// Quality with canonical CloudflareStatus and breakdown.
+	entry.SetQuality(&model.NodeQuality{
+		Profile:              "generic",
+		Grade:                "A",
+		Score:                95,
+		CloudflareStatus:     "clean",
+		ScoringPolicyVersion: 1,
+		ScoreBreakdown:       `{"version":1,"grade_from_score":"A","final_grade":"A"}`,
+	})
+	cp := &ControlPlaneService{
+		Pool:   pool,
+		SubMgr: subMgr,
+	}
+	ns, err := cp.GetNode(hash.Hex())
+	if err != nil {
+		t.Fatalf("GetNode: %v", err)
+	}
+	if ns.Quality == nil {
+		t.Fatal("expected quality summary")
+	}
+	// Persisted canonical status.
+	if ns.Quality.QualityCloudflareStatus != "clean" {
+		t.Fatalf("QualityCloudflareStatus = %q, want clean", ns.Quality.QualityCloudflareStatus)
+	}
+	// Scoring policy version.
+	if ns.Quality.QualityScoringPolicyVersion != 1 {
+		t.Fatalf("QualityScoringPolicyVersion = %d, want 1", ns.Quality.QualityScoringPolicyVersion)
+	}
+	// Score breakdown projected as json.RawMessage (not double-encoded).
+	if ns.Quality.QualityScoreBreakdown == nil {
+		t.Fatal("expected QualityScoreBreakdown")
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(*ns.Quality.QualityScoreBreakdown, &decoded); err != nil {
+		t.Fatalf("QualityScoreBreakdown not valid JSON: %v", err)
+	}
+	if decoded["grade_from_score"] != "A" {
+		t.Fatalf("breakdown grade_from_score = %v, want A", decoded["grade_from_score"])
+	}
+
+	// Legacy empty cloudflare_status normalizes to "unchecked".
+	entry.SetQuality(&model.NodeQuality{
+		Profile: "generic",
+		Grade:   "B",
+		Score:   75,
+	})
+	ns2, _ := cp.GetNode(hash.Hex())
+	if ns2.Quality.QualityCloudflareStatus != "unchecked" {
+		t.Fatalf("legacy QualityCloudflareStatus = %q, want unchecked", ns2.Quality.QualityCloudflareStatus)
+	}
+	if ns2.Quality.QualityScoringPolicyVersion != 0 {
+		t.Fatalf("legacy QualityScoringPolicyVersion = %d, want 0", ns2.Quality.QualityScoringPolicyVersion)
+	}
+	if ns2.Quality.QualityScoreBreakdown != nil {
+		t.Fatal("legacy QualityScoreBreakdown should be nil")
+	}
+
+	// Invalid persisted JSON must be omitted rather than breaking outer JSON
+	// serialization for node list/detail responses.
+	entry.SetQuality(&model.NodeQuality{
+		Profile:              "generic",
+		Grade:                "C",
+		Score:                60,
+		CloudflareStatus:     "not_detected",
+		ScoringPolicyVersion: 1,
+		ScoreBreakdown:       `{invalid`,
+	})
+	ns3, _ := cp.GetNode(hash.Hex())
+	if ns3.Quality.QualityScoreBreakdown != nil {
+		t.Fatal("invalid QualityScoreBreakdown should be omitted")
+	}
+	if _, err := json.Marshal(ns3); err != nil {
+		t.Fatalf("node summary with invalid stored breakdown must marshal: %v", err)
+	}
+}
+
+// float64Ptr is a helper for creating *float64 literals in test fixtures.
+func float64Ptr(v float64) *float64 { return &v }
+
+// TestNodeQualitySummary_ScoredProxyScoreProjection verifies that quality
+// data produced via the production ProxyScoreToNodeQuality conversion path
+// is correctly projected through nodeEntryToSummary/GetNode. This covers
+// the conversion→API projection half of the Phase 3B2 cross-layer
+// verification (the conversion→persistence half lives in
+// state.TestNodeQuality_ScoredProxyScoreRoundTrip).
+//
+// Assertions:
+//   - QualityCloudflareStatus shows the persisted canonical status
+//   - QualityScoringPolicyVersion is set from the ScoringBreakdown
+//   - QualityScoreBreakdown is a *json.RawMessage (not double-encoded)
+//     containing the expected compact breakdown fields
+//   - Legacy nil breakdown produces version 0, nil breakdown, and
+//     CloudflareStatus normalised to "unchecked"
+func TestNodeQualitySummary_ScoredProxyScoreProjection(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	sub := subscription.NewSubscription("sub-cross", "SubCross", "https://example.com/cross", true, false)
+	subMgr.Register(sub)
+	pool := newNodeListTestPool(subMgr)
+
+	raw := []byte(`{"type":"ss","server":"10.20.30.40","port":443}`)
+	hash := addRoutableNodeForSubscription(t, pool, sub, raw, "9.8.7.6")
+
+	entry, ok := pool.GetEntry(hash)
+	if !ok {
+		t.Fatal("entry not found")
+	}
+
+	t.Run("scored_breakdown_with_clean_cf", func(t *testing.T) {
+		score := &probe.ProxyScore{
+			Grade:            "A",
+			Score:            95,
+			Unstable:         false,
+			ServiceReachable: true,
+			APIReachable:     true,
+			CloudflareStatus: probe.CFStatusClean,
+			AvgLatencyMs:     50.0,
+			ScoringBreakdown: &probe.ScoringResult{
+				Version:          1,
+				Score:            95,
+				Grade:            "A",
+				GradeFromScore:   "A",
+				FinalGrade:       "A",
+				EffectiveWeights: map[string]int{"service": 60, "latency": 40},
+				SubScores: map[string]*probe.SubScoreEntry{
+					"service": {Value: float64Ptr(100)},
+					"latency": {Value: float64Ptr(87.5)},
+				},
+				UnavailableDims: []string{},
+				AppliedCaps:     nil,
+				TerminalReason:  "",
+			},
+		}
+		nq := probe.ProxyScoreToNodeQuality("generic", score, nil)
+		entry.SetQuality(nq)
+
+		cp := &ControlPlaneService{
+			Pool:   pool,
+			SubMgr: subMgr,
+		}
+		ns, err := cp.GetNode(hash.Hex())
+		if err != nil {
+			t.Fatalf("GetNode: %v", err)
+		}
+		if ns.Quality == nil {
+			t.Fatal("expected quality summary")
+		}
+
+		// Canonical CF status.
+		if ns.Quality.QualityCloudflareStatus != "clean" {
+			t.Fatalf("QualityCloudflareStatus = %q, want clean", ns.Quality.QualityCloudflareStatus)
+		}
+		// Scoring policy version.
+		if ns.Quality.QualityScoringPolicyVersion != 1 {
+			t.Fatalf("QualityScoringPolicyVersion = %d, want 1", ns.Quality.QualityScoringPolicyVersion)
+		}
+		// Breakdown as *json.RawMessage (not double-encoded).
+		if ns.Quality.QualityScoreBreakdown == nil {
+			t.Fatal("expected QualityScoreBreakdown")
+		}
+		assertBreakdownIsValidObject(t, *ns.Quality.QualityScoreBreakdown)
+		// Verify it's not double-encoded: unmarshal should produce map, not string.
+		var decoded map[string]any
+		if err := json.Unmarshal(*ns.Quality.QualityScoreBreakdown, &decoded); err != nil {
+			t.Fatalf("QualityScoreBreakdown unmarshal: %v", err)
+		}
+		if decoded["version"] != float64(1) {
+			t.Fatalf("breakdown version = %v, want 1", decoded["version"])
+		}
+		if decoded["final_grade"] != "A" {
+			t.Fatalf("breakdown final_grade = %v, want A", decoded["final_grade"])
+		}
+	})
+
+	t.Run("block_challenge_status_projection", func(t *testing.T) {
+		score := &probe.ProxyScore{
+			Grade:            "C",
+			Score:            45,
+			Unstable:         true,
+			ServiceReachable: true,
+			APIReachable:     false,
+			CloudflareStatus: probe.CFStatusBlock,
+			AvgLatencyMs:     500.0,
+			ScoringBreakdown: &probe.ScoringResult{
+				Version:          1,
+				Score:            45,
+				Grade:            "C",
+				GradeFromScore:   "C",
+				FinalGrade:       "D", // CF grade cap
+				EffectiveWeights: map[string]int{"service": 40, "cf": 20},
+				SubScores: map[string]*probe.SubScoreEntry{
+					"service": {Value: float64Ptr(100)},
+					"cf":      {Value: float64Ptr(0)},
+				},
+				UnavailableDims: []string{"stability"},
+				AppliedCaps: []probe.CapApplication{
+					{Dimension: "cf", Reason: "cf_status_cap", Cap: "D"},
+				},
+				TerminalReason: "",
+			},
+		}
+		nq := probe.ProxyScoreToNodeQuality("generic", score, nil)
+		entry.SetQuality(nq)
+
+		cp := &ControlPlaneService{
+			Pool:   pool,
+			SubMgr: subMgr,
+		}
+		ns, err := cp.GetNode(hash.Hex())
+		if err != nil {
+			t.Fatalf("GetNode: %v", err)
+		}
+		if ns.Quality == nil {
+			t.Fatal("expected quality summary")
+		}
+
+		if ns.Quality.QualityCloudflareStatus != "block" {
+			t.Fatalf("QualityCloudflareStatus = %q, want block", ns.Quality.QualityCloudflareStatus)
+		}
+		if !ns.Quality.CloudflareChallenged {
+			t.Fatal("CloudflareChallenged should be true for block")
+		}
+		if ns.Quality.CloudflareChallengeType != "block" {
+			t.Fatalf("CloudflareChallengeType = %q, want block", ns.Quality.CloudflareChallengeType)
+		}
+		if ns.Quality.QualityScoringPolicyVersion != 1 {
+			t.Fatalf("QualityScoringPolicyVersion = %d, want 1", ns.Quality.QualityScoringPolicyVersion)
+		}
+		if ns.Quality.QualityScoreBreakdown == nil {
+			t.Fatal("expected QualityScoreBreakdown")
+		}
+		assertBreakdownIsValidObject(t, *ns.Quality.QualityScoreBreakdown)
+	})
+
+	t.Run("legacy_nil_breakdown_unchecked_status", func(t *testing.T) {
+		score := &probe.ProxyScore{
+			Grade:            "B",
+			Score:            75,
+			ServiceReachable: true,
+			CloudflareStatus: probe.CFStatusEmpty,
+		}
+		nq := probe.ProxyScoreToNodeQuality("generic", score, nil)
+		entry.SetQuality(nq)
+
+		cp := &ControlPlaneService{
+			Pool:   pool,
+			SubMgr: subMgr,
+		}
+		ns, err := cp.GetNode(hash.Hex())
+		if err != nil {
+			t.Fatalf("GetNode: %v", err)
+		}
+		if ns.Quality == nil {
+			t.Fatal("expected quality summary")
+		}
+
+		// Empty legacy cloudflare_status normalises to "unchecked".
+		if ns.Quality.QualityCloudflareStatus != "unchecked" {
+			t.Fatalf("QualityCloudflareStatus = %q, want unchecked", ns.Quality.QualityCloudflareStatus)
+		}
+		if ns.Quality.QualityScoringPolicyVersion != 0 {
+			t.Fatalf("QualityScoringPolicyVersion = %d, want 0", ns.Quality.QualityScoringPolicyVersion)
+		}
+		if ns.Quality.QualityScoreBreakdown != nil {
+			t.Fatal("legacy QualityScoreBreakdown should be nil")
+		}
+	})
+}
+
+// assertBreakdownIsValidObject verifies that raw JSON bytes decode to a
+// JSON object (map[string]any), proving it is not double-encoded as a
+// quoted JSON string.
+func assertBreakdownIsValidObject(t *testing.T, raw json.RawMessage) {
+	t.Helper()
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("breakdown not valid JSON: %v", err)
+	}
+	if _, ok := decoded.(map[string]any); !ok {
+		t.Fatalf("breakdown is double-encoded (decoded as %T, want map[string]any)", decoded)
 	}
 }

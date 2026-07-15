@@ -809,6 +809,114 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
   "服务不可达": "Service unreachable",
   "设置任意质量条件后，未检测的节点不会被选中。":
     "Once any quality condition is set, nodes without a quality record are excluded.",
+  // ── Cloudflare 8-status labels ───────────────────────────────────────
+  "CF 干净": "CF clean",
+  "未发现 CF": "No CF evidence",
+  "JS 挑战": "JS challenge",
+  "验证码挑战": "CAPTCHA challenge",
+  "CF 挑战": "CF challenge",
+  "CF 封锁": "CF block",
+  "未检测": "Unchecked",
+  // CF status descriptions
+  "响应带有 Cloudflare 特征且未被挑战": "Response has Cloudflare evidence and no challenge",
+  "响应成功但未观察到 Cloudflare 特征": "Response succeeded but no Cloudflare evidence observed",
+  "Cloudflare JavaScript 挑战页": "Cloudflare JavaScript challenge page",
+  "Cloudflare 验证码挑战页": "Cloudflare CAPTCHA challenge page",
+  "Cloudflare 通用挑战（cf-mitigated: challenge）": "Cloudflare generic challenge (cf-mitigated: challenge)",
+  "Cloudflare 直接封锁（1020 等）": "Cloudflare direct block (1020 etc.)",
+  "观测请求失败，不计入 CF 评分": "Observation request failed; not counted in CF scoring",
+  "历史记录尚未在新评分引擎下刷新": "Legacy record not yet refreshed under the new scoring engine",
+  // ── Scoring policy editor ────────────────────────────────────────────
+  "评分策略": "Scoring policy",
+  "评分预设": "Scoring preset",
+  "平衡（推荐）": "Balanced (recommended)",
+  "自定义": "Custom",
+  "当前为平衡预设": "Using balanced preset",
+  "已偏离平衡预设": "Deviated from balanced preset",
+  "推导": "Derived",
+  "后端未返回规范策略，已从旧字段推导展示": "Backend returned no canonical policy; derived from legacy fields for display",
+  "后端尚未保存规范评分策略，当前展示由旧字段推导而来。保存后将写入规范 v1 策略。":
+    "Backend has not saved a canonical scoring policy; current view is derived from legacy fields. Saving will write a canonical v1 policy.",
+  "Cloudflare 策略": "Cloudflare policy",
+  "仅观测": "Observe only",
+  "影响评分": "Affects score",
+  "影响等级": "Affects grade",
+  "影响评分与等级": "Affects score and grade",
+  "始终观测并记录 Cloudflare 状态，但不影响分数和等级":
+    "Always observe and record Cloudflare status, but does not affect score or grade",
+  "观测结果按状态分计入总分，但不改变等级封顶":
+    "Observation results count toward total score by status score, but do not change grade caps",
+  "观测结果按挑战类型封顶等级，但不计入总分":
+    "Observation results cap grade by challenge type, but do not count toward score",
+  "观测结果同时计入总分并按挑战类型封顶等级":
+    "Observation results count toward score and cap grade by challenge type",
+  "自定义 CF 目标 URL": "Custom CF target URL",
+  "留空使用 Profile 服务地址": "Leave empty to use the profile service URL",
+  "仅接受 HTTPS，拒绝本地/私有地址与凭据。此为尽力而为的 URL 形状校验，远端 DNS 重绑定风险无法完全防范。":
+    "HTTPS only; rejects local/private addresses and credentials. This is best-effort URL-shape validation; remote DNS rebinding risk cannot be fully prevented.",
+  "URL 不符合要求：仅 HTTPS、不含凭据/片段、非本地/私有地址。":
+    "URL does not meet requirements: HTTPS only, no credentials/fragments, no local/private addresses.",
+  "校验问题": "Validation issues",
+  "服务端仍为最终权威；客户端校验仅用于防止明显无效的提交。":
+    "Server remains authoritative; client validation only prevents obviously invalid submissions.",
+  "高级编辑": "Advanced editor",
+  "恢复为平衡预设": "Restore balanced preset",
+  "重置为平衡": "Reset to balanced",
+  "维度权重（0-100，自动归一化）": "Dimension weights (0-100, auto-normalized)",
+  "权重无需合计 100。可用维度（权重大于 0 且有结果）参与加权，不可用维度从分子和分母同时排除。":
+    "Weights do not need to sum to 100. Applicable dimensions (weight > 0 with results) participate in weighting; unavailable dimensions are excluded from both numerator and denominator.",
+  "等级阈值（严格递减 A>B>C>D）": "Grade thresholds (strictly decreasing A>B>C>D)",
+  "F 为低于 D 阈值的默认等级。": "F is the default grade for scores below the D threshold.",
+  "Cloudflare 状态分（0-100 或不可用）": "Cloudflare status scores (0-100 or unavailable)",
+  "ng 与 unchecked 可设为不可用（不参与加权）；其他状态必须为 0-100 整数。":
+    "ng and unchecked can be set to unavailable (excluded from weighting); other statuses must be integers 0-100.",
+  "Cloudflare 挑战封顶等级": "Cloudflare challenge grade caps",
+  "不封顶": "No cap",
+  "延迟分档（毫秒，严格递增，末档上限留空）": "Latency bands (ms, strictly increasing, last band max empty)",
+  "开放": "Open",
+  "新增延迟档": "Add latency band",
+  "删除此档": "Remove this band",
+  "稳定性变异系数分档（%，严格递增，末档上限留空）": "Stability CV bands (%, strictly increasing, last band max empty)",
+  "新增 CV 档": "Add CV band",
+  "稳定性仅在多轮检测且至少两轮有可比结果时可用。":
+    "Stability is only available with multi-round checks and at least two comparable rounds.",
+  "维度封顶（可选）": "Dimension caps (optional)",
+  "低于分": "Below score",
+  "封顶等级": "Grade cap",
+  "维度分项低于阈值时封顶等级；不可用维度不触发封顶。":
+    "Caps grade when a dimension sub-score is below threshold; unavailable dimensions do not trigger caps.",
+  "Cloudflare 观测始终执行并记录状态，策略仅控制观测结果是否影响分数或等级。即使关闭服务可达性，观测仍会向目标服务发出额外请求。":
+    "Cloudflare observation always runs and records status; the policy only controls whether the result affects score or grade. Even when service reachability is disabled, observation still sends an extra request to the target service.",
+  "旧的“检测 Cloudflare 拦截”开关已并入下方策略，仅作兼容输入保留。观测始终执行，策略仅控制影响范围。":
+    "The old “Detect Cloudflare challenge” toggle has been merged into the policy below and is retained only as a compatibility input. Observation always runs; the policy only controls its impact.",
+  // ── Score breakdown display ─────────────────────────────────────────
+  "评分策略版本": "Scoring policy version",
+  "有效权重与分项": "Effective weights and sub-scores",
+  "权重": "Weight",
+  "分项": "Sub-score",
+  "不可用": "Unavailable",
+  "不可用维度不参与加权计算，既不计入分子也不计入分母。常见原因：该维度被关闭、单轮检测无法评估稳定性、或观测请求失败。":
+    "Unavailable dimensions do not participate in weighting, excluded from both numerator and denominator. Common reasons: dimension disabled, single-round check cannot evaluate stability, or observation request failed.",
+  "分数对应等级": "Score-derived grade",
+  "最终等级": "Final grade",
+  "已应用封顶": "Applied caps",
+  "终止原因": "Terminal reason",
+  "该分数由旧评分引擎产生，未保留分项明细。重新检测后将按当前评分策略生成分项解释。":
+    "This score was produced by the legacy scoring engine; no sub-score breakdown was retained. Re-checking will generate a breakdown under the current scoring policy.",
+  "评分解释": "Score breakdown",
+  "Cloudflare 状态": "Cloudflare status",
+  "展开": "Expand",
+  "权重自动归一化": "Weights auto-normalized",
+  "合计": "Total",
+  "归一化为": "normalized to",
+  "CF 状态分": "CF status scores",
+  "CF 封顶": "CF caps",
+  // ── Platform CF detailed status filter ──────────────────────────────
+  "Cloudflare 详细状态": "Cloudflare detailed status",
+  "多选 OR，与“Cloudflare 拦截”取交集。留空表示不限制。":
+    "Multi-select OR; intersects with “Cloudflare challenge” filter. Empty means no restriction.",
+  "多选 OR，与上方“Cloudflare 拦截”取交集。":
+    "Multi-select OR; intersects with the “Cloudflare challenge” filter above.",
 };
 
 export function translateDocumentTitle(locale: AppLocale): string {

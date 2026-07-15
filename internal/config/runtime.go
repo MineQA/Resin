@@ -41,6 +41,12 @@ type RuntimeConfig struct {
 	ProxyCheckMultiRound          bool     `json:"proxy_check_multi_round"`
 	ProxyCheckRounds              int      `json:"proxy_check_rounds"`
 	ProxyCheckTriggerOnNewNode    bool     `json:"proxy_check_trigger_on_new_node"`
+
+	// ProxyCheckScoring is the versioned nested scoring policy (Option C).
+	// When non-nil and Version >= 1, it takes precedence over legacy flat
+	// scoring-related fields. When nil or Version < 1, the system normalizes
+	// a compatibility policy from the flat fields.
+	ProxyCheckScoring *ScoringPolicy `json:"proxy_check_scoring,omitempty"`
 }
 
 // NewDefaultRuntimeConfig returns a RuntimeConfig populated with the default
@@ -77,5 +83,6 @@ func NewDefaultRuntimeConfig() *RuntimeConfig {
 		ProxyCheckMultiRound:          false,
 		ProxyCheckRounds:              1,
 		ProxyCheckTriggerOnNewNode:    false,
+		ProxyCheckScoring:             nil, // will normalize from flat fields
 	}
 }

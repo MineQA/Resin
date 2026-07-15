@@ -1,4 +1,5 @@
 import { apiRequest } from "../../lib/api-client";
+import { normalizeCFStatusSet, type CloudflareStatusToken } from "../../lib/cloudflareStatus";
 import { normalizeProtocolList } from "../../lib/protocolOptions";
 import type {
   ListPlatformLeasesInput,
@@ -13,7 +14,7 @@ const basePath = "/api/v1/platforms";
 
 type ApiPlatform = Omit<
   Platform,
-  "regex_filters" | "region_filters" | "protocol_filters" | "exclude_protocol_filters" | "quality_cloudflare_challenged"
+  "regex_filters" | "region_filters" | "protocol_filters" | "exclude_protocol_filters" | "quality_cloudflare_challenged" | "quality_cloudflare_statuses"
 > & {
   regex_filters?: string[] | null;
   region_filters?: string[] | null;
@@ -27,6 +28,7 @@ type ApiPlatform = Omit<
   quality_grade?: string | null;
   quality_min_score?: number | null;
   quality_cloudflare_challenged?: boolean | null;
+  quality_cloudflare_statuses?: string[] | null;
   quality_checked_since_ns?: number | string | null;
   quality_profile?: string | null;
 };
@@ -44,6 +46,7 @@ function normalizePlatformQualityFields(raw: ApiPlatform): {
   quality_grade: string;
   quality_min_score: number;
   quality_cloudflare_challenged: boolean | null;
+  quality_cloudflare_statuses: CloudflareStatusToken[];
   quality_checked_since_ns: number;
   quality_profile: string;
 } {
@@ -55,6 +58,8 @@ function normalizePlatformQualityFields(raw: ApiPlatform): {
   if (typeof raw.quality_cloudflare_challenged === "boolean") {
     cfChallenged = raw.quality_cloudflare_challenged;
   }
+  // Defensive normalization of the detailed status array.
+  const cfStatuses = normalizeCFStatusSet(raw.quality_cloudflare_statuses);
   // JSON numbers may arrive as strings from some proxies; coerce defensively.
   let checkedSinceNs = 0;
   if (typeof raw.quality_checked_since_ns === "number") {
@@ -70,6 +75,7 @@ function normalizePlatformQualityFields(raw: ApiPlatform): {
     quality_grade: grade,
     quality_min_score: minScore,
     quality_cloudflare_challenged: cfChallenged,
+    quality_cloudflare_statuses: cfStatuses,
     quality_checked_since_ns: checkedSinceNs,
     quality_profile: profile,
   };

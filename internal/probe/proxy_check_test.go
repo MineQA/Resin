@@ -2,9 +2,14 @@ package probe
 
 import (
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/Resinat/Resin/internal/config"
 	"github.com/Resinat/Resin/internal/node"
 )
 
@@ -440,6 +445,9 @@ func TestAggregateScore_CFChallengedGradeD(t *testing.T) {
 	if score.CloudflareChallengeType != "js_challenge" {
 		t.Fatalf("expected challenge type js_challenge, got %q", score.CloudflareChallengeType)
 	}
+	if score.CloudflareStatus != "js_challenge" {
+		t.Fatalf("expected CloudflareStatus js_challenge (via legacy fallback), got %q", score.CloudflareStatus)
+	}
 	// Score: (50+25)/1 = 75 - 20 (CF penalty) = 55
 	if score.Score != 55 {
 		t.Fatalf("expected score 55, got %.0f", score.Score)
@@ -693,9 +701,9 @@ func TestCheckProxy_CFChallengeDetectedInBody(t *testing.T) {
 		case "https://chatgpt.com":
 			return []byte(`<html><head><title>Just a moment...</title>
 				<script src="/cf-browser-verification"></script><footer>Cloudflare</footer></html>`),
-				200*time.Millisecond, nil
+				200 * time.Millisecond, nil
 		case "https://api.openai.com/v1/models":
-			return []byte(`{"data":[]}`), 80*time.Millisecond, nil
+			return []byte(`{"data":[]}`), 80 * time.Millisecond, nil
 		default:
 			return nil, 0, errors.New("unexpected URL")
 		}
@@ -730,15 +738,18 @@ func TestCheckProxy_CFChallengeDetectedInBody(t *testing.T) {
 }
 
 func TestCheckProxy_CFChallengeDetectionDisabled(t *testing.T) {
-	// CloudflareFlag=true, but opts.CloudflareDetection=false
+	// CloudflareFlag=true, opts.CloudflareDetection=false.
+	// Phase 3A: observation runs unconditionally even when detection is
+	// disabled. The CloudflareDetection flag gates only the score/grade
+	// compatibility effect, not the observation itself.
 	fetcher := func(_ node.Hash, url string) ([]byte, time.Duration, error) {
 		switch url {
 		case "https://chatgpt.com":
 			return []byte(`<html><head><title>Just a moment...</title>
-				<script src="/cf-browser-verification"></script></html>`),
-				200*time.Millisecond, nil
+				<script src="/cf-browser-verification"></script><div>OpenAI ChatGPT</div></html>`),
+				200 * time.Millisecond, nil
 		case "https://api.openai.com/v1/models":
-			return []byte(`{"data":[]}`), 80*time.Millisecond, nil
+			return []byte(`{"data":[]}`), 80 * time.Millisecond, nil
 		default:
 			return nil, 0, errors.New("unexpected URL")
 		}
@@ -754,23 +765,30 @@ func TestCheckProxy_CFChallengeDetectionDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CheckProxy: %v", err)
 	}
-	if score.CloudflareChallenged {
-		t.Fatal("expected no CF challenged when CloudflareDetection is disabled")
+	// Observation is unconditional — challenge must be detected.
+	if !score.CloudflareChallenged {
+		t.Fatal("expected CloudflareChallenged = true (observation is unconditional)")
 	}
-	// Grade should be A (all enabled checks pass, CF detection disabled)
+	if score.CloudflareChallengeType != "js_challenge" {
+		t.Fatalf("expected challenge type js_challenge, got %q", score.CloudflareChallengeType)
+	}
+	if score.CloudflareStatus == "" {
+		t.Fatal("expected CloudflareStatus to be set (observation ran)")
+	}
+	// Grade: CloudflareDetection=false → no grade penalty despite detection.
 	if score.Grade != "A" {
-		t.Fatalf("expected A (CF detection disabled), got %s", score.Grade)
+		t.Fatalf("expected A (CF detection disabled gates grade, not observation), got %s", score.Grade)
 	}
 }
 
 func TestCheckProxy_CFChallengeGenericProfile(t *testing.T) {
-	// Generic profile has CloudflareFlag=false, so body CF check should not run
-	// even when opts.CloudflareDetection=true.
+	// Generic profile has CloudflareFlag=false, but Phase 3A observation is
+	// unconditional. Body CF challenge markers are detected regardless.
 	fetcher := func(_ node.Hash, url string) ([]byte, time.Duration, error) {
 		switch url {
 		case "https://www.gstatic.com/generate_204":
 			return []byte(`<html><head><title>Just a moment...</title><footer>Cloudflare</footer></html>`),
-				200*time.Millisecond, nil
+				200 * time.Millisecond, nil
 		default:
 			return nil, 0, errors.New("unexpected URL")
 		}
@@ -785,11 +803,19 @@ func TestCheckProxy_CFChallengeGenericProfile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CheckProxy: %v", err)
 	}
-	if score.CloudflareChallenged {
-		t.Fatal("expected no CF challenged on generic profile (CloudflareFlag=false)")
+	// Observation is unconditional — challenge must be detected even on
+	// generic profile (CloudflareFlag is a no-op in Phase 3A).
+	if !score.CloudflareChallenged {
+		t.Fatal("expected CloudflareChallenged = true (observation is unconditional)")
+	}
+	if score.CloudflareStatus == "" {
+		t.Fatal("expected CloudflareStatus to be set (observation ran)")
+	}
+	if score.Grade != "D" {
+		t.Fatalf("expected D for CF challenged on generic profile (observation unconditional), got %s", score.Grade)
 	}
 	if !score.ServiceReachable {
-		t.Fatal("service should be reachable")
+		t.Fatal("service should be reachable (generic has no indicators)")
 	}
 }
 
@@ -845,5 +871,825 @@ func TestNormalizeProxyString_TrojanNotStripped(t *testing.T) {
 	want := "trojan://password@example.com:443"
 	if got != want {
 		t.Errorf("expected trojan:// preserved, got %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CloudflareStatus classification (header-first + body fallback)
+// ---------------------------------------------------------------------------
+
+func makeResp(body []byte, statusCode int, headers map[string]string) FetchResponse {
+	h := make(http.Header)
+	for k, v := range headers {
+		h.Set(k, v)
+	}
+	return FetchResponse{
+		Body:       body,
+		StatusCode: statusCode,
+		Header:     h,
+	}
+}
+
+func TestClassifyCloudflareStatus_CFMitigatedChallenge(t *testing.T) {
+	// cf-mitigated: challenge is authoritative.
+	resp := makeResp([]byte("<html>challenge page</html>"), 503, map[string]string{
+		"cf-mitigated": "challenge",
+		"Server":       "cloudflare",
+		"CF-Ray":       "abc123",
+	})
+	status := classifyCloudflareStatus(resp)
+	if status != CFStatusChallenge {
+		t.Fatalf("expected generic challenge when header has no subtype markers, got %q", status)
+	}
+}
+
+func TestClassifyCloudflareStatus_CFMitigatedCaptcha(t *testing.T) {
+	resp := makeResp([]byte(`<div class="cf-chl-widget"></div>`), 403, map[string]string{
+		"cf-mitigated": "challenge",
+		"Content-Type": "text/html; captcha",
+	})
+	status := classifyCloudflareStatus(resp)
+	if status != CFStatusCaptchaChallenge {
+		t.Fatalf("expected captcha_challenge (403 + captcha content-type), got %q", status)
+	}
+}
+
+func TestClassifyCloudflareStatus_ServerCloudflareClean(t *testing.T) {
+	resp := makeResp([]byte(`{"ok":true}`), 200, map[string]string{
+		"Server": "cloudflare",
+		"CF-Ray": "xyz789",
+	})
+	status := classifyCloudflareStatus(resp)
+	if status != CFStatusClean {
+		t.Fatalf("expected clean (CF headers, no challenge), got %q", status)
+	}
+}
+
+func TestClassifyCloudflareStatus_NoCFEvidenceNotDetected(t *testing.T) {
+	resp := makeResp([]byte("normal page content"), 200, map[string]string{
+		"Server": "nginx",
+	})
+	status := classifyCloudflareStatus(resp)
+	if status != CFStatusNotDetected {
+		t.Fatalf("expected not_detected (no CF evidence), got %q", status)
+	}
+}
+
+func TestClassifyCloudflareStatus_LegacyAdapterUnchecked(t *testing.T) {
+	// Metadata-poor: StatusCode=0, Header=nil, no body challenge.
+	// Body inspection found no known challenge, but without headers/status the
+	// adapter cannot claim clean or not_detected.
+	resp := makeResp([]byte("some body"), 0, nil)
+	resp.Header = nil
+	status := classifyCloudflareStatus(resp)
+	if status != CFStatusEmpty {
+		t.Fatalf("expected empty/unchecked for metadata-poor response, got %q", status)
+	}
+}
+
+func TestClassifyCloudflareStatus_BodyFallbackJSChallenge(t *testing.T) {
+	// Headers available but no CF evidence; body has JS challenge markers.
+	resp := makeResp([]byte(`<html><script src="/cf-browser-verification"></script></html>`), 200, map[string]string{
+		"Server": "nginx",
+	})
+	status := classifyCloudflareStatus(resp)
+	if status != CFStatusJSChallenge {
+		t.Fatalf("expected js_challenge via body fallback, got %q", status)
+	}
+}
+
+func TestClassifyCloudflareStatus_BodyFallbackBlock(t *testing.T) {
+	resp := makeResp([]byte(`<html>Attention Required! Cloudflare Error 1020</html>`), 200, nil)
+	status := classifyCloudflareStatus(resp)
+	if status != CFStatusBlock {
+		t.Fatalf("expected block via body fallback, got %q", status)
+	}
+}
+
+func TestClassifyCloudflareStatus_CFRayOnlyClean(t *testing.T) {
+	resp := makeResp([]byte("content"), 200, map[string]string{
+		"CF-Ray": "abc-def-123",
+	})
+	status := classifyCloudflareStatus(resp)
+	if status != CFStatusClean {
+		t.Fatalf("expected clean (CF-Ray present, no challenge), got %q", status)
+	}
+}
+
+func TestClassifyCloudflareStatus_TransportFailureNG(t *testing.T) {
+	// Only set via CheckProxy, not classifyCloudflareStatus.
+	// classifyCloudflareStatus is not called on transport errors.
+}
+
+// ---------------------------------------------------------------------------
+// mostSevereCFStatus
+// ---------------------------------------------------------------------------
+
+func TestMostSevereCFStatus_BlockWins(t *testing.T) {
+	got := mostSevereCFStatus(CFStatusNotDetected, CFStatusBlock, CFStatusClean, CFStatusEmpty)
+	if got != CFStatusBlock {
+		t.Fatalf("expected block (most severe), got %q", got)
+	}
+}
+
+func TestMostSevereCFStatus_CaptchaBeatsJS(t *testing.T) {
+	got := mostSevereCFStatus(CFStatusJSChallenge, CFStatusCaptchaChallenge, CFStatusClean)
+	if got != CFStatusCaptchaChallenge {
+		t.Fatalf("expected captcha_challenge, got %q", got)
+	}
+}
+
+func TestMostSevereCFStatus_NGBeatsClean(t *testing.T) {
+	got := mostSevereCFStatus(CFStatusClean, CFStatusNotDetected, CFStatusNG)
+	if got != CFStatusNG {
+		t.Fatalf("expected ng (more severe than clean), got %q", got)
+	}
+}
+
+func TestMostSevereCFStatus_EmptyIsLeastSevere(t *testing.T) {
+	got := mostSevereCFStatus(CFStatusEmpty, CFStatusEmpty)
+	if got != CFStatusEmpty {
+		t.Fatalf("expected empty, got %q", got)
+	}
+
+	got2 := mostSevereCFStatus(CFStatusEmpty, CFStatusNotDetected)
+	if got2 != CFStatusNotDetected {
+		t.Fatalf("expected not_detected > empty, got %q", got2)
+	}
+}
+
+func TestMostSevereCFStatus_AllEmptyReturnsEmpty(t *testing.T) {
+	got := mostSevereCFStatus()
+	if got != CFStatusEmpty {
+		t.Fatalf("expected empty for no inputs, got %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// isChallengeStatus
+// ---------------------------------------------------------------------------
+
+func TestIsChallengeStatus(t *testing.T) {
+	tests := []struct {
+		status CloudflareStatus
+		want   bool
+	}{
+		{CFStatusBlock, true},
+		{CFStatusCaptchaChallenge, true},
+		{CFStatusJSChallenge, true},
+		{CFStatusChallenge, true},
+		{CFStatusClean, false},
+		{CFStatusNotDetected, false},
+		{CFStatusNG, false},
+		{CFStatusEmpty, false},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.status), func(t *testing.T) {
+			got := isChallengeStatus(tt.status)
+			if got != tt.want {
+				t.Errorf("isChallengeStatus(%q) = %v, want %v", tt.status, got, tt.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// aggregateScore with CloudflareStatus
+// ---------------------------------------------------------------------------
+
+func TestAggregateScore_AggregateCFStatus(t *testing.T) {
+	results := []ProxyRoundResult{
+		{ServiceReachable: true, APIReachable: true, CloudflareStatus: CFStatusNotDetected},
+		{ServiceReachable: true, APIReachable: true, CloudflareStatus: CFStatusJSChallenge},
+	}
+	opts := ProxyCheckOptions{
+		ServiceReachability: true,
+		APIReachability:     true,
+		CloudflareDetection: true,
+		MultiRound:          true,
+		Rounds:              2,
+	}
+	score := aggregateScore(results, opts)
+	if score.CloudflareStatus != CFStatusJSChallenge {
+		t.Fatalf("expected aggregate js_challenge, got %q", score.CloudflareStatus)
+	}
+	if !score.CloudflareChallenged {
+		t.Fatal("expected CloudflareChallenged = true")
+	}
+	if score.CloudflareChallengeType != "js_challenge" {
+		t.Fatalf("expected challenge type js_challenge, got %q", score.CloudflareChallengeType)
+	}
+}
+
+func TestAggregateScore_CFStatusNotDetectedNoPenalty(t *testing.T) {
+	results := []ProxyRoundResult{
+		{ServiceReachable: true, CloudflareStatus: CFStatusNotDetected},
+	}
+	opts := ProxyCheckOptions{
+		ServiceReachability: true,
+		CloudflareDetection: true,
+	}
+	score := aggregateScore(results, opts)
+	if score.CloudflareChallenged {
+		t.Fatal("expected no challenge for not_detected")
+	}
+	if score.CloudflareChallengeType != "" {
+		t.Fatalf("expected empty challenge type, got %q", score.CloudflareChallengeType)
+	}
+	// 50 points, no CF penalty
+	if score.Score != 50 {
+		t.Fatalf("expected score 50 (no CF penalty), got %.0f", score.Score)
+	}
+	// allPassedAllRounds: serviceOk=true, API not enabled (allPass=nil), CF detection on but no challenge → true → A
+	if score.Grade != "A" {
+		t.Fatalf("expected A for clean round, got %s", score.Grade)
+	}
+}
+
+func TestAggregateScore_CFStatusNGNoPenalty(t *testing.T) {
+	results := []ProxyRoundResult{
+		{ServiceReachable: false, CloudflareStatus: CFStatusNG, Error: "transport failure"},
+	}
+	opts := ProxyCheckOptions{
+		ServiceReachability: true,
+		CloudflareDetection: true,
+	}
+	score := aggregateScore(results, opts)
+	if score.CloudflareChallenged {
+		t.Fatal("expected no challenge for ng")
+	}
+	if score.CloudflareStatus != CFStatusNG {
+		t.Fatalf("expected NG status, got %q", score.CloudflareStatus)
+	}
+	// No service points, no CF penalty → score 0
+	if score.Score != 0 {
+		t.Fatalf("expected score 0, got %.0f", score.Score)
+	}
+	if score.Grade != "F" {
+		t.Fatalf("expected F for failed round, got %s", score.Grade)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CheckProxyWithResponse: CF-only request when ServiceReachability disabled
+// ---------------------------------------------------------------------------
+
+func TestCheckProxyWithResponse_CFOnlyRequest(t *testing.T) {
+	// Service evaluation disabled, but CF observation should still run.
+	var callCount int
+	fetcher := func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+		callCount++
+		return []byte("ok"), 10 * time.Millisecond, nil
+	}
+
+	opts := ProxyCheckOptions{
+		ServiceReachability: false, // service criterion disabled
+		CloudflareDetection: true,
+		Rounds:              1,
+	}
+
+	score, err := CheckProxyWithResponse(fetcher, node.Zero, ProfileGeneric, opts, nil)
+	if err != nil {
+		t.Fatalf("CheckProxyWithResponse: %v", err)
+	}
+	// One request should be made (for CF observation).
+	if callCount != 1 {
+		t.Fatalf("expected 1 request (CF-only), got %d", callCount)
+	}
+	// ServiceReachable must be false because the criterion is disabled.
+	if score.ServiceReachable {
+		t.Fatal("expected ServiceReachable = false when service evaluation disabled")
+	}
+	// The request ran, but this test uses the legacy metadata-poor fetcher, so
+	// a non-challenge body remains empty/unchecked rather than guessed clean.
+	if score.CloudflareStatus != CFStatusEmpty {
+		t.Fatalf("expected empty/unchecked metadata-poor status, got %q", score.CloudflareStatus)
+	}
+	// But CloudflareChallenged should be false for the body "ok"
+	if score.CloudflareChallenged {
+		t.Fatal("expected no CF challenge for body 'ok'")
+	}
+}
+
+func TestCheckProxyWithResponse_SharedServiceAndCFRequest(t *testing.T) {
+	// When both service evaluation and CF observation are needed, only
+	// ONE request should be made per round (shared). The API check is
+	// a separate request when APIReachability is enabled.
+	var callCount int
+	fetcher := func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+		callCount++
+		return []byte("Welcome to ChatGPT"), 50 * time.Millisecond, nil
+	}
+
+	opts := ProxyCheckOptions{
+		ServiceReachability: true,
+		APIReachability:     true,
+		CloudflareDetection: true,
+		Rounds:              1,
+	}
+
+	score, err := CheckProxyWithResponse(fetcher, node.Zero, ProfileOpenAI, opts, nil)
+	if err != nil {
+		t.Fatalf("CheckProxyWithResponse: %v", err)
+	}
+	// Exactly 1 request for service (shared with CF). API check adds 1.
+	if callCount != 2 {
+		t.Fatalf("expected 2 calls (1 service+CF shared + 1 API), got %d", callCount)
+	}
+	if !score.ServiceReachable {
+		t.Fatal("expected service reachable")
+	}
+	// Shared request used a legacy metadata-poor fetcher. It proves request
+	// reuse, but cannot classify a non-challenge response as clean/not_detected.
+	if score.CloudflareStatus != CFStatusEmpty {
+		t.Fatalf("expected empty/unchecked metadata-poor status, got %q", score.CloudflareStatus)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// All profiles observed regardless of CloudflareFlag
+// ---------------------------------------------------------------------------
+
+func TestCheckProxyWithResponse_GenericProfileCFStillRuns(t *testing.T) {
+	// Generic profile has CloudflareFlag=false, but CF observation should
+	// still run because observation is now unconditional.
+	var callCount int
+	fetcher := func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+		callCount++
+		return []byte("ok"), 10 * time.Millisecond, nil
+	}
+
+	opts := ProxyCheckOptions{
+		ServiceReachability: true,
+		CloudflareDetection: true,
+		Rounds:              1,
+	}
+
+	score, err := CheckProxyWithResponse(fetcher, node.Zero, ProfileGeneric, opts, nil)
+	if err != nil {
+		t.Fatalf("CheckProxyWithResponse: %v", err)
+	}
+	if callCount < 1 {
+		t.Fatal("expected at least 1 request")
+	}
+	if score.CloudflareStatus != CFStatusEmpty {
+		t.Fatalf("expected empty/unchecked metadata-poor status, got %q", score.CloudflareStatus)
+	}
+	if score.CloudflareChallenged {
+		t.Fatal("expected no CF challenge for generic profile body 'ok'")
+	}
+}
+
+func TestCheckProxyWithResponse_OpenaiProfileCFRuns(t *testing.T) {
+	// OpenAI has CloudflareFlag=true; CF observation runs as usual.
+	var callCount int
+	fetcher := func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+		callCount++
+		return []byte("Welcome to ChatGPT by OpenAI"), 50 * time.Millisecond, nil
+	}
+
+	opts := ProxyCheckOptions{
+		ServiceReachability: true,
+		APIReachability:     true,
+		CloudflareDetection: true,
+		Rounds:              1,
+	}
+
+	score, err := CheckProxyWithResponse(fetcher, node.Zero, ProfileOpenAI, opts, nil)
+	if err != nil {
+		t.Fatalf("CheckProxyWithResponse: %v", err)
+	}
+	if callCount != 2 {
+		t.Fatalf("expected 2 calls (1 service+CF + 1 API), got %d", callCount)
+	}
+	if score.CloudflareStatus != CFStatusEmpty {
+		t.Fatalf("expected empty/unchecked metadata-poor status, got %q", score.CloudflareStatus)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Multi-round severity aggregation integration
+// ---------------------------------------------------------------------------
+
+func TestCheckProxyWithResponse_MultiRoundSeverityAggregation(t *testing.T) {
+	round := 0
+	fetcher := func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+		round++
+		switch round {
+		case 1:
+			// Round 1: not_detected
+			return []byte("normal content"), 50 * time.Millisecond, nil
+		case 2:
+			// Round 2: CF challenge via body
+			return []byte(`<html><script src="/cf-browser-verification"></script></html>`), 60 * time.Millisecond, nil
+		case 3:
+			// Round 3: block
+			return []byte(`<html>Attention Required! Cloudflare</html>`), 70 * time.Millisecond, nil
+		default:
+			return nil, 0, fmt.Errorf("unexpected round %d", round)
+		}
+	}
+
+	opts := ProxyCheckOptions{
+		ServiceReachability: true,
+		CloudflareDetection: true,
+		MultiRound:          true,
+		Rounds:              3,
+	}
+
+	score, err := CheckProxyWithResponse(fetcher, node.Zero, ProfileGeneric, opts, nil)
+	if err != nil {
+		t.Fatalf("CheckProxyWithResponse: %v", err)
+	}
+	// Most severe is block.
+	if score.CloudflareStatus != CFStatusBlock {
+		t.Fatalf("expected block as most severe aggregate, got %q", score.CloudflareStatus)
+	}
+	if !score.CloudflareChallenged {
+		t.Fatal("expected challenged = true (block is challenge)")
+	}
+	if score.CloudflareChallengeType != "block" {
+		t.Fatalf("expected challenge type block, got %q", score.CloudflareChallengeType)
+	}
+	if len(score.RoundResults) != 3 {
+		t.Fatalf("expected 3 round results, got %d", len(score.RoundResults))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DirectResponseFetcher metadata
+// ---------------------------------------------------------------------------
+
+func TestDirectResponseFetcher_Metadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Custom", "value")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("hello"))
+	}))
+	defer srv.Close()
+
+	fetcher := DirectResponseFetcher(func() time.Duration { return time.Second })
+	resp, err := fetcher(node.Zero, srv.URL)
+	if err != nil {
+		t.Fatalf("DirectResponseFetcher failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("StatusCode = %d, want 200", resp.StatusCode)
+	}
+	if resp.Header == nil {
+		t.Fatal("Header is nil")
+	}
+	if resp.Header.Get("X-Custom") != "value" {
+		t.Errorf("X-Custom = %q, want 'value'", resp.Header.Get("X-Custom"))
+	}
+	if string(resp.Body) != "hello" {
+		t.Errorf("Body = %q, want 'hello'", string(resp.Body))
+	}
+	if resp.FinalURL == "" {
+		t.Error("FinalURL should not be empty")
+	}
+	if resp.Latency <= 0 {
+		t.Errorf("Latency should be > 0, got %v", resp.Latency)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// LegacyResponseFetcher adapter
+// ---------------------------------------------------------------------------
+
+func TestLegacyResponseFetcher_MetadataPoor(t *testing.T) {
+	plainFetcher := Fetcher(func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+		return []byte("body-only"), 25 * time.Millisecond, nil
+	})
+
+	adapter := LegacyResponseFetcher(plainFetcher)
+	resp, err := adapter(node.Zero, "http://example.com")
+	if err != nil {
+		t.Fatalf("LegacyResponseFetcher failed: %v", err)
+	}
+	if resp.StatusCode != 0 {
+		t.Errorf("StatusCode = %d, want 0 (metadata-poor)", resp.StatusCode)
+	}
+	if resp.Header != nil {
+		t.Error("Header should be nil (metadata-poor)")
+	}
+	if resp.FinalURL != "" {
+		t.Errorf("FinalURL = %q, want empty", resp.FinalURL)
+	}
+	if string(resp.Body) != "body-only" {
+		t.Errorf("Body = %q, want 'body-only'", string(resp.Body))
+	}
+	if resp.Latency != 25*time.Millisecond {
+		t.Errorf("Latency = %v, want 25ms", resp.Latency)
+	}
+}
+
+func TestLegacyResponseFetcher_PropagatesConnectionRefused(t *testing.T) {
+	plainFetcher := Fetcher(func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+		return nil, 0, fmt.Errorf("connection refused")
+	})
+
+	adapter := LegacyResponseFetcher(plainFetcher)
+	_, err := adapter(node.Zero, "http://example.com")
+	if err == nil {
+		t.Fatal("expected error to propagate")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ScoringBreakdown and Unstable in new scoring path (Phase 3B1)
+// ---------------------------------------------------------------------------
+
+func TestCheckProxyWithResponse_ScoringBreakdownPopulated(t *testing.T) {
+	fetcher := func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+		return []byte("ok"), 50 * time.Millisecond, nil
+	}
+	policy := config.BalancedScoringPolicy()
+	opts := ProxyCheckOptions{
+		ServiceReachability: true,
+		ScoringPolicy:       &policy,
+		Rounds:              1,
+	}
+	score, err := CheckProxyWithResponse(fetcher, node.Zero, ProfileGeneric, opts, nil)
+	if err != nil {
+		t.Fatalf("CheckProxyWithResponse: %v", err)
+	}
+	if score.ScoringBreakdown == nil {
+		t.Fatal("ScoringBreakdown should be non-nil when ScoringPolicy is set")
+	}
+	if score.ScoringBreakdown.Score != score.Score {
+		t.Fatalf("ScoringBreakdown.Score=%.0f != ProxyScore.Score=%.0f", score.ScoringBreakdown.Score, score.Score)
+	}
+	if score.ScoringBreakdown.FinalGrade != score.Grade {
+		t.Fatalf("ScoringBreakdown.FinalGrade=%s != ProxyScore.Grade=%s", score.ScoringBreakdown.FinalGrade, score.Grade)
+	}
+}
+
+func TestCheckProxyWithResponse_LegacyNoBreakdown(t *testing.T) {
+	fetcher := func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+		return []byte("ok"), 50 * time.Millisecond, nil
+	}
+	// No ScoringPolicy set — legacy path.
+	opts := DefaultOptions()
+	score, err := CheckProxyWithResponse(fetcher, node.Zero, ProfileGeneric, opts, nil)
+	if err != nil {
+		t.Fatalf("CheckProxyWithResponse: %v", err)
+	}
+	if score.ScoringBreakdown != nil {
+		t.Fatal("ScoringBreakdown should be nil for legacy scoring path")
+	}
+}
+
+func TestCheckProxyWithResponse_UnstableNewScoring(t *testing.T) {
+	policy := config.BalancedScoringPolicy()
+	opts := ProxyCheckOptions{
+		ServiceReachability: true,
+		ScoringPolicy:       &policy,
+		MultiRound:          true,
+		Rounds:              2,
+	}
+
+	// Inconsistent results: round 1 passes, round 2 doesn't.
+	round1 := true
+	fetcher := func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+		if round1 {
+			round1 = false
+			return []byte("ok"), 50 * time.Millisecond, nil
+		}
+		return nil, 0, fmt.Errorf("timeout")
+	}
+
+	score, err := CheckProxyWithResponse(fetcher, node.Zero, ProfileGeneric, opts, nil)
+	if err != nil {
+		t.Fatalf("CheckProxyWithResponse: %v", err)
+	}
+	if !score.Unstable {
+		t.Fatal("expected Unstable=true for inconsistent multi-round with new scoring")
+	}
+}
+
+func TestCheckProxyWithResponse_StableNewScoring(t *testing.T) {
+	fetcher := func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+		return []byte("ok"), 50 * time.Millisecond, nil
+	}
+	policy := config.BalancedScoringPolicy()
+	opts := ProxyCheckOptions{
+		ServiceReachability: true,
+		ScoringPolicy:       &policy,
+		MultiRound:          true,
+		Rounds:              2,
+	}
+
+	// Consistent results: both pass.
+	score, err := CheckProxyWithResponse(fetcher, node.Zero, ProfileGeneric, opts, nil)
+	if err != nil {
+		t.Fatalf("CheckProxyWithResponse: %v", err)
+	}
+	if score.Unstable {
+		t.Fatal("expected Unstable=false for consistent multi-round with new scoring")
+	}
+}
+
+func TestCheckProxyWithResponse_UnstableSingleRoundFalse(t *testing.T) {
+	policy := config.BalancedScoringPolicy()
+	opts := ProxyCheckOptions{
+		ServiceReachability: true,
+		ScoringPolicy:       &policy,
+		Rounds:              1,
+	}
+	fetcher := func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+		return []byte("ok"), 50 * time.Millisecond, nil
+	}
+	score, err := CheckProxyWithResponse(fetcher, node.Zero, ProfileGeneric, opts, nil)
+	if err != nil {
+		t.Fatalf("CheckProxyWithResponse: %v", err)
+	}
+	if score.Unstable {
+		t.Fatal("Unstable should be false for single round")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Custom CF target semantics (Phase 3B1)
+// ---------------------------------------------------------------------------
+
+func TestCheckProxy_CustomCFTarget_AuthoritativeOverride(t *testing.T) {
+	// Custom CF target differs from ServiceURL. Service request returns clean,
+	// custom target returns block. Custom target is authoritative → block wins.
+	var customCalled bool
+	fetcher := func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+		switch url {
+		case "https://www.gstatic.com/generate_204":
+			return []byte("ok"), 50 * time.Millisecond, nil
+		case "https://custom-cf.example.com/check":
+			customCalled = true
+			return []byte(`<html>Attention Required! Cloudflare Error 1020</html>`), 100 * time.Millisecond, nil
+		default:
+			return nil, 0, fmt.Errorf("unexpected URL: %s", url)
+		}
+	}
+
+	policy := config.BalancedScoringPolicy()
+	policy.Cloudflare.TargetURL = "https://custom-cf.example.com/check"
+
+	opts := ProxyCheckOptions{
+		ServiceReachability: true,
+		ScoringPolicy:       &policy,
+		Rounds:              1,
+	}
+	score, err := CheckProxy(fetcher, node.Zero, ProfileGeneric, opts)
+	if err != nil {
+		t.Fatalf("CheckProxy: %v", err)
+	}
+	if !customCalled {
+		t.Fatal("custom CF target should have been called")
+	}
+	// Custom target returned block → CloudflareStatus must be block, not clean.
+	if score.CloudflareStatus != "block" {
+		t.Fatalf("expected block from authoritative custom target, got %q", score.CloudflareStatus)
+	}
+}
+
+func TestCheckProxy_CustomCFTarget_EqualURLReusesServiceResponse(t *testing.T) {
+	// Custom CF target equals normalized ServiceURL → no separate request.
+	var callCount int
+	fetcher := func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+		callCount++
+		return []byte("ok"), 50 * time.Millisecond, nil
+	}
+
+	policy := config.BalancedScoringPolicy()
+	// Same URL as ProfileGeneric.ServiceURL
+	policy.Cloudflare.TargetURL = "https://www.gstatic.com/generate_204"
+
+	opts := ProxyCheckOptions{
+		ServiceReachability: true,
+		ScoringPolicy:       &policy,
+		Rounds:              1,
+	}
+	_, err := CheckProxy(fetcher, node.Zero, ProfileGeneric, opts)
+	if err != nil {
+		t.Fatalf("CheckProxy: %v", err)
+	}
+	// Only 1 request (service, reused for CF).
+	if callCount != 1 {
+		t.Fatalf("expected 1 request (reused), got %d", callCount)
+	}
+}
+
+func TestCheckProxy_CustomCFTarget_DistinctSecondRequest(t *testing.T) {
+	// Custom CF target differs, service evaluation is enabled → two requests:
+	// service + custom CF.
+	var urlsCalled []string
+	fetcher := func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+		urlsCalled = append(urlsCalled, url)
+		return []byte("ok"), 50 * time.Millisecond, nil
+	}
+
+	policy := config.BalancedScoringPolicy()
+	policy.Cloudflare.TargetURL = "https://custom-cf.example.com/check"
+
+	opts := ProxyCheckOptions{
+		ServiceReachability: true,
+		ScoringPolicy:       &policy,
+		Rounds:              1,
+	}
+	_, err := CheckProxy(fetcher, node.Zero, ProfileGeneric, opts)
+	if err != nil {
+		t.Fatalf("CheckProxy: %v", err)
+	}
+	if len(urlsCalled) != 2 {
+		t.Fatalf("expected 2 requests (service + custom CF), got %d: %v", len(urlsCalled), urlsCalled)
+	}
+}
+
+func TestCheckProxy_CustomCFTarget_ServiceDisabledCustomTargetOnly(t *testing.T) {
+	// Service evaluation disabled, custom CF target set → only custom CF request,
+	// no ServiceURL request.
+	var urlsCalled []string
+	fetcher := func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+		urlsCalled = append(urlsCalled, url)
+		return []byte("ok"), 50 * time.Millisecond, nil
+	}
+
+	policy := config.BalancedScoringPolicy()
+	policy.Cloudflare.TargetURL = "https://custom-cf.example.com/check"
+
+	opts := ProxyCheckOptions{
+		ServiceReachability: false, // disabled
+		ScoringPolicy:       &policy,
+		Rounds:              1,
+	}
+	_, err := CheckProxy(fetcher, node.Zero, ProfileGeneric, opts)
+	if err != nil {
+		t.Fatalf("CheckProxy: %v", err)
+	}
+	if len(urlsCalled) != 1 {
+		t.Fatalf("expected 1 request (custom CF only), got %d: %v", len(urlsCalled), urlsCalled)
+	}
+	if urlsCalled[0] != "https://custom-cf.example.com/check" {
+		t.Fatalf("expected custom CF URL, got %s", urlsCalled[0])
+	}
+}
+
+func TestCheckProxy_CustomCFTarget_TransportFailureNG(t *testing.T) {
+	// Custom CF target transport failure → aggregate CF status is ng,
+	// even if service request succeeded.
+	fetcher := func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+		switch url {
+		case "https://www.gstatic.com/generate_204":
+			return []byte("ok"), 50 * time.Millisecond, nil
+		case "https://custom-cf.example.com/check":
+			return nil, 0, fmt.Errorf("connection refused")
+		default:
+			return nil, 0, fmt.Errorf("unexpected URL: %s", url)
+		}
+	}
+
+	policy := config.BalancedScoringPolicy()
+	policy.Cloudflare.TargetURL = "https://custom-cf.example.com/check"
+
+	opts := ProxyCheckOptions{
+		ServiceReachability: true,
+		ScoringPolicy:       &policy,
+		Rounds:              1,
+	}
+	score, err := CheckProxy(fetcher, node.Zero, ProfileGeneric, opts)
+	if err != nil {
+		t.Fatalf("CheckProxy: %v", err)
+	}
+	if score.CloudflareStatus != "ng" {
+		t.Fatalf("expected ng from custom CF transport failure (authoritative), got %q", score.CloudflareStatus)
+	}
+}
+
+func TestCheckProxy_CustomCFTarget_MalformedURLReturnsError(t *testing.T) {
+	// When a malformed custom target URL fails NormalizeURLForComparison,
+	// CheckProxyWithResponse must return a descriptive error before any fetch.
+	// This test bypasses service-level validation and calls the probe directly.
+	var fetcherCalled bool
+	fetcher := func(_ node.Hash, url string) ([]byte, time.Duration, error) {
+		fetcherCalled = true
+		return []byte("ok"), 50 * time.Millisecond, nil
+	}
+
+	policy := config.BalancedScoringPolicy()
+	// Malformed URL with invalid host — NormalizeURLForComparison will fail.
+	policy.Cloudflare.TargetURL = "https://[invalid::host::]"
+
+	opts := ProxyCheckOptions{
+		ServiceReachability: true,
+		ScoringPolicy:       &policy,
+		Rounds:              1,
+	}
+	_, err := CheckProxy(fetcher, node.Zero, ProfileGeneric, opts)
+	if err == nil {
+		t.Fatal("expected error for malformed custom CF target URL")
+	}
+	if !strings.Contains(err.Error(), "invalid custom CF target URL") {
+		t.Fatalf("error should mention invalid custom CF target URL, got: %v", err)
+	}
+	if fetcherCalled {
+		t.Fatal("fetcher should not be called when custom target URL is malformed")
 	}
 }

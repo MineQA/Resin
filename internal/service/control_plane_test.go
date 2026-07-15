@@ -179,6 +179,60 @@ func TestValidateRuntimeConfig_ValidConfig(t *testing.T) {
 	}
 }
 
+func TestValidateRuntimeConfig_CanonicalPolicyAllowsNoLegacyBooleans(t *testing.T) {
+	// When a canonical scoring policy (Version >= 1) is present, the legacy
+	// "at least one of service/API/CF must be enabled" check is skipped.
+	cfg := newDefaultCfg()
+	cfg.ProxyCheckEnabled = true
+	cfg.ProxyCheckServiceReachability = false
+	cfg.ProxyCheckAPIReachability = false
+	cfg.ProxyCheckCloudflareDetection = false
+	policy := config.BalancedScoringPolicy()
+	cfg.ProxyCheckScoring = &policy
+
+	if err := validateRuntimeConfig(cfg); err != nil {
+		t.Errorf("canonical policy should allow no legacy booleans: %v", err)
+	}
+}
+
+func TestCopyRuntimeConfig_DeepCopiesScoringPolicy(t *testing.T) {
+	cfg := newDefaultCfg()
+	policy := config.BalancedScoringPolicy()
+	cfg.ProxyCheckScoring = &policy
+
+	copied := copyRuntimeConfig(cfg)
+	if copied.ProxyCheckScoring == nil {
+		t.Fatal("copied scoring policy is nil")
+	}
+	*copied.ProxyCheckScoring.Cloudflare.StatusScores.Clean = 25
+	copied.ProxyCheckScoring.Latency.Bands[0].Score = 12
+
+	if got := *cfg.ProxyCheckScoring.Cloudflare.StatusScores.Clean; got != 100 {
+		t.Fatalf("original CF clean score changed through copy: got %d, want 100", got)
+	}
+	if got := cfg.ProxyCheckScoring.Latency.Bands[0].Score; got != 100 {
+		t.Fatalf("original latency band changed through copy: got %d, want 100", got)
+	}
+}
+
+func TestValidateRuntimeConfig_NoCanonicalPolicyRejectsNoLegacyBooleans(t *testing.T) {
+	// Without canonical policy, all three legacy booleans false must be rejected.
+	cfg := newDefaultCfg()
+	cfg.ProxyCheckEnabled = true
+	cfg.ProxyCheckServiceReachability = false
+	cfg.ProxyCheckAPIReachability = false
+	cfg.ProxyCheckCloudflareDetection = false
+	cfg.ProxyCheckScoring = nil
+
+	err := validateRuntimeConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error when no canonical policy and no legacy booleans enabled")
+	}
+	if !strings.Contains(err.Error(), "at least one") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestRuntimeConfigPatchAllowlist_StaysInSyncWithRuntimeConfigJSONFields(t *testing.T) {
 	rt := reflect.TypeOf(config.RuntimeConfig{})
 	jsonFields := make(map[string]struct{})
@@ -1996,13 +2050,17 @@ func TestUpdatePlatform_PatchQualityFiltersCanClear(t *testing.T) {
 
 	name := "patch-quality"
 	cf := true
+	qualityGrade := "A"
+	qualityMinScore := 80.0
+	qualityCheckedSinceNs := int64(123456789)
+	qualityProfile := "openai"
 	created, err := cp.CreatePlatform(CreatePlatformRequest{
-		Name:                         &name,
-		QualityGrade:                 "A",
-		QualityMinScore:              80,
-		QualityCloudflareChallenged:  &cf,
-		QualityCheckedSinceNs:        123456789,
-		QualityProfile:               "openai",
+		Name:                        &name,
+		QualityGrade:                &qualityGrade,
+		QualityMinScore:             &qualityMinScore,
+		QualityCloudflareChallenged: &cf,
+		QualityCheckedSinceNs:       &qualityCheckedSinceNs,
+		QualityProfile:              &qualityProfile,
 	})
 	if err != nil {
 		t.Fatalf("CreatePlatform: %v", err)
@@ -2092,41 +2150,39 @@ func TestCreatePlatform_RejectsInvalidProtocolFilter(t *testing.T) {
 }
 
 // TestDeriveCloudflareStatus verifies the CF status derivation.
+// The persisted CloudflareStatus is now authoritative. Empty legacy status
+// normalizes to "unchecked".
 func TestDeriveCloudflareStatus(t *testing.T) {
 	tests := []struct {
-		name     string
-		quality  *model.NodeQuality
-		want     string
+		name    string
+		quality *model.NodeQuality
+		want    string
 	}{
 		{
-			name: "challenged",
+			name: "persisted_status_propagated",
 			quality: &model.NodeQuality{
-				ServiceReachable:     true,
-				CloudflareChallenged: true,
+				CloudflareStatus: "js_challenge",
 			},
-			want: "challenged",
+			want: "js_challenge",
 		},
 		{
 			name: "clean",
 			quality: &model.NodeQuality{
-				ServiceReachable:     true,
-				CloudflareChallenged: false,
+				CloudflareStatus: "clean",
 			},
 			want: "clean",
 		},
 		{
-			name: "ng_service_unreachable",
+			name: "legacy_empty_returns_unchecked",
 			quality: &model.NodeQuality{
-				ServiceReachable:     false,
-				CloudflareChallenged: false,
+				CloudflareStatus: "",
 			},
-			want: "ng",
+			want: "unchecked",
 		},
 		{
-			name: "ng_unreachable_despite_challenge_flag",
+			name: "ng",
 			quality: &model.NodeQuality{
-				ServiceReachable:     false,
-				CloudflareChallenged: false,
+				CloudflareStatus: "ng",
 			},
 			want: "ng",
 		},
@@ -2204,5 +2260,334 @@ func TestValidateQualityProfile(t *testing.T) {
 	}
 	if err := validateQualityProfile("nonexistent"); err == nil {
 		t.Fatal("nonexistent profile should be invalid")
+	}
+}
+
+// --- Platform quality_cloudflare_statuses CRUD tests ---
+
+func TestCreatePlatform_WithQualityCloudflareStatuses(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	cp := &ControlPlaneService{
+		Engine: engine,
+		Pool:   pool,
+		SubMgr: subMgr,
+		EnvCfg: &config.EnvConfig{
+			DefaultPlatformStickyTTL:              30 * time.Minute,
+			DefaultPlatformRegexFilters:           []string{},
+			DefaultPlatformRegionFilters:          []string{},
+			DefaultPlatformReverseProxyMissAction: "TREAT_AS_EMPTY",
+			DefaultPlatformAllocationPolicy:       "BALANCED",
+		},
+	}
+
+	name := "cf-status-test"
+	created, err := cp.CreatePlatform(CreatePlatformRequest{
+		Name:                      &name,
+		QualityCloudflareStatuses: []string{"block", "clean", "block", "ng"},
+	})
+	if err != nil {
+		t.Fatalf("CreatePlatform: %v", err)
+	}
+
+	// Response: deduplicated, canonical order (block < ng < clean per AllCanonicalStatuses).
+	want := []string{"block", "ng", "clean"}
+	if !reflect.DeepEqual(created.QualityCloudflareStatuses, want) {
+		t.Fatalf("response quality_cloudflare_statuses = %v, want %v", created.QualityCloudflareStatuses, want)
+	}
+
+	// Persisted model.
+	stored, err := engine.GetPlatform(created.ID)
+	if err != nil {
+		t.Fatalf("GetPlatform: %v", err)
+	}
+	if !reflect.DeepEqual(stored.QualityCloudflareStatuses, want) {
+		t.Fatalf("stored quality_cloudflare_statuses = %v, want %v", stored.QualityCloudflareStatuses, want)
+	}
+
+	// Runtime platform.
+	plat, ok := pool.GetPlatform(created.ID)
+	if !ok {
+		t.Fatalf("platform %s not found in pool", created.ID)
+	}
+	if !reflect.DeepEqual(plat.QualityCloudflareStatuses, want) {
+		t.Fatalf("runtime quality_cloudflare_statuses = %v, want %v", plat.QualityCloudflareStatuses, want)
+	}
+}
+
+func TestCreatePlatform_RejectsUnknownCloudflareStatus(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	cp := &ControlPlaneService{
+		Engine: engine,
+		Pool:   pool,
+		SubMgr: subMgr,
+		EnvCfg: &config.EnvConfig{
+			DefaultPlatformStickyTTL:              30 * time.Minute,
+			DefaultPlatformRegexFilters:           []string{},
+			DefaultPlatformRegionFilters:          []string{},
+			DefaultPlatformReverseProxyMissAction: "TREAT_AS_EMPTY",
+			DefaultPlatformAllocationPolicy:       "BALANCED",
+		},
+	}
+
+	name := "bad-cf-status"
+	_, err = cp.CreatePlatform(CreatePlatformRequest{
+		Name:                      &name,
+		QualityCloudflareStatuses: []string{"bogus"},
+	})
+	if err == nil {
+		t.Fatal("expected error for unknown cloudflare status")
+	}
+	var svcErr *ServiceError
+	if !errors.As(err, &svcErr) {
+		t.Fatalf("expected ServiceError, got %T", err)
+	}
+	if svcErr.Code != "INVALID_ARGUMENT" {
+		t.Fatalf("expected INVALID_ARGUMENT, got %s", svcErr.Code)
+	}
+	if !strings.Contains(svcErr.Message, "unknown status") {
+		t.Fatalf("error message = %q, expected unknown status", svcErr.Message)
+	}
+}
+
+func TestUpdatePlatform_PatchQualityCloudflareStatuses(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	cp := &ControlPlaneService{
+		Engine: engine,
+		Pool:   pool,
+		SubMgr: subMgr,
+		EnvCfg: &config.EnvConfig{
+			DefaultPlatformStickyTTL:              30 * time.Minute,
+			DefaultPlatformRegexFilters:           []string{},
+			DefaultPlatformRegionFilters:          []string{},
+			DefaultPlatformReverseProxyMissAction: "TREAT_AS_EMPTY",
+			DefaultPlatformAllocationPolicy:       "BALANCED",
+		},
+	}
+
+	name := "patch-cf"
+	created, err := cp.CreatePlatform(CreatePlatformRequest{Name: &name})
+	if err != nil {
+		t.Fatalf("CreatePlatform: %v", err)
+	}
+	if len(created.QualityCloudflareStatuses) != 0 {
+		t.Fatalf("created should have empty statuses, got %v", created.QualityCloudflareStatuses)
+	}
+
+	// PATCH with a list — replaces current (and deduplicates/orders).
+	updated, err := cp.UpdatePlatform(created.ID, []byte(`{"quality_cloudflare_statuses":["ng","clean"]}`))
+	if err != nil {
+		t.Fatalf("UpdatePlatform: %v", err)
+	}
+	want := []string{"ng", "clean"}
+	if !reflect.DeepEqual(updated.QualityCloudflareStatuses, want) {
+		t.Fatalf("patched quality_cloudflare_statuses = %v, want %v", updated.QualityCloudflareStatuses, want)
+	}
+
+	// PATCH with empty array — clears.
+	cleared, err := cp.UpdatePlatform(created.ID, []byte(`{"quality_cloudflare_statuses":[]}`))
+	if err != nil {
+		t.Fatalf("UpdatePlatform (clear): %v", err)
+	}
+	if len(cleared.QualityCloudflareStatuses) != 0 {
+		t.Fatalf("expected empty quality_cloudflare_statuses, got %v", cleared.QualityCloudflareStatuses)
+	}
+
+	// PATCH with unknown token — rejected.
+	_, err = cp.UpdatePlatform(created.ID, []byte(`{"quality_cloudflare_statuses":["bogus"]}`))
+	if err == nil {
+		t.Fatal("expected error for unknown status token")
+	}
+	var svcErr *ServiceError
+	if !errors.As(err, &svcErr) {
+		t.Fatalf("expected ServiceError, got %T", err)
+	}
+	if svcErr.Code != "INVALID_ARGUMENT" {
+		t.Fatalf("expected INVALID_ARGUMENT, got %s", svcErr.Code)
+	}
+	if !strings.Contains(svcErr.Message, "unknown status") {
+		t.Fatalf("error message = %q, expected unknown status", svcErr.Message)
+	}
+}
+
+func TestUpdatePlatform_PatchQualityCloudflareStatusesNullRejected(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	cp := &ControlPlaneService{
+		Engine: engine,
+		Pool:   pool,
+		SubMgr: subMgr,
+		EnvCfg: &config.EnvConfig{
+			DefaultPlatformStickyTTL:              30 * time.Minute,
+			DefaultPlatformRegexFilters:           []string{},
+			DefaultPlatformRegionFilters:          []string{},
+			DefaultPlatformReverseProxyMissAction: "TREAT_AS_EMPTY",
+			DefaultPlatformAllocationPolicy:       "BALANCED",
+		},
+	}
+
+	name := "null-cf"
+	created, err := cp.CreatePlatform(CreatePlatformRequest{Name: &name})
+	if err != nil {
+		t.Fatalf("CreatePlatform: %v", err)
+	}
+
+	// quality_cloudflare_statuses is not in platformPatchNullableFields,
+	// so null must be rejected per constrained patch semantics.
+	_, err = cp.UpdatePlatform(created.ID, []byte(`{"quality_cloudflare_statuses":null}`))
+	if err == nil {
+		t.Fatal("expected error for null quality_cloudflare_statuses")
+	}
+	var svcErr *ServiceError
+	if !errors.As(err, &svcErr) {
+		t.Fatalf("expected ServiceError, got %T", err)
+	}
+	if svcErr.Code != "INVALID_ARGUMENT" {
+		t.Fatalf("expected INVALID_ARGUMENT, got %s", svcErr.Code)
+	}
+	if !strings.Contains(svcErr.Message, "null value not allowed") {
+		t.Fatalf("error message = %q, expected null value not allowed", svcErr.Message)
+	}
+}
+
+func TestPlatformQualityCloudflareStatusesGetListRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	cp := &ControlPlaneService{
+		Engine: engine,
+		Pool:   pool,
+		SubMgr: subMgr,
+		EnvCfg: &config.EnvConfig{
+			DefaultPlatformStickyTTL:              30 * time.Minute,
+			DefaultPlatformRegexFilters:           []string{},
+			DefaultPlatformRegionFilters:          []string{},
+			DefaultPlatformReverseProxyMissAction: "TREAT_AS_EMPTY",
+			DefaultPlatformAllocationPolicy:       "BALANCED",
+		},
+	}
+
+	name := "roundtrip-cf"
+	statuses := []string{"js_challenge", "block", "clean"}
+	created, err := cp.CreatePlatform(CreatePlatformRequest{
+		Name:                      &name,
+		QualityCloudflareStatuses: statuses,
+	})
+	if err != nil {
+		t.Fatalf("CreatePlatform: %v", err)
+	}
+
+	// GetPlatform returns the same canonical form.
+	got, err := cp.GetPlatform(created.ID)
+	if err != nil {
+		t.Fatalf("GetPlatform: %v", err)
+	}
+	if !reflect.DeepEqual(got.QualityCloudflareStatuses, created.QualityCloudflareStatuses) {
+		t.Fatalf("GetPlatform statuses = %v, want %v", got.QualityCloudflareStatuses, created.QualityCloudflareStatuses)
+	}
+
+	// ListPlatforms includes the platform with the same statuses.
+	list, err := cp.ListPlatforms()
+	if err != nil {
+		t.Fatalf("ListPlatforms: %v", err)
+	}
+	var found bool
+	for _, p := range list {
+		if p.ID == created.ID {
+			found = true
+			if !reflect.DeepEqual(p.QualityCloudflareStatuses, created.QualityCloudflareStatuses) {
+				t.Fatalf("ListPlatforms statuses = %v, want %v", p.QualityCloudflareStatuses, created.QualityCloudflareStatuses)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatal("created platform not found in ListPlatforms")
 	}
 }

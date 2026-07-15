@@ -1,6 +1,11 @@
 import { apiRequest } from "../../lib/api-client";
+import {
+  normalizeCFStatus,
+  normalizeCFStatusSet,
+  type CloudflareStatusToken,
+  type ScoreBreakdown,
+} from "../../lib/cloudflareStatus";
 import type {
-  CloudflareStatus,
   EgressProbeResult,
   LatencyProbeResult,
   NodeQuality,
@@ -23,6 +28,8 @@ type ApiNodeQuality = {
   quality_cloudflare_challenged?: boolean | null;
   quality_cloudflare_challenge_type?: string | null;
   quality_cloudflare_status?: string | null;
+  quality_scoring_policy_version?: number | null;
+  quality_score_breakdown?: unknown;
   quality_avg_latency_ms?: number | null;
   quality_last_checked?: string | null;
   quality_last_error?: string | null;
@@ -49,9 +56,30 @@ function asStringOrEmpty(raw: unknown): string {
   return typeof raw === "string" ? raw : "";
 }
 
-function normalizeCloudflareStatus(raw: string | null | undefined): CloudflareStatus | undefined {
-  if (raw === "challenged" || raw === "clean" || raw === "ng") {
+function normalizeCloudflareStatus(raw: string | null | undefined): CloudflareStatusToken {
+  return normalizeCFStatus(raw);
+}
+
+function normalizeScoreBreakdown(raw: unknown): ScoreBreakdown | null | undefined {
+  if (raw === null || raw === undefined) {
     return raw;
+  }
+  if (typeof raw === "string") {
+    if (!raw) {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") {
+        return parsed as ScoreBreakdown;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+  if (typeof raw === "object") {
+    return raw as ScoreBreakdown;
   }
   return undefined;
 }
@@ -78,6 +106,9 @@ function normalizeQuality(raw: ApiNodeQuality | null | undefined): NodeQuality |
     quality_cloudflare_challenged: Boolean(raw.quality_cloudflare_challenged),
     quality_cloudflare_challenge_type: raw.quality_cloudflare_challenge_type || undefined,
     quality_cloudflare_status: normalizeCloudflareStatus(raw.quality_cloudflare_status),
+    quality_scoring_policy_version:
+      typeof raw.quality_scoring_policy_version === "number" ? raw.quality_scoring_policy_version : 0,
+    quality_score_breakdown: normalizeScoreBreakdown(raw.quality_score_breakdown),
     quality_avg_latency_ms: typeof raw.quality_avg_latency_ms === "number" ? raw.quality_avg_latency_ms : undefined,
     quality_last_checked: raw.quality_last_checked || undefined,
     quality_last_error: raw.quality_last_error || undefined,
@@ -178,6 +209,14 @@ export function buildNodeListSearchParams(filters: NodeListQuery): URLSearchPara
   }
   if (filters.quality_cloudflare_challenged !== undefined) {
     query.set("quality_cloudflare_challenged", String(filters.quality_cloudflare_challenged));
+  }
+
+  // Detailed CF status filter: repeated query keys (OR within values).
+  if (filters.quality_cloudflare_status && filters.quality_cloudflare_status.length > 0) {
+    const normalized = normalizeCFStatusSet(filters.quality_cloudflare_status);
+    for (const token of normalized) {
+      query.append("quality_cloudflare_status", token);
+    }
   }
 
   return query;

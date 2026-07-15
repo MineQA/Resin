@@ -18,6 +18,8 @@ import { ToastContainer } from "../../components/ui/Toast";
 import { useToast } from "../../hooks/useToast";
 import { useI18n } from "../../i18n";
 import { formatApiErrorMessage } from "../../lib/error-message";
+import type { CloudflareStatusToken } from "../../lib/cloudflareStatus";
+import { CloudflareStatusMultiSelect } from "../../components/ScoreBreakdown";
 import { PROTOCOL_OPTIONS } from "../../lib/protocolOptions";
 import {
   PROTOCOL_PILL_ROW_STYLE,
@@ -130,8 +132,18 @@ export function PlatformDetailPage() {
     defaultValues: defaultPlatformFormValues,
   });
   const detailEmptyAccountBehavior = editForm.watch("reverse_proxy_empty_account_behavior");
+  const detailCfFilter = editForm.watch("quality_cloudflare_filter");
+  const detailCfStatuses = editForm.watch("quality_cloudflare_statuses");
   const protocolFilters = editForm.watch("protocol_filters");
   const excludeProtocolFilters = editForm.watch("exclude_protocol_filters");
+
+  const toggleDetailCfStatus = (token: CloudflareStatusToken) => {
+    const current = (editForm.getValues("quality_cloudflare_statuses") ?? []) as CloudflareStatusToken[];
+    const next = current.includes(token)
+      ? current.filter((v) => v !== token)
+      : [...current, token];
+    editForm.setValue("quality_cloudflare_statuses", next, { shouldDirty: true, shouldValidate: true, shouldTouch: true });
+  };
 
   const toggleProtocolFilter = (
     field: "protocol_filters" | "exclude_protocol_filters",
@@ -396,6 +408,7 @@ export function PlatformDetailPage() {
       (platform.quality_grade ||
         platform.quality_min_score > 0 ||
         platform.quality_cloudflare_challenged !== null ||
+        (Array.isArray(platform.quality_cloudflare_statuses) && platform.quality_cloudflare_statuses.length > 0) ||
         platform.quality_checked_since_ns > 0 ||
         platform.quality_profile),
   );
@@ -811,6 +824,18 @@ export function PlatformDetailPage() {
                             </option>
                           ))}
                         </Select>
+                      </div>
+
+                      <div className="field-group" style={{ margin: 0 }}>
+                        <label className="field-label">
+                          {t("Cloudflare 详细状态")}
+                        </label>
+                        <CloudflareStatusMultiSelect
+                          selected={detailCfStatuses as CloudflareStatusToken[]}
+                          onToggle={toggleDetailCfStatus}
+                          showContradictionHint
+                          legacyChallenged={detailCfFilter}
+                        />
                       </div>
 
                       <div className="field-group" style={{ margin: 0 }}>

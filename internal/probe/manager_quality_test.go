@@ -1,7 +1,9 @@
 package probe
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -395,6 +397,116 @@ func TestProxyScoreToNodeQuality_NilScoreNoError(t *testing.T) {
 		t.Fatalf("LastError = %q, want 'proxy check failed'", nq.LastError)
 	}
 }
+
+// TestProxyScoreToNodeQuality_CloudflareStatusDerivation verifies that
+// the aggregate CloudflareStatus is stored and challenged/compatibility
+// fields are derived correctly.
+func TestProxyScoreToNodeQuality_CloudflareStatusDerivation(t *testing.T) {
+	tests := []struct {
+		name              string
+		cfStatus          CloudflareStatus
+		wantStatus        string
+		wantChallenged    bool
+		wantChallengeType string
+	}{
+		{name: "clean", cfStatus: CFStatusClean, wantStatus: "clean", wantChallenged: false, wantChallengeType: ""},
+		{name: "not_detected", cfStatus: CFStatusNotDetected, wantStatus: "not_detected", wantChallenged: false, wantChallengeType: ""},
+		{name: "js_challenge", cfStatus: CFStatusJSChallenge, wantStatus: "js_challenge", wantChallenged: true, wantChallengeType: "js_challenge"},
+		{name: "captcha_challenge", cfStatus: CFStatusCaptchaChallenge, wantStatus: "captcha_challenge", wantChallenged: true, wantChallengeType: "captcha_challenge"},
+		{name: "block", cfStatus: CFStatusBlock, wantStatus: "block", wantChallenged: true, wantChallengeType: "block"},
+		{name: "challenge", cfStatus: CFStatusChallenge, wantStatus: "challenge", wantChallenged: true, wantChallengeType: "challenge"},
+		{name: "ng", cfStatus: CFStatusNG, wantStatus: "ng", wantChallenged: false, wantChallengeType: ""},
+		{name: "empty_legacy", cfStatus: CFStatusEmpty, wantStatus: "", wantChallenged: false, wantChallengeType: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			score := &ProxyScore{
+				Grade:            "A",
+				Score:            100,
+				ServiceReachable: true,
+				APIReachable:     true,
+				CloudflareStatus: tt.cfStatus,
+			}
+			nq := ProxyScoreToNodeQuality("generic", score, nil)
+			if nq.CloudflareStatus != tt.wantStatus {
+				t.Fatalf("CloudflareStatus = %q, want %q", nq.CloudflareStatus, tt.wantStatus)
+			}
+			if nq.CloudflareChallenged != tt.wantChallenged {
+				t.Fatalf("CloudflareChallenged = %v, want %v", nq.CloudflareChallenged, tt.wantChallenged)
+			}
+			if nq.CloudflareChallengeType != tt.wantChallengeType {
+				t.Fatalf("CloudflareChallengeType = %q, want %q", nq.CloudflareChallengeType, tt.wantChallengeType)
+			}
+		})
+	}
+}
+
+// TestProxyScoreToNodeQuality_ScoringBreakdownSerialization verifies that
+// when ScoringBreakdown is present, it is serialized into compact JSON and
+// ScoringPolicyVersion is set; nil breakdown leaves version 0 and empty string.
+func TestProxyScoreToNodeQuality_ScoringBreakdownSerialization(t *testing.T) {
+	// --- With ScoringBreakdown ---
+	sr := &ScoringResult{
+		Version:          1,
+		Score:            85,
+		Grade:            "B",
+		GradeFromScore:   "B",
+		FinalGrade:       "B",
+		EffectiveWeights: map[string]int{"service": 60, "latency": 40},
+		SubScores: map[string]*SubScoreEntry{
+			"service": {Value: float64Ptr(100)},
+			"latency": {Value: float64Ptr(62.5)},
+		},
+		UnavailableDims: []string{},
+		AppliedCaps:     []CapApplication{},
+		TerminalReason:  "",
+	}
+	score := &ProxyScore{
+		Grade:             "B",
+		Score:             85,
+		ServiceReachable:  true,
+		CloudflareStatus:  CFStatusClean,
+		ScoringBreakdown:  sr,
+	}
+	nq := ProxyScoreToNodeQuality("generic", score, nil)
+	if nq.ScoringPolicyVersion != 1 {
+		t.Fatalf("ScoringPolicyVersion = %d, want 1", nq.ScoringPolicyVersion)
+	}
+	if nq.ScoreBreakdown == "" {
+		t.Fatal("ScoreBreakdown should not be empty when ScoringBreakdown is present")
+	}
+	// Compact JSON should contain key fields but NOT redundant Grade or round data.
+	for _, key := range []string{"version", "effective_weights", "sub_scores", "grade_from_score", "final_grade"} {
+		if !strings.Contains(nq.ScoreBreakdown, key) {
+			t.Fatalf("ScoreBreakdown missing key %q: %s", key, nq.ScoreBreakdown)
+		}
+	}
+	// Should NOT contain "round_results" or "grade" (the redundant top-level field).
+	if strings.Contains(nq.ScoreBreakdown, "round_results") {
+		t.Fatal("ScoreBreakdown should NOT contain round_results")
+	}
+	// Verify it's valid JSON
+	if !json.Valid([]byte(nq.ScoreBreakdown)) {
+		t.Fatalf("ScoreBreakdown is not valid JSON: %s", nq.ScoreBreakdown)
+	}
+
+	// --- Nil ScoringBreakdown (legacy) ---
+	score2 := &ProxyScore{
+		Grade:            "A",
+		Score:            100,
+		ServiceReachable: true,
+		CloudflareStatus: CFStatusClean,
+	}
+	nq2 := ProxyScoreToNodeQuality("generic", score2, nil)
+	if nq2.ScoringPolicyVersion != 0 {
+		t.Fatalf("legacy ScoringPolicyVersion = %d, want 0", nq2.ScoringPolicyVersion)
+	}
+	if nq2.ScoreBreakdown != "" {
+		t.Fatalf("legacy ScoreBreakdown = %q, want empty", nq2.ScoreBreakdown)
+	}
+}
+
+func float64Ptr(v float64) *float64 { return &v }
 
 // TestTriggerImmediateQualityProbeForce_ExecutesWhenPeriodicDisabled verifies
 // that a forced quality probe executes when periodic quality is disabled but

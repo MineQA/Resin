@@ -5,6 +5,7 @@ import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { Input } from "../../components/ui/Input";
+import { ScoringPolicyEditor } from "../../components/ScoringPolicyEditor";
 import { Select } from "../../components/ui/Select";
 import { Switch } from "../../components/ui/Switch";
 import { Textarea } from "../../components/ui/Textarea";
@@ -13,6 +14,12 @@ import { useToast } from "../../hooks/useToast";
 import i18next, { useI18n } from "../../i18n";
 import { formatApiErrorMessage } from "../../lib/error-message";
 import { formatDateTime, formatRelativeTime } from "../../lib/time";
+import {
+  deriveEffectivePolicy,
+  isValidCustomTargetURL,
+  validateScoringPolicy,
+  type ScoringPolicy,
+} from "../../lib/cloudflareStatus";
 import { createExportToken, deleteExportToken, getDefaultSystemConfig, getEnvConfig, getSystemConfig, listExportTokens, patchSystemConfig } from "./api";
 import type { ProxyCheckProfile, RuntimeConfig, RuntimeConfigPatch } from "./types";
 
@@ -42,6 +49,8 @@ type RuntimeConfigForm = {
   proxy_check_multi_round: boolean;
   proxy_check_rounds: string;
   proxy_check_trigger_on_new_node: boolean;
+  /** Draft scoring policy; null means "no change / derive from legacy". */
+  proxy_check_scoring: ScoringPolicy | null;
 };
 
 const EDITABLE_FIELDS: Array<keyof RuntimeConfig> = [
@@ -70,6 +79,7 @@ const EDITABLE_FIELDS: Array<keyof RuntimeConfig> = [
   "proxy_check_multi_round",
   "proxy_check_rounds",
   "proxy_check_trigger_on_new_node",
+  "proxy_check_scoring",
 ];
 
 const FIELD_LABELS: Record<keyof RuntimeConfig, string> = {
@@ -98,6 +108,7 @@ const FIELD_LABELS: Record<keyof RuntimeConfig, string> = {
   proxy_check_multi_round: "多轮检测",
   proxy_check_rounds: "检测轮数",
   proxy_check_trigger_on_new_node: "新节点触发质量检测",
+  proxy_check_scoring: "Cloudflare 评分策略",
 };
 
 const PROXY_CHECK_PROFILES: ProxyCheckProfile[] = ["generic", "openai", "grok", "gemini", "claude"];
@@ -146,6 +157,7 @@ function configToForm(config: RuntimeConfig): RuntimeConfigForm {
     proxy_check_multi_round: config.proxy_check_multi_round,
     proxy_check_rounds: String(config.proxy_check_rounds),
     proxy_check_trigger_on_new_node: config.proxy_check_trigger_on_new_node,
+    proxy_check_scoring: config.proxy_check_scoring,
   };
 }
 
@@ -194,6 +206,27 @@ function parseForm(form: RuntimeConfigForm): RuntimeConfig {
   const proxyCheckRounds = parseRoundsField(form.proxy_check_rounds);
   const proxyCheckProfile = form.proxy_check_profile;
 
+  // Materialize canonical scoring policy from legacy flags when null.
+  let scoring = form.proxy_check_scoring;
+  if (scoring === null) {
+    scoring = deriveEffectivePolicy({
+      proxy_check_cloudflare_detection: form.proxy_check_cloudflare_detection,
+      proxy_check_service_reachability: form.proxy_check_service_reachability,
+      proxy_check_api_reachability: form.proxy_check_api_reachability,
+      proxy_check_multi_round: form.proxy_check_multi_round,
+    });
+  }
+
+  // Client-side validation for scoring policy (server remains authoritative).
+  const validation = validateScoringPolicy(scoring);
+  if (!validation.ok) {
+    throw new Error(`评分策略校验失败：${validation.errors.join("；")}`);
+  }
+  const targetUrl = scoring.cloudflare.target_url;
+  if (targetUrl && !isValidCustomTargetURL(targetUrl)) {
+    throw new Error("自定义 CF 目标 URL 不符合要求：仅接受 HTTPS，不含凭据/片段，非本地/私有地址。");
+  }
+
   return {
     request_log_enabled: form.request_log_enabled,
     reverse_proxy_log_detail_enabled: form.reverse_proxy_log_detail_enabled,
@@ -232,6 +265,7 @@ function parseForm(form: RuntimeConfigForm): RuntimeConfig {
     proxy_check_multi_round: form.proxy_check_multi_round,
     proxy_check_rounds: proxyCheckRounds,
     proxy_check_trigger_on_new_node: form.proxy_check_trigger_on_new_node,
+    proxy_check_scoring: scoring,
   };
 }
 
@@ -281,6 +315,16 @@ function buildPatch(current: RuntimeConfig, next: RuntimeConfig): RuntimeConfigP
 
     if (Array.isArray(currentValue) && Array.isArray(nextValue)) {
       if (!arrayEquals(currentValue, nextValue)) {
+        patchMutable[field] = nextValue;
+      }
+      continue;
+    }
+
+    // Object comparison for scoring policy (JSON value equality).
+    if (field === "proxy_check_scoring") {
+      const curStr = currentValue ? JSON.stringify(currentValue) : "";
+      const nextStr = nextValue ? JSON.stringify(nextValue) : "";
+      if (curStr !== nextStr) {
         patchMutable[field] = nextValue;
       }
       continue;
@@ -862,7 +906,7 @@ export function SystemConfigPage() {
                   </div>
                 </div>
 
-                <div className="syscfg-checkbox-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "12px", marginTop: 16 }}>
+                <div className="syscfg-checkbox-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginTop: 16 }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "var(--surface-sunken, rgba(0,0,0,0.02))", padding: "10px 14px", borderRadius: "8px", border: "1px solid var(--border)" }}>
                     <div style={{ display: "flex", alignItems: "center" }}>
                       <span className="field-label" style={{ margin: 0, fontWeight: 500, fontSize: 13 }}>{t("检测服务可达性")}</span>
@@ -881,16 +925,6 @@ export function SystemConfigPage() {
                     <Switch
                       checked={form.proxy_check_api_reachability}
                       onChange={(event) => setFormField("proxy_check_api_reachability", event.target.checked)}
-                    />
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "var(--surface-sunken, rgba(0,0,0,0.02))", padding: "10px 14px", borderRadius: "8px", border: "1px solid var(--border)" }}>
-                    <div style={{ display: "flex", alignItems: "center" }}>
-                      <span className="field-label" style={{ margin: 0, fontWeight: 500, fontSize: 13 }}>{t("检测 Cloudflare 拦截")}</span>
-                      {renderRestoreButton("proxy_check_cloudflare_detection")}
-                    </div>
-                    <Switch
-                      checked={form.proxy_check_cloudflare_detection}
-                      onChange={(event) => setFormField("proxy_check_cloudflare_detection", event.target.checked)}
                     />
                   </div>
                 </div>
@@ -930,6 +964,33 @@ export function SystemConfigPage() {
                     </Select>
                     <small style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("范围 1 到 3")}</small>
                   </div>
+                </div>
+              </section>
+
+              <section className="syscfg-section">
+                <h4>{t("评分策略")}</h4>
+                <p className="muted" style={{ marginTop: 6, marginBottom: 0 }}>
+                  {t("按维度权重综合评分并映射等级。预设优先，高级编辑展开后可调整全部参数。")}
+                </p>
+                <div style={{ marginTop: 12 }}>
+                  <ScoringPolicyEditor
+                    policy={form.proxy_check_scoring}
+                    legacy={{
+                      proxy_check_cloudflare_detection: form.proxy_check_cloudflare_detection,
+                      proxy_check_service_reachability: form.proxy_check_service_reachability,
+                      proxy_check_api_reachability: form.proxy_check_api_reachability,
+                      proxy_check_multi_round: form.proxy_check_multi_round,
+                    }}
+                    onChange={(next) => setFormField("proxy_check_scoring", next)}
+                  />
+                </div>
+                <div className="callout callout-warning" style={{ alignItems: "flex-start", marginTop: 12, fontSize: "0.8rem" }}>
+                  <AlertTriangle size={14} />
+                  <span>
+                    {t(
+                      "旧的“检测 Cloudflare 拦截”开关已并入下方策略，仅作兼容输入保留。观测始终执行，策略仅控制影响范围。",
+                    )}
+                  </span>
                 </div>
               </section>
 

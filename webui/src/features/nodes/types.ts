@@ -1,10 +1,13 @@
+import type {
+  CloudflareStatusToken,
+  ScoreBreakdown,
+} from "../../lib/cloudflareStatus";
+
 export type NodeTag = {
   subscription_id: string;
   subscription_name: string;
   tag: string;
 };
-
-export type CloudflareStatus = "challenged" | "clean" | "ng";
 
 export type NodeQuality = {
   quality_profile?: string;
@@ -15,7 +18,12 @@ export type NodeQuality = {
   quality_api_reachable: boolean;
   quality_cloudflare_challenged: boolean;
   quality_cloudflare_challenge_type?: string;
-  quality_cloudflare_status?: CloudflareStatus;
+  /** Canonical 8-value status token. */
+  quality_cloudflare_status?: CloudflareStatusToken;
+  /** Scoring policy version that produced this score (0 = legacy). */
+  quality_scoring_policy_version?: number;
+  /** Compact score breakdown JSON (parsed). */
+  quality_score_breakdown?: ScoreBreakdown | null;
   quality_avg_latency_ms?: number;
   quality_last_checked?: string;
   quality_last_error?: string;
@@ -78,6 +86,8 @@ export type NodeListFilters = {
   quality_grade?: QualityGradeFilter;
   quality_min_score?: number;
   quality_cloudflare_challenged?: boolean;
+  /** Detailed CF status filter (repeated query keys, OR within values). */
+  quality_cloudflare_status?: CloudflareStatusToken[];
   quality_checked_since?: string;
   quality_profile?: string;
 };

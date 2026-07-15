@@ -1093,3 +1093,135 @@ func TestHandleListNodes_ProtocolFilterAnytls(t *testing.T) {
 		t.Fatalf("exclude_protocol=anytls total: got %v, want 1", body["total"])
 	}
 }
+
+// TestHandleListNodes_QualityCloudflareStatusesFilter verifies detailed CF
+// status filter: repeated query values with OR semantics, unknown status 400,
+// and intersection with existing bool filter.
+func TestHandleListNodes_QualityCloudflareStatusesFilter(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	const rawA = `{"type":"ss","server":"1.1.1.1","port":443}`
+	const rawB = `{"type":"ss","server":"2.2.2.2","port":443}`
+	const rawC = `{"type":"ss","server":"3.3.3.3","port":443}`
+
+	addNodeForNodeListTest(t, cp, sub, rawA, "203.0.113.10")
+	addNodeForNodeListTest(t, cp, sub, rawB, "203.0.113.20")
+	addNodeForNodeListTest(t, cp, sub, rawC, "203.0.113.30")
+
+	setNodeQuality(t, cp, rawA, &model.NodeQuality{
+		Grade: "A", Score: 95, Profile: "generic", LastCheckedNs: time.Now().UnixNano(),
+		CloudflareStatus: "clean", CloudflareChallenged: false,
+	})
+	setNodeQuality(t, cp, rawB, &model.NodeQuality{
+		Grade: "A", Score: 90, Profile: "generic", LastCheckedNs: time.Now().UnixNano(),
+		CloudflareStatus: "block", CloudflareChallenged: true,
+	})
+	setNodeQuality(t, cp, rawC, &model.NodeQuality{
+		Grade: "B", Score: 70, Profile: "generic", LastCheckedNs: time.Now().UnixNano(),
+		CloudflareStatus: "not_detected", CloudflareChallenged: false,
+	})
+	const rawD = `{"type":"ss","server":"4.4.4.4","port":443}`
+	addNodeForNodeListTest(t, cp, sub, rawD, "203.0.113.40")
+	setNodeQuality(t, cp, rawD, &model.NodeQuality{
+		Grade: "C", Score: 60, Profile: "generic", LastCheckedNs: time.Now().UnixNano(),
+		CloudflareStatus: "", CloudflareChallenged: false,
+	})
+
+	t.Run("single status matches", func(t *testing.T) {
+		rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?quality_cloudflare_status=clean", nil, true)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		body := decodeJSONMap(t, rec)
+		if body["total"] != float64(1) {
+			t.Fatalf("total: got %v, want 1", body["total"])
+		}
+	})
+
+	t.Run("unchecked matches legacy empty status", func(t *testing.T) {
+		rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?quality_cloudflare_status=unchecked", nil, true)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		body := decodeJSONMap(t, rec)
+		if body["total"] != float64(1) {
+			t.Fatalf("total: got %v, want 1", body["total"])
+		}
+	})
+
+	t.Run("repeated statuses OR match", func(t *testing.T) {
+		rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?quality_cloudflare_status=clean&quality_cloudflare_status=block", nil, true)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		body := decodeJSONMap(t, rec)
+		if body["total"] != float64(2) {
+			t.Fatalf("total: got %v, want 2", body["total"])
+		}
+	})
+
+	t.Run("repeated statuses with duplicates", func(t *testing.T) {
+		rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?quality_cloudflare_status=clean&quality_cloudflare_status=clean&quality_cloudflare_status=block", nil, true)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		body := decodeJSONMap(t, rec)
+		if body["total"] != float64(2) {
+			t.Fatalf("total: got %v, want 2", body["total"])
+		}
+	})
+
+	t.Run("unknown status returns 400", func(t *testing.T) {
+		rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?quality_cloudflare_status=unknown", nil, true)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for unknown status, got %d, body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("empty status returns 400", func(t *testing.T) {
+		rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?quality_cloudflare_status=", nil, true)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for empty status, got %d, body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("intersection with quality_cloudflare_challenged true", func(t *testing.T) {
+		// clean=false, block=true, not_detected=false
+		// quality_cloudflare_status=clean&quality_cloudflare_challenged=true -> 0 (clean is not challenged)
+		rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?quality_cloudflare_status=clean&quality_cloudflare_challenged=true", nil, true)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		body := decodeJSONMap(t, rec)
+		if body["total"] != float64(0) {
+			t.Fatalf("total: got %v, want 0", body["total"])
+		}
+	})
+
+	t.Run("intersection with quality_cloudflare_challenged false", func(t *testing.T) {
+		// clean=false, block=true, not_detected=false
+		// quality_cloudflare_status=block&quality_cloudflare_challenged=false -> 0 (block IS challenged)
+		rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?quality_cloudflare_status=block&quality_cloudflare_challenged=false", nil, true)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		body := decodeJSONMap(t, rec)
+		if body["total"] != float64(0) {
+			t.Fatalf("total: got %v, want 0", body["total"])
+		}
+	})
+
+	t.Run("no match returns empty", func(t *testing.T) {
+		rec := doJSONRequest(t, srv, http.MethodGet, "/api/v1/nodes?quality_cloudflare_status=ng&quality_cloudflare_status=js_challenge", nil, true)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		body := decodeJSONMap(t, rec)
+		if body["total"] != float64(0) {
+			t.Fatalf("total: got %v, want 0", body["total"])
+		}
+	})
+}

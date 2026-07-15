@@ -12,12 +12,80 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Resinat/Resin/internal/model"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/service"
 	"github.com/Resinat/Resin/internal/subscription"
 	"github.com/Resinat/Resin/internal/testutil"
 	"gopkg.in/yaml.v3"
 )
+
+func TestNodePoolExport_QualityCloudflareStatusesFilter(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	const rawClean = `{"type":"ss","server":"1.1.1.1","port":443,"method":"chacha20","password":"test"}`
+	const rawBlock = `{"type":"ss","server":"2.2.2.2","port":443,"method":"chacha20","password":"test"}`
+	const rawUnchecked = `{"type":"ss","server":"3.3.3.3","port":443,"method":"chacha20","password":"test"}`
+	addNodeForNodeListTest(t, cp, sub, rawClean, "203.0.113.10")
+	addNodeForNodeListTest(t, cp, sub, rawBlock, "203.0.113.20")
+	addNodeForNodeListTest(t, cp, sub, rawUnchecked, "203.0.113.30")
+	markNodeHealthyForNodeListTest(t, cp, rawClean)
+	markNodeHealthyForNodeListTest(t, cp, rawBlock)
+	markNodeHealthyForNodeListTest(t, cp, rawUnchecked)
+	setNodeQuality(t, cp, rawClean, &model.NodeQuality{CloudflareStatus: "clean"})
+	setNodeQuality(t, cp, rawBlock, &model.NodeQuality{CloudflareStatus: "block", CloudflareChallenged: true})
+	setNodeQuality(t, cp, rawUnchecked, &model.NodeQuality{})
+
+	createResp := doJSONRequest(t, srv, http.MethodPost, "/api/v1/export-tokens", map[string]any{"name": "cf-filter"}, true)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("create export token: status=%d body=%s", createResp.Code, createResp.Body.String())
+	}
+	tokenValue, _ := decodeJSONMap(t, createResp)["token"].(string)
+
+	t.Run("repeated statuses OR", func(t *testing.T) {
+		url := "/api/v1/node-pool/export?format=sing-box&export_token=" + tokenValue + "&quality_cloudflare_status=clean&quality_cloudflare_status=block"
+		resp := doJSONRequest(t, srv, http.MethodGet, url, nil, false)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+		}
+		var out struct {
+			Outbounds []json.RawMessage `json:"outbounds"`
+		}
+		if err := json.Unmarshal(resp.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		if len(out.Outbounds) != 2 {
+			t.Fatalf("outbounds=%d, want 2", len(out.Outbounds))
+		}
+	})
+
+	t.Run("unchecked matches legacy empty", func(t *testing.T) {
+		url := "/api/v1/node-pool/export?format=sing-box&export_token=" + tokenValue + "&quality_cloudflare_status=unchecked"
+		resp := doJSONRequest(t, srv, http.MethodGet, url, nil, false)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+		}
+		var out struct {
+			Outbounds []json.RawMessage `json:"outbounds"`
+		}
+		if err := json.Unmarshal(resp.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		if len(out.Outbounds) != 1 {
+			t.Fatalf("outbounds=%d, want 1", len(out.Outbounds))
+		}
+	})
+
+	t.Run("unknown rejected", func(t *testing.T) {
+		url := "/api/v1/node-pool/export?format=sing-box&export_token=" + tokenValue + "&quality_cloudflare_status=bogus"
+		resp := doJSONRequest(t, srv, http.MethodGet, url, nil, false)
+		if resp.Code != http.StatusBadRequest {
+			t.Fatalf("status=%d, want 400 body=%s", resp.Code, resp.Body.String())
+		}
+	})
+}
 
 func TestExportTokenCRUD(t *testing.T) {
 	srv, cp, _ := newControlPlaneTestServer(t)
