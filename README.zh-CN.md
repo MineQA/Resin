@@ -23,7 +23,7 @@
 ## 💡 为什么选择 Resin？
 
 - **海量接管**：轻松管理十万级规模的代理节点。高性能，原生支持高并发。
-- **智能调度与熔断**：全自动的 **被动+主动** 健康探测、出口 IP 探测、延迟分析，精准剔除坏节点。采用 P2C 算法结合按域名的延迟加权评分，智能选择最优节点。
+- **智能调度与熔断**：全自动的 **被动+主动** 健康探测、出口 IP 探测、延迟分析以及响应感知 Cloudflare 观测，精准剔除坏节点。采用 P2C 算法结合按域名的延迟加权评分实现最优节点选择。响应感知 Cloudflare 观测与可选的五维质量检查（服务可用率、API 可用率、Cloudflare 状态、延迟、稳定性）提供丰富的质量可见性，并支持平台级质量筛选。
 - **业务友好的粘性代理**：让同一业务账号优先绑定同一出口 IP，节点异常时自动切换同 IP 节点，在多数场景下减少业务波动。
 - **多种接入方式**：同时支持 HTTP 正向代理、SOCKS5 正向代理与 URL 反向代理，适配不同客户端与集成形态。
 - **可观测性**：提供详细的性能指标与日志记录，快速掌控全局（可视化 Web 管理后台）。包括完整的结构化请求日志，支持按平台、账号、目标站点等维度查询与审计。
@@ -33,7 +33,7 @@
 - **状态持久化**：重启后仍可恢复节点健康数据、延迟统计与租约绑定，便于生产环境连续运行与故障恢复。
 - **零侵入粘性接入**：支持从业务原有请求头（如 API Key）自动提取账号身份，在常见接入方式下可尽量减少代码改动。
 - **订阅热更新**：节点订阅刷新时增量同步，不中断现有连接。
-- **灵活的节点隔离**：通过 Platform 概念，按正则表达式、地区等规则筛选节点，为不同业务构建独立的代理池。
+- **灵活的节点隔离**：通过 Platform 概念，按正则表达式、地区、协议、质量等级/评分/Cloudflare 状态等规则筛选节点，为不同业务构建独立的代理池。
 
 
 > [!TIP]
@@ -92,7 +92,7 @@ Resin 可以把已管理的节点导出为订阅源，供 sub-web-modify/subconv
 http://127.0.0.1:2260/api/v1/node-pool/export?format=clash&export_token=<token>
 ```
 
-支持的导出筛选参数与节点列表一致：`platform_id`、`subscription_id`、`region`、`egress_ip`、`tag_keyword`、`circuit_open=true|false`、`has_outbound=true|false`、`enabled=true|false`、`routable=true|false`、`probed_since=<RFC3339 时间>`、`limit`、`offset`。如果不传 `routable`，不会默认只导出可路由节点。
+支持的导出筛选参数与节点列表一致：`platform_id`、`subscription_id`、`region`、`egress_ip`、`tag_keyword`、`circuit_open=true|false`、`has_outbound=true|false`、`enabled=true|false`、`routable=true|false`、`probed_since=<RFC3339 时间>`、`quality_profile`、`quality_grade`、`quality_min_score`、`quality_cloudflare_challenged=true|false`、`quality_cloudflare_status`（可重复，OR 语义）、`quality_checked_since=<RFC3339 时间>`、`limit`、`offset`。如果不传 `routable`，不会默认只导出可路由节点。
 
 
 ## 🚀 Quick Start

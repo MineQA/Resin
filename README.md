@@ -25,7 +25,7 @@ It helps shield your services from unstable underlying proxy nodes by aggregatin
 ## 💡 Why Resin?
 
 - **Massive-scale management**: Easily handles 100k+ proxy nodes with native high-concurrency performance.
-- **Smart scheduling and circuit breaking**: Fully automated **passive + active** health checks, outbound IP probing, and latency analysis to remove bad nodes precisely. Uses P2C plus domain-aware latency-weighted scoring for optimal node selection.
+- **Smart scheduling and circuit breaking**: Fully automated **passive + active** health checks, outbound IP probing, latency analysis, and response-aware Cloudflare observation to remove bad nodes precisely. Uses P2C plus domain-aware latency-weighted scoring for optimal node selection. Response-aware Cloudflare observation and optional five-dimension quality checks (service pass rate, API pass rate, Cloudflare status, latency, stability) provide rich quality visibility and support platform-level quality filtering.
 - **Business-friendly sticky proxying**: Keeps the same business account bound to a stable outbound IP. If a node fails, Resin seamlessly switches to another node with the same IP.
 - **Multiple access modes**: Supports HTTP forward proxy, SOCKS5 forward proxy, and URL-based reverse proxy for different clients and integration styles.
 - **Observability**: Detailed metrics and logs, plus a visual Web UI. Includes complete structured request logs for querying and auditing by platform, account, target site, and more.
@@ -35,7 +35,7 @@ It helps shield your services from unstable underlying proxy nodes by aggregatin
 - **Persistent state**: Keeps node health, latency stats, and lease bindings across restarts.
 - **Zero-intrusion sticky access**: Can extract account identity from existing request headers (for example API keys), so clients often need no code changes.
 - **Incremental subscription refresh**: Syncs subscription updates without interrupting current connections.
-- **Flexible node isolation**: Use Platform rules (regex, region, etc.) to build independent proxy pools for different business scenarios.
+- **Flexible node isolation**: Use Platform rules (regex, region, protocol, quality grade/score/Cloudflare status, etc.) to build independent proxy pools for different business scenarios.
 
 > [!TIP]
 > You can feed this README and [`DESIGN.md`](DESIGN.md) to AI and ask it anything about the project.
@@ -92,7 +92,7 @@ Converter backends usually do not preserve custom headers or User-Agent when fet
 http://127.0.0.1:2260/api/v1/node-pool/export?format=clash&export_token=<token>
 ```
 
-Supported export filters are the same node-list filters: `platform_id`, `subscription_id`, `region`, `egress_ip`, `tag_keyword`, `circuit_open=true|false`, `has_outbound=true|false`, `enabled=true|false`, `routable=true|false`, `probed_since=<RFC3339 time>`, `limit`, and `offset`. If `routable` is omitted, Resin does not apply a routable-only filter.
+Supported export filters are the same node-list filters: `platform_id`, `subscription_id`, `region`, `egress_ip`, `tag_keyword`, `circuit_open=true|false`, `has_outbound=true|false`, `enabled=true|false`, `routable=true|false`, `probed_since=<RFC3339 time>`, `quality_profile`, `quality_grade`, `quality_min_score`, `quality_cloudflare_challenged=true|false`, `quality_cloudflare_status` (repeatable, OR semantics), `quality_checked_since=<RFC3339 time>`, `limit`, and `offset`. If `routable` is omitted, Resin does not apply a routable-only filter.
 
 ## 🚀 Quick Start
 
