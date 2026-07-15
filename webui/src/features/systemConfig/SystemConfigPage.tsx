@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Check, Copy, KeyRound, Plus, RefreshCw, RotateCcw, Save, Sparkles, Trash2 } from "lucide-react";
+import { AlertTriangle, Check, Copy, Gauge, KeyRound, Plus, RefreshCw, RotateCcw, Save, Sparkles, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
@@ -20,7 +20,7 @@ import {
   validateScoringPolicy,
   type ScoringPolicy,
 } from "../../lib/cloudflareStatus";
-import { createExportToken, deleteExportToken, getDefaultSystemConfig, getEnvConfig, getSystemConfig, listExportTokens, patchSystemConfig } from "./api";
+import { createExportToken, deleteExportToken, getDefaultSystemConfig, getEnvConfig, getSystemConfig, listExportTokens, patchSystemConfig, triggerAllQualityProbes } from "./api";
 import type { ProxyCheckProfile, RuntimeConfig, RuntimeConfigPatch } from "./types";
 
 type RuntimeConfigForm = {
@@ -390,6 +390,28 @@ export function SystemConfigPage() {
       showToast("success", t("导出令牌已删除"));
     },
     onError: (error) => showToast("error", formatApiErrorMessage(error, t)),
+  });
+
+  const triggerAllQualityMutation = useMutation({
+    mutationFn: triggerAllQualityProbes,
+    onSuccess: (result) => {
+      if (result.candidate_count === 0) {
+        showToast("success", t("当前没有可检测节点，未创建全量质量检测"));
+      } else if (result.coalesced) {
+        showToast(
+          "success",
+          t("请求已合并到正在执行或待执行的全量检测（{{count}} 个候选节点）", { count: result.candidate_count }),
+        );
+      } else {
+        showToast(
+          "success",
+          t("全量质量检测已接受请求（{{count}} 个候选节点）", { count: result.candidate_count }),
+        );
+      }
+    },
+    onError: (error) => {
+      showToast("error", formatApiErrorMessage(error, t));
+    },
   });
 
   const baseline = configQuery.data ?? null;
@@ -964,6 +986,32 @@ export function SystemConfigPage() {
                     </Select>
                     <small style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("范围 1 到 3")}</small>
                   </div>
+                </div>
+
+                <div
+                  className="platform-op-item"
+                  style={{ marginTop: 20, borderTop: "1px solid var(--border-subtle)", paddingTop: 16 }}
+                >
+                  <div className="platform-op-copy">
+                    <h5>{t("全量质量探测")}</h5>
+                    <p className="platform-op-hint" style={{ marginTop: 4 }}>
+                      {t("使用服务器当前已保存的质量配置")}
+                    </p>
+                    <p className="platform-op-hint" style={{ marginTop: 2 }}>
+                      {t("即使周期质量检测关闭也会执行")}
+                    </p>
+                    <p className="platform-op-hint" style={{ marginTop: 2 }}>
+                      {t("会产生额外探测流量")}
+                    </p>
+                  </div>
+                  <Button
+                    variant="secondary"
+                    onClick={() => triggerAllQualityMutation.mutate()}
+                    disabled={triggerAllQualityMutation.isPending}
+                  >
+                    <Gauge size={14} />
+                    {triggerAllQualityMutation.isPending ? t("提交请求中...") : t("触发全量质量检测")}
+                  </Button>
                 </div>
               </section>
 

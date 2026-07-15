@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createColumnHelper } from "@tanstack/react-table";
-import { AlertTriangle, CheckCircle2, Copy, Download, Eraser, Globe, RefreshCw, Settings, Sparkles, X, XCircle, Zap } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Copy, Download, Eraser, Gauge, Globe, RefreshCw, Settings, Sparkles, X, XCircle, Zap } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useLocation } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge";
@@ -37,7 +37,7 @@ import {
 } from "../../components/ScoreBreakdown";import { listPlatforms } from "../platforms/api";
 import type { Platform } from "../platforms/types";
 import { listSubscriptions } from "../subscriptions/api";
-import { buildNodePoolExportURL, exportNodePoolText, getNode, listNodes, probeEgress, probeLatency } from "./api";
+import { buildNodePoolExportURL, exportNodePoolText, getNode, listNodes, probeEgress, probeLatency, probeQuality } from "./api";
 import type { NodeQuality, NodeSummary } from "./types";
 import { getAllRegions, getRegionName } from "./regions";
 import type { NodeListFilters, NodeSortBy, QualityGradeFilter, SortOrder } from "./types";
@@ -48,7 +48,7 @@ type ExportFormat = "clash" | "base64" | "uri" | "sing-box";
 type ExportRoutableMode = "current" | "all" | "routable" | "unroutable";
 type ExportBooleanMode = "any" | "true" | "false";
 type NodeDisplayStatus = "healthy" | "circuit_open" | "pending_test" | "error" | "disabled";
-type ProbeAction = "egress" | "latency";
+type ProbeAction = "egress" | "latency" | "quality";
 
 type NodeExportSettings = {
   format: ExportFormat;
@@ -568,9 +568,11 @@ export function NodesPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [pendingEgressHashes, setPendingEgressHashes] = useState<Set<string>>(() => new Set());
   const [pendingLatencyHashes, setPendingLatencyHashes] = useState<Set<string>>(() => new Set());
+  const [pendingQualityHashes, setPendingQualityHashes] = useState<Set<string>>(() => new Set());
   const { toasts, showToast, dismissToast } = useToast();
   const pendingEgressHashesRef = useRef<Set<string>>(new Set());
   const pendingLatencyHashesRef = useRef<Set<string>>(new Set());
+  const pendingQualityHashesRef = useRef<Set<string>>(new Set());
 
   const queryClient = useQueryClient();
 
@@ -706,6 +708,24 @@ export function NodesPage() {
     },
   });
 
+  const probeQualityMutation = useMutation({
+    mutationFn: async (hash: string) => probeQuality(hash),
+    onSuccess: async (result) => {
+      await refreshNodes();
+      showToast(
+        "success",
+        t("质量探测完成：等级={{grade}}，分数={{score}}", {
+          grade: result.Grade,
+          score: Math.round(result.Score),
+        }),
+      );
+    },
+    onError: async (error) => {
+      await refreshNodes();
+      showToast("error", formatApiErrorMessage(error, t));
+    },
+  });
+
   const markProbePending = (hash: string, action: ProbeAction): boolean => {
     if (action === "egress") {
       if (pendingEgressHashesRef.current.has(hash)) {
@@ -718,13 +738,24 @@ export function NodesPage() {
       return true;
     }
 
-    if (pendingLatencyHashesRef.current.has(hash)) {
+    if (action === "latency") {
+      if (pendingLatencyHashesRef.current.has(hash)) {
+        return false;
+      }
+      const next = new Set(pendingLatencyHashesRef.current);
+      next.add(hash);
+      pendingLatencyHashesRef.current = next;
+      setPendingLatencyHashes(next);
+      return true;
+    }
+
+    if (pendingQualityHashesRef.current.has(hash)) {
       return false;
     }
-    const next = new Set(pendingLatencyHashesRef.current);
+    const next = new Set(pendingQualityHashesRef.current);
     next.add(hash);
-    pendingLatencyHashesRef.current = next;
-    setPendingLatencyHashes(next);
+    pendingQualityHashesRef.current = next;
+    setPendingQualityHashes(next);
     return true;
   };
 
@@ -740,17 +771,31 @@ export function NodesPage() {
       return;
     }
 
-    if (!pendingLatencyHashesRef.current.has(hash)) {
+    if (action === "latency") {
+      if (!pendingLatencyHashesRef.current.has(hash)) {
+        return;
+      }
+      const next = new Set(pendingLatencyHashesRef.current);
+      next.delete(hash);
+      pendingLatencyHashesRef.current = next;
+      setPendingLatencyHashes(next);
       return;
     }
-    const next = new Set(pendingLatencyHashesRef.current);
+
+    if (!pendingQualityHashesRef.current.has(hash)) {
+      return;
+    }
+    const next = new Set(pendingQualityHashesRef.current);
     next.delete(hash);
-    pendingLatencyHashesRef.current = next;
-    setPendingLatencyHashes(next);
+    pendingQualityHashesRef.current = next;
+    setPendingQualityHashes(next);
   };
 
-  const isProbePending = (hash: string, action: ProbeAction): boolean =>
-    action === "egress" ? pendingEgressHashes.has(hash) : pendingLatencyHashes.has(hash);
+  const isProbePending = (hash: string, action: ProbeAction): boolean => {
+    if (action === "egress") return pendingEgressHashes.has(hash);
+    if (action === "latency") return pendingLatencyHashes.has(hash);
+    return pendingQualityHashes.has(hash);
+  };
 
   const runProbeEgress = async (hash: string) => {
     if (!markProbePending(hash, "egress")) {
@@ -775,6 +820,19 @@ export function NodesPage() {
       // Mutation callbacks already surface the failure to the user.
     } finally {
       clearProbePending(hash, "latency");
+    }
+  };
+
+  const runProbeQuality = async (hash: string) => {
+    if (!markProbePending(hash, "quality")) {
+      return;
+    }
+    try {
+      await probeQualityMutation.mutateAsync(hash);
+    } catch {
+      // Mutation callbacks already surface the failure to the user.
+    } finally {
+      clearProbePending(hash, "quality");
     }
   };
 
@@ -1190,6 +1248,15 @@ export function NodesPage() {
               disabled={isProbePending(node.node_hash, "latency")}
             >
               <Zap size={14} />
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              title={t("触发质量探测")}
+              onClick={() => void runProbeQuality(node.node_hash)}
+              disabled={isProbePending(node.node_hash, "quality")}
+            >
+              <Gauge size={14} />
             </Button>
           </div>
         );
@@ -2030,6 +2097,19 @@ export function NodesPage() {
                       disabled={isProbePending(detailNode.node_hash, "latency")}
                     >
                       {isProbePending(detailNode.node_hash, "latency") ? t("探测中...") : t("触发延迟探测")}
+                    </Button>
+                  </div>
+                  <div className="platform-op-item">
+                    <div className="platform-op-copy">
+                      <h5>{t("质量探测")}</h5>
+                      <p className="platform-op-hint">{t("使用当前已保存质量配置检测该节点")}</p>
+                    </div>
+                    <Button
+                      variant="secondary"
+                      onClick={() => void runProbeQuality(detailNode.node_hash)}
+                      disabled={isProbePending(detailNode.node_hash, "quality")}
+                    >
+                      {isProbePending(detailNode.node_hash, "quality") ? t("探测中...") : t("触发质量探测")}
                     </Button>
                   </div>
                 </div>

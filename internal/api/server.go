@@ -115,10 +115,12 @@ func NewServerWithAddress(
 		authed.Handle("POST /api/v1/nodes/{hash}/actions/probe-egress", HandleProbeEgress(cp))
 		authed.Handle("POST /api/v1/nodes/{hash}/actions/probe-latency", HandleProbeLatency(cp))
 		authed.Handle("POST /api/v1/nodes/{hash}/actions/proxy-check", HandleNodeActionProxyCheck(cp))
+		authed.Handle("POST /api/v1/nodes/{hash}/actions/probe-quality", HandleNodeActionProbeQuality(cp))
 
 		// Proxy check batch tasks.
 		authed.Handle("POST /api/v1/proxy-check/tasks", HandleCreateProxyCheckTask(cp))
 		authed.Handle("GET /api/v1/proxy-check/tasks/{id}", HandleGetProxyCheckTask(cp))
+		authed.Handle("POST /api/v1/proxy-check/actions/trigger-all", HandleTriggerAllQualityProbes(cp))
 
 		// Export tokens (admin management).
 		authed.Handle("GET /api/v1/export-tokens", HandleListExportTokens(cp))

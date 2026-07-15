@@ -809,6 +809,20 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
   "服务不可达": "Service unreachable",
   "设置任意质量条件后，未检测的节点不会被选中。":
     "Once any quality condition is set, nodes without a quality record are excluded.",
+  // ── Quality probe actions (Phase 2 deepwork) ──────────────────────────
+  "触发质量探测": "Trigger quality probe",
+  "质量探测": "Quality probe",
+  "质量探测完成：等级={{grade}}，分数={{score}}": "Quality probe complete: grade={{grade}}, score={{score}}",
+  "使用当前已保存质量配置检测该节点": "Check this node using the currently saved quality configuration",
+  "全量质量探测": "Full quality probe",
+  "触发全量质量检测": "Trigger all quality probes",
+  "使用服务器当前已保存的质量配置": "Uses the currently saved quality configuration on the server",
+  "即使周期质量检测关闭也会执行": "Runs even when periodic quality check is disabled",
+  "会产生额外探测流量": "Generates extra probe traffic",
+  "当前没有可检测节点，未创建全量质量检测": "There are currently no eligible nodes, so no full quality check was created",
+  "全量质量检测已接受请求（{{count}} 个候选节点）": "Full quality check request accepted ({{count}} candidate nodes)",
+  "请求已合并到正在执行或待执行的全量检测（{{count}} 个候选节点）": "Request merged into the running or queued full quality check ({{count}} candidate nodes)",
+  "提交请求中...": "Submitting request...",
   // ── Cloudflare 8-status labels ───────────────────────────────────────
   "CF 干净": "CF clean",
   "未发现 CF": "No CF evidence",

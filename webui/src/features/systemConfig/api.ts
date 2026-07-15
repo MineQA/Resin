@@ -345,3 +345,13 @@ export async function deleteExportToken(id: string): Promise<void> {
     method: "DELETE",
   });
 }
+
+export async function triggerAllQualityProbes(): Promise<{
+  candidate_count: number;
+  coalesced: boolean;
+}> {
+  return apiRequest<{ candidate_count: number; coalesced: boolean }>(
+    "/api/v1/proxy-check/actions/trigger-all",
+    { method: "POST" },
+  );
+}

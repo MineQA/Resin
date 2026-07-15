@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -784,5 +786,286 @@ func TestHandleCreateProxyCheckTask_RawProxiesNilChecker(t *testing.T) {
 	}
 	if errResp.Error.Code != "INTERNAL" {
 		t.Fatalf("error code = %q, want INTERNAL", errResp.Error.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Probe quality (single node, runtime config)
+// ---------------------------------------------------------------------------
+
+// TestHandleNodeActionProbeQuality_Success tests the probe-quality endpoint.
+func TestHandleNodeActionProbeQuality_Success(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("sub-pq1", "sub-pq1", "https://example.com/sub", true, false)
+	cp.SubMgr.Register(sub)
+
+	hash := setupProxyCheckNode(t, cp, sub, `{"type":"ss","server":"1.2.3.4","port":443}`)
+
+	// Set up probe manager with runtime quality config.
+	cp.ProbeMgr = probe.NewProbeManager(probe.ProbeConfig{
+		Pool: cp.Pool,
+		Fetcher: func(_ node.Hash, _ string) ([]byte, time.Duration, error) {
+			return []byte(`{"data": [{"id": "openai"}]}`), 15 * time.Millisecond, nil
+		},
+		QualityCfg: &probe.QualityProbeConfig{
+			Profile: func() string { return "openai" },
+			Opts: func() probe.ProxyCheckOptions {
+				return probe.ProxyCheckOptions{
+					ServiceReachability: true,
+					Rounds:              1,
+				}
+			},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/"+hash.Hex()+"/actions/probe-quality", nil)
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var result probe.ProxyScore
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !result.ServiceReachable {
+		t.Error("expected ServiceReachable=true")
+	}
+}
+
+// TestHandleNodeActionProbeQuality_NotFound tests 404 for missing node.
+func TestHandleNodeActionProbeQuality_NotFound(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+	cp.ProbeMgr = probe.NewProbeManager(probe.ProbeConfig{
+		Pool: cp.Pool,
+		Fetcher: func(_ node.Hash, _ string) ([]byte, time.Duration, error) {
+			return []byte("ok"), 10 * time.Millisecond, nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/abcdef0123456789abcdef0123456789/actions/probe-quality", nil)
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status: got %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+}
+
+// TestHandleNodeActionProbeQuality_InvalidHash tests 400 for bad hash.
+func TestHandleNodeActionProbeQuality_InvalidHash(t *testing.T) {
+	srv, _, _ := newControlPlaneTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/not-a-valid-hex/actions/probe-quality", nil)
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+// TestHandleNodeActionProbeQuality_RequiresAuth tests auth enforcement.
+func TestHandleNodeActionProbeQuality_RequiresAuth(t *testing.T) {
+	srv, _, _ := newControlPlaneTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/abcd/actions/probe-quality", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status: got %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Trigger all quality probes
+// ---------------------------------------------------------------------------
+
+// TestHandleTriggerAllQualityProbes_Success tests 202 with candidate_count
+// and verifies the sweep task actually executes via real workers (no sleep).
+func TestHandleTriggerAllQualityProbes_Success(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	sub := subscription.NewSubscription("sub-trigger", "sub-trigger", "https://example.com/sub", true, false)
+	cp.SubMgr.Register(sub)
+
+	// Add eligible nodes.
+	hash1 := setupProxyCheckNode(t, cp, sub, `{"type":"ss","server":"1.2.3.4","port":443}`)
+	hash2 := setupProxyCheckNode(t, cp, sub, `{"type":"ss","server":"5.6.7.8","port":443}`)
+
+	var (
+		qualityCount atomic.Int32
+
+		// Gate the second node's first fetch so we can prove the first
+		// node wrote back before the second node starts.
+		secondFetchOnce sync.Once
+		secondGate      = make(chan struct{})     // closed to release second node
+		secondReady     = make(chan struct{})     // closed when second node first fetch enters
+		secondHashCh    = make(chan node.Hash, 1) // receives hash of the second (gated) node
+		closeGateOnce   sync.Once                 // cleanup: close secondGate safely
+	)
+	cp.ProbeMgr = probe.NewProbeManager(probe.ProbeConfig{
+		Pool:        cp.Pool,
+		Concurrency: 1,
+		Fetcher: func(h node.Hash, _ string) ([]byte, time.Duration, error) {
+			// Gate the first fetch of whichever node runs second
+			// (qualityCount already advanced to 2 for that node's turn).
+			if qualityCount.Load() == 2 {
+				secondFetchOnce.Do(func() {
+					secondHashCh <- h
+					close(secondReady)
+					<-secondGate
+				})
+			}
+			return []byte("ok"), 10 * time.Millisecond, nil
+		},
+		OnProbeEvent: func(kind string) {
+			if kind == "quality" {
+				qualityCount.Add(1)
+			}
+		},
+	})
+	cp.ProbeMgr.Start()
+	t.Cleanup(func() {
+		closeGateOnce.Do(func() { close(secondGate) })
+		cp.ProbeMgr.Stop()
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/proxy-check/actions/trigger-all", nil)
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status: got %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+
+	var result service.TriggerAllQualityResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.CandidateCount != 2 {
+		t.Fatalf("CandidateCount = %d, want 2", result.CandidateCount)
+	}
+	if result.Coalesced {
+		t.Fatal("expected coalesced=false for first trigger")
+	}
+
+	// Wait for both quality events (one per node).
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.After(time.Second)
+	for qualityCount.Load() < 2 {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for both quality events")
+		case <-ticker.C:
+		}
+	}
+
+	entry1, ok1 := cp.Pool.GetEntry(hash1)
+	if !ok1 {
+		t.Fatal("hash1 not found")
+	}
+	entry2, ok2 := cp.Pool.GetEntry(hash2)
+	if !ok2 {
+		t.Fatal("hash2 not found")
+	}
+
+	// Wait for the second node's first fetch to be gated. Since the sweep
+	// processes nodes sequentially, the first node's quality has been
+	// written back by this point.
+	select {
+	case <-secondReady:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for second node to reach fetcher")
+	}
+
+	// Determine which node was gated (second) and which was first.
+	var secondHash node.Hash
+	select {
+	case secondHash = <-secondHashCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for second node hash")
+	}
+
+	var firstHash node.Hash
+	if secondHash == hash1 {
+		firstHash = hash2
+	} else {
+		firstHash = hash1
+	}
+
+	firstEntry, ok := cp.Pool.GetEntry(firstHash)
+	if !ok {
+		t.Fatal("first node not found")
+	}
+
+	// Verify first node quality is present (written before second node starts).
+	if q := firstEntry.GetQuality(); q == nil {
+		t.Fatal("first node quality should be written before second node starts")
+	}
+
+	// Release second node's fetcher.
+	closeGateOnce.Do(func() { close(secondGate) })
+
+	// Wait for both qualities to be recorded.
+	deadline = time.After(time.Second)
+	for entry1.GetQuality() == nil || entry2.GetQuality() == nil {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for quality writeback: hash1=%v hash2=%v",
+				entry1.GetQuality() != nil, entry2.GetQuality() != nil)
+		case <-ticker.C:
+		}
+	}
+}
+
+// TestHandleTriggerAllQualityProbes_RequiresAuth tests auth enforcement.
+func TestHandleTriggerAllQualityProbes_RequiresAuth(t *testing.T) {
+	srv, _, _ := newControlPlaneTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/proxy-check/actions/trigger-all", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status: got %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+// TestHandleTriggerAllQualityProbes_NoCandidates tests 202 with 0 candidates.
+func TestHandleTriggerAllQualityProbes_NoCandidates(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	cp.ProbeMgr = probe.NewProbeManager(probe.ProbeConfig{
+		Pool: cp.Pool,
+		Fetcher: func(_ node.Hash, _ string) ([]byte, time.Duration, error) {
+			return []byte("ok"), 10 * time.Millisecond, nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/proxy-check/actions/trigger-all", nil)
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status: got %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+
+	var result service.TriggerAllQualityResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.CandidateCount != 0 {
+		t.Fatalf("CandidateCount = %d, want 0", result.CandidateCount)
 	}
 }

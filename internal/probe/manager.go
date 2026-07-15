@@ -108,6 +108,7 @@ const (
 	probeTaskKindLatency
 	probeTaskKindQuality
 	probeTaskKindQualityForce
+	probeTaskKindQualitySweep
 )
 
 // probeTaskKindQuality is the task kind for active quality (proxy-check)
@@ -115,6 +116,10 @@ const (
 // probes. When enabled with aggressive settings (low interval, many nodes),
 // quality checks can compete for worker capacity with health probes.
 // Quality probes must not call RecordResult or affect circuit breaker state.
+//
+// probeTaskKindQualitySweep is a synthetic task kind for "trigger all" quality
+// sweeps. The key hash must be node.Zero — the sweep iterates all eligible
+// pool nodes in a single task rather than enqueuing individual node tasks.
 
 type probeTaskKey struct {
 	hash node.Hash
@@ -571,6 +576,13 @@ func (m *ProbeManager) runProbeWorker() {
 }
 
 func (m *ProbeManager) executeTask(task probeTask) {
+	// Sweep task must be handled before pool lookup because its key uses
+	// node.Zero as a synthetic hash.
+	if task.key.kind == probeTaskKindQualitySweep {
+		m.performQualitySweep()
+		return
+	}
+
 	entry, ok := m.pool.GetEntry(task.key.hash)
 	if !ok || entry.Outbound.Load() == nil {
 		return
@@ -591,7 +603,19 @@ func (m *ProbeManager) executeTask(task probeTask) {
 	}
 }
 
-func (m *ProbeManager) enqueueProbe(hash node.Hash, kind probeTaskKind, priority probePriority) bool {
+// enqueueProbeResult describes the outcome of an enqueue attempt.
+type enqueueProbeResult uint8
+
+const (
+	enqueueProbeQueued    enqueueProbeResult = iota // task was added to the queue
+	enqueueProbeUpgraded                            // normal→high priority upgrade succeeded
+	enqueueProbeCoalesced                           // task was merged with existing pending/running (dirty)
+	enqueueProbeRejected                            // queue capacity was exhausted
+)
+
+// enqueueProbeCore is the shared CAS state machine for probe task enqueue.
+// Returns the detailed outcome (queued/upgraded/coalesced/rejected).
+func (m *ProbeManager) enqueueProbeCore(hash node.Hash, kind probeTaskKind, priority probePriority) enqueueProbeResult {
 	key := probeTaskKey{hash: hash, kind: kind}
 	state, _ := m.taskStates.LoadOrCompute(key, func() (*probeTaskState, bool) {
 		return &probeTaskState{}, false
@@ -606,22 +630,19 @@ func (m *ProbeManager) enqueueProbe(hash node.Hash, kind probeTaskKind, priority
 				next |= taskFlagDirtyHigh
 			}
 			if state.flags.CompareAndSwap(flags, next) {
-				return false
+				return enqueueProbeCoalesced
 			}
 			continue
 		}
 
 		if flags&taskFlagQueued != 0 {
-			// If a normal-priority task is already queued, add a high-priority token
-			// so the next dequeue can observe the upgraded urgency. The stale normal
-			// token will later no-op when it reaches a worker.
 			if allowQueuedHighUpgrade && flags&taskFlagQueuedHigh == 0 {
 				next := flags | taskFlagQueuedHigh
 				if !state.flags.CompareAndSwap(flags, next) {
 					continue
 				}
 				if m.taskQueue.Enqueue(probeTask{key: key}, probePriorityHigh) {
-					return true
+					return enqueueProbeUpgraded
 				}
 				for {
 					current := state.flags.Load()
@@ -639,7 +660,7 @@ func (m *ProbeManager) enqueueProbe(hash node.Hash, kind probeTaskKind, priority
 				next |= taskFlagDirtyHigh
 			}
 			if state.flags.CompareAndSwap(flags, next) {
-				return false
+				return enqueueProbeCoalesced
 			}
 			continue
 		}
@@ -655,13 +676,31 @@ func (m *ProbeManager) enqueueProbe(hash node.Hash, kind probeTaskKind, priority
 		}
 
 		if m.taskQueue.Enqueue(probeTask{key: key}, priority) {
-			return true
+			return enqueueProbeQueued
 		}
 
 		m.clearDroppedState(state)
 		m.tryDeleteTaskState(key, state)
-		return false
+		return enqueueProbeRejected
 	}
+}
+
+// enqueueProbeDetailed enqueues a probe task and returns the detailed outcome
+// (queued/upgraded/coalesced/rejected).
+func (m *ProbeManager) enqueueProbeDetailed(hash node.Hash, kind probeTaskKind, priority probePriority) enqueueProbeResult {
+	return m.enqueueProbeCore(hash, kind, priority)
+}
+
+// enqueueProbe wraps enqueueProbeCore with legacy boolean mapping:
+// Queued/Upgraded→true, Coalesced/Rejected→false.
+func (m *ProbeManager) enqueueProbe(hash node.Hash, kind probeTaskKind, priority probePriority) bool {
+	result := m.enqueueProbeCore(hash, kind, priority)
+	// Map rich result to legacy boolean:
+	//   enqueueProbeQueued         → true  (fresh queue success)
+	//   enqueueProbeUpgraded       → true  (normal→high upgrade success)
+	//   enqueueProbeCoalesced      → false (merged with running/pending, no upgrade)
+	//   enqueueProbeRejected       → false (queue capacity full)
+	return result == enqueueProbeQueued || result == enqueueProbeUpgraded
 }
 
 func (m *ProbeManager) markTaskRunning(key probeTaskKey) (*probeTaskState, bool) {
@@ -907,4 +946,101 @@ func (m *ProbeManager) CheckProxySync(hash node.Hash, profile TargetProfile, opt
 		return CheckProxyWithResponse(m.fetcher, hash, profile, opts, m.responseFetcher)
 	}
 	return CheckProxyWithResponse(m.fetcher, hash, profile, opts, nil)
+}
+
+// ProbeQualitySync performs a synchronous quality probe using the current
+// runtime quality profile, options, and scoring policy. It is the common
+// un-gated path used by the single-node API and the quality sweep task.
+//
+// Unlike performQualityCheck, this method is NOT gated by qualityEnabled()
+// or triggerOnNewNodeEnabled(). It always executes when called and writes
+// back NodeQuality via RecordNodeQuality. It does NOT call RecordResult.
+//
+// The actual check and writeback are delegated to performNodeQualityCheck,
+// which correctly preserves both score and error (when CheckProxySync returns
+// a non-nil score alongside an error).
+func (m *ProbeManager) ProbeQualitySync(hash node.Hash) (*ProxyScore, error) {
+	if m.fetcher == nil {
+		return nil, fmt.Errorf("no probe fetcher configured")
+	}
+	select {
+	case <-m.stopCh:
+		return nil, fmt.Errorf("probe manager stopped")
+	default:
+	}
+
+	entry, ok := m.pool.GetEntry(hash)
+	if !ok {
+		return nil, fmt.Errorf("node not found")
+	}
+	if entry.Outbound.Load() == nil {
+		return nil, fmt.Errorf("node outbound not ready")
+	}
+
+	// Fire the shared probe event callback for metrics parity.
+	if m.onProbeEvent != nil {
+		m.onProbeEvent("quality")
+	}
+
+	profile := LookupProfile(m.currentQualityProfile())
+	opts := m.currentQualityOptions()
+
+	// Inject scoring policy from runtime config (same as performQualityCheck).
+	if m.qualityCfg != nil && m.qualityCfg.ScoringPolicy != nil {
+		policy := m.qualityCfg.ScoringPolicy()
+		opts.ScoringPolicy = policy
+	}
+
+	return m.performNodeQualityCheck(hash, profile, opts)
+}
+
+// TriggerAllQualityProbes counts currently eligible nodes (non-disabled and
+// outbound-ready) and enqueues a single quality sweep task. When a sweep is
+// already pending or running, the new request is coalesced into the existing
+// sweep via the dirty-flag mechanism.
+//
+// Returns:
+//   - candidateCount: number of eligible nodes at count time
+//   - coalesced: true if the request was merged into an existing sweep
+//   - queueRejected: true if the queue refused the task entirely
+func (m *ProbeManager) TriggerAllQualityProbes() (candidateCount int, coalesced bool, queueRejected bool) {
+	select {
+	case <-m.stopCh:
+		return 0, false, true
+	default:
+	}
+
+	subLookup := m.pool.MakeSubLookup()
+
+	m.pool.Range(func(h node.Hash, entry *node.NodeEntry) bool {
+		select {
+		case <-m.stopCh:
+			return false
+		default:
+		}
+		if entry.IsDisabledBySubscriptions(subLookup) {
+			return true
+		}
+		if entry.Outbound.Load() == nil {
+			return true
+		}
+		candidateCount++
+		return true
+	})
+
+	if candidateCount == 0 {
+		// No eligible nodes — no task needed, but this is still a "successful
+		// acceptance" from the API's perspective.
+		return 0, false, false
+	}
+
+	result := m.enqueueProbeDetailed(node.Zero, probeTaskKindQualitySweep, probePriorityHigh)
+	switch result {
+	case enqueueProbeQueued:
+		return candidateCount, false, false
+	case enqueueProbeUpgraded, enqueueProbeCoalesced:
+		return candidateCount, true, false
+	default:
+		return candidateCount, false, true
+	}
 }

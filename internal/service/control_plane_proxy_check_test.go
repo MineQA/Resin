@@ -1265,3 +1265,216 @@ func TestProxyCheckTaskManager_RawProxies_CheckerNotCalledOnRejected(t *testing.
 		t.Fatal("expected nil Score — checker was called but should not have been")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// CheckProbeQuality (single node, runtime config)
+// ---------------------------------------------------------------------------
+
+func TestCheckProbeQuality_InvalidHash(t *testing.T) {
+	cp := &ControlPlaneService{}
+	_, err := cp.CheckProbeQuality("not-a-hex")
+	if err == nil {
+		t.Fatal("expected error for invalid hash")
+	}
+	svcErr, ok := err.(*ServiceError)
+	if !ok {
+		t.Fatalf("expected ServiceError, got %T", err)
+	}
+	if svcErr.Code != "INVALID_ARGUMENT" {
+		t.Fatalf("code = %q, want INVALID_ARGUMENT", svcErr.Code)
+	}
+}
+
+func TestCheckProbeQuality_NodeNotFound(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              nil,
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+	cp := &ControlPlaneService{Pool: pool}
+	h := node.HashFromRawOptions([]byte(`{"type":"ss","server":"9.9.9.9","port":443}`))
+	_, err := cp.CheckProbeQuality(h.Hex())
+	if err == nil {
+		t.Fatal("expected error for missing node")
+	}
+	svcErr, ok := err.(*ServiceError)
+	if !ok {
+		t.Fatalf("expected ServiceError, got %T", err)
+	}
+	if svcErr.Code != "NOT_FOUND" {
+		t.Fatalf("code = %q, want NOT_FOUND", svcErr.Code)
+	}
+}
+
+func TestCheckProbeQuality_NoProbeMgr(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	pool, hash := newNodeAndProbeTestPool(t, subMgr)
+	cp := &ControlPlaneService{Pool: pool, SubMgr: subMgr}
+	_, err := cp.CheckProbeQuality(hash.Hex())
+	if err == nil {
+		t.Fatal("expected error without ProbeMgr")
+	}
+	svcErr, ok := err.(*ServiceError)
+	if !ok {
+		t.Fatalf("expected ServiceError, got %T", err)
+	}
+	if svcErr.Code != "INTERNAL" {
+		t.Fatalf("code = %q, want INTERNAL", svcErr.Code)
+	}
+}
+
+func TestCheckProbeQuality_Success(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+	pool, hash := newNodeAndProbeTestPool(t, subMgr)
+
+	mockFetcher := newMockFetcher([]byte(`{"data": [{"id": "openai"}]}`), 50*time.Millisecond, nil)
+
+	cp := &ControlPlaneService{
+		Pool:   pool,
+		SubMgr: subMgr,
+		ProbeMgr: probe.NewProbeManager(probe.ProbeConfig{
+			Pool:    pool,
+			Fetcher: mockFetcher,
+			QualityCfg: &probe.QualityProbeConfig{
+				Enabled:  func() bool { return false },
+				Interval: func() time.Duration { return 30 * time.Minute },
+				Profile:  func() string { return "openai" },
+				Opts: func() probe.ProxyCheckOptions {
+					return probe.DefaultOptions()
+				},
+			},
+		}),
+	}
+
+	result, err := cp.CheckProbeQuality(hash.Hex())
+	if err != nil {
+		t.Fatalf("CheckProbeQuality: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if !result.ServiceReachable {
+		t.Error("expected ServiceReachable=true")
+	}
+
+	// Verify quality was written back with runtime profile.
+	entry, _ := pool.GetEntry(hash)
+	q := entry.GetQuality()
+	if q == nil {
+		t.Fatal("expected quality to be written back")
+	}
+	if q.Profile != "openai" {
+		t.Fatalf("profile = %q, want openai (from runtime config)", q.Profile)
+	}
+	if q.LastCheckedNs == 0 {
+		t.Fatal("expected LastCheckedNs to be set")
+	}
+}
+
+func TestCheckProbeQuality_BackgroundDisabledStillExecutes(t *testing.T) {
+	// Verify that the check executes even when quality background is disabled.
+	subMgr := topology.NewSubscriptionManager()
+	pool, hash := newNodeAndProbeTestPool(t, subMgr)
+
+	callCount := 0
+	cp := &ControlPlaneService{
+		Pool:   pool,
+		SubMgr: subMgr,
+		ProbeMgr: probe.NewProbeManager(probe.ProbeConfig{
+			Pool: pool,
+			Fetcher: func(_ node.Hash, _ string) ([]byte, time.Duration, error) {
+				callCount++
+				return []byte("ok"), 10 * time.Millisecond, nil
+			},
+			QualityCfg: &probe.QualityProbeConfig{
+				Enabled:  func() bool { return false }, // disabled
+				Interval: func() time.Duration { return 30 * time.Minute },
+				Profile:  func() string { return "generic" },
+				Opts: func() probe.ProxyCheckOptions {
+					return probe.DefaultOptions()
+				},
+			},
+		}),
+	}
+
+	_, err := cp.CheckProbeQuality(hash.Hex())
+	if err != nil {
+		t.Fatalf("CheckProbeQuality: %v", err)
+	}
+	if callCount != 1 {
+		t.Fatalf("expected 1 fetcher call (background disabled should not block), got %d", callCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TriggerAllQualityProbes
+// ---------------------------------------------------------------------------
+
+func TestTriggerAllQualityProbes_CountsCandidates(t *testing.T) {
+	subMgr := topology.NewSubscriptionManager()
+
+	// Create first node via the standard helper.
+	pool, _ := newNodeAndProbeTestPool(t, subMgr)
+
+	// Create a second node with outbound.
+	hash2 := node.HashFromRawOptions([]byte(`{"type":"ss","server":"2.2.2.2","port":443}`))
+	pool.AddNodeFromSub(hash2, []byte(`{"type":"ss","server":"2.2.2.2","port":443}`), "proxy-check-sub")
+	sub := subMgr.Lookup("proxy-check-sub")
+	if sub != nil {
+		sub.ManagedNodes().StoreNode(hash2, subscription.ManagedNode{Tags: []string{"eligible"}})
+	}
+	if entry2, ok2 := pool.GetEntry(hash2); ok2 {
+		ob := testutil.NewNoopOutbound()
+		entry2.Outbound.Store(&ob)
+	}
+
+	cp := &ControlPlaneService{
+		Pool:   pool,
+		SubMgr: subMgr,
+		ProbeMgr: probe.NewProbeManager(probe.ProbeConfig{
+			Pool: pool,
+			Fetcher: func(_ node.Hash, _ string) ([]byte, time.Duration, error) {
+				return []byte("ok"), 10 * time.Millisecond, nil
+			},
+		}),
+	}
+
+	result, err := cp.TriggerAllQualityProbes()
+	if err != nil {
+		t.Fatalf("TriggerAllQualityProbes: %v", err)
+	}
+	if result.CandidateCount != 2 {
+		t.Fatalf("CandidateCount = %d, want 2", result.CandidateCount)
+	}
+	if result.Coalesced {
+		t.Fatal("expected coalesced=false for first trigger")
+	}
+}
+
+func TestTriggerAllQualityProbes_NoCandidates(t *testing.T) {
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+	})
+	cp := &ControlPlaneService{
+		Pool: pool,
+		ProbeMgr: probe.NewProbeManager(probe.ProbeConfig{
+			Pool:    pool,
+			Fetcher: newMockFetcher([]byte("ok"), 10*time.Millisecond, nil),
+		}),
+	}
+
+	result, err := cp.TriggerAllQualityProbes()
+	if err != nil {
+		t.Fatalf("TriggerAllQualityProbes: %v", err)
+	}
+	if result.CandidateCount != 0 {
+		t.Fatalf("CandidateCount = %d, want 0", result.CandidateCount)
+	}
+	if result.Coalesced {
+		t.Fatal("expected coalesced=false for empty pool")
+	}
+}

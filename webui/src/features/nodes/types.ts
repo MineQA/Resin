@@ -112,3 +112,9 @@ export type LatencyProbeResult = {
 export type NodePoolExportResponse = {
   outbounds: unknown[];
 };
+
+/** Minimal quality probe result returned by POST /actions/probe-quality. */
+export type ProbeQualityResult = {
+  Grade: string;
+  Score: number;
+};

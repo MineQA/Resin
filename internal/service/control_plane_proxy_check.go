@@ -512,6 +512,69 @@ func (s *ControlPlaneService) GetProxyCheckTask(id string) (*ProxyCheckTask, err
 	return s.getProxyCheckTaskManager().GetTask(id)
 }
 
+// ---------------------------------------------------------------------------
+// Probe quality (single node, synchronous, runtime config)
+// ---------------------------------------------------------------------------
+
+// CheckProbeQuality performs a synchronous quality probe for a single node
+// using the current runtime quality profile, options, and scoring policy.
+// It validates the node hash and existence, then delegates to
+// ProbeMgr.ProbeQualitySync which handles the actual check and writeback.
+//
+// This is a thin wrapper for the API endpoint
+// POST /api/v1/nodes/{hash}/actions/probe-quality.
+// It does NOT accept custom profile/options — those come from runtime config.
+func (s *ControlPlaneService) CheckProbeQuality(hashStr string) (*probe.ProxyScore, error) {
+	h, err := node.ParseHex(hashStr)
+	if err != nil {
+		return nil, invalidArg("node_hash: invalid format")
+	}
+	if _, ok := s.Pool.GetEntry(h); !ok {
+		return nil, notFound("node not found")
+	}
+	if s.ProbeMgr == nil {
+		return nil, internal("quality probe not available", fmt.Errorf("probe manager not initialized"))
+	}
+
+	result, err := s.ProbeMgr.ProbeQualitySync(h)
+	if err != nil {
+		return nil, internal("quality probe failed", err)
+	}
+	return result, nil
+}
+
+// ---------------------------------------------------------------------------
+// Trigger all (async quality sweep)
+// ---------------------------------------------------------------------------
+
+// TriggerAllQualityResult is the response for the trigger-all endpoint.
+type TriggerAllQualityResult struct {
+	CandidateCount int  `json:"candidate_count"`
+	Coalesced      bool `json:"coalesced"`
+}
+
+// TriggerAllQualityProbes counts currently eligible nodes and enqueues an
+// async quality sweep task. Returns the candidate count and whether the
+// request was coalesced into an existing sweep. Returns an error only when
+// the queue rejects the task.
+//
+// This is the service method for
+// POST /api/v1/proxy-check/actions/trigger-all.
+func (s *ControlPlaneService) TriggerAllQualityProbes() (*TriggerAllQualityResult, error) {
+	if s.ProbeMgr == nil {
+		return nil, internal("quality probe not available", fmt.Errorf("probe manager not initialized"))
+	}
+
+	count, coalesced, rejected := s.ProbeMgr.TriggerAllQualityProbes()
+	if rejected {
+		return nil, internal("probe queue full, try again later", fmt.Errorf("queue rejected quality sweep task"))
+	}
+	return &TriggerAllQualityResult{
+		CandidateCount: count,
+		Coalesced:      coalesced,
+	}, nil
+}
+
 // resolveOptions returns the effective ProxyCheckOptions.
 // If opts is nil, probe.DefaultOptions() is returned.
 // If opts is non-nil, zero/negative Rounds are defaulted to 1.

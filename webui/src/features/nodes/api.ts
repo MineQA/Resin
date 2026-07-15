@@ -13,6 +13,7 @@ import type {
   NodePoolExportResponse,
   NodeSummary,
   PageResponse,
+  ProbeQualityResult,
 } from "./types";
 
 const basePath = "/api/v1/nodes";
@@ -235,6 +236,12 @@ export async function probeEgress(hash: string): Promise<EgressProbeResult> {
 
 export async function probeLatency(hash: string): Promise<LatencyProbeResult> {
   return apiRequest<LatencyProbeResult>(`${basePath}/${hash}/actions/probe-latency`, {
+    method: "POST",
+  });
+}
+
+export async function probeQuality(hash: string): Promise<ProbeQualityResult> {
+  return apiRequest<ProbeQualityResult>(`${basePath}/${hash}/actions/probe-quality`, {
     method: "POST",
   });
 }

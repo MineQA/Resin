@@ -216,19 +216,81 @@ func (m *ProbeManager) performQualityCheck(hash node.Hash, entry *node.NodeEntry
 		opts.ScoringPolicy = policy
 	}
 
-	var score *ProxyScore
-	var err error
+	m.performNodeQualityCheck(hash, profile, opts)
+}
 
-	// Use response-aware CheckProxy when a ResponseFetcher is configured.
-	if m.responseFetcher != nil {
-		score, err = CheckProxyWithResponse(m.fetcher, hash, profile, opts, m.responseFetcher)
-	} else {
-		score, err = CheckProxy(m.fetcher, hash, profile, opts)
-	}
-
-	// Map ProxyScore to model.NodeQuality and record via pool.
+// performNodeQualityCheck executes CheckProxySync, maps to NodeQuality,
+// and records it. Shared by single-node checks and the sweep. Callers
+// handle config resolution, gating, events, and eligibility. Errors
+// still write back quality via ProxyScoreToNodeQuality.
+func (m *ProbeManager) performNodeQualityCheck(hash node.Hash, profile TargetProfile, opts ProxyCheckOptions) (*ProxyScore, error) {
+	score, err := m.CheckProxySync(hash, profile, opts)
 	nq := ProxyScoreToNodeQuality(profile.Name, score, err)
 	m.pool.RecordNodeQuality(hash, nq)
+	return score, err
+}
+
+// ---------------------------------------------------------------------------
+// performQualitySweep
+// ---------------------------------------------------------------------------
+
+// performQualitySweep iterates all pool nodes and performs a synchronous
+// quality probe on each eligible (non-disabled, outbound-ready) node using
+// the current runtime profile, options, and scoring policy fixed at sweep
+// start. It does NOT call RecordResult and does NOT affect circuit breaker
+// or routing health.
+//
+// The sweep is executed as a single task (probeTaskKindQualitySweep with
+// node.Zero key). Each node is checked independently and stopCh is checked
+// between nodes to allow graceful shutdown mid-sweep.
+//
+// Design decisions:
+//   - Profile/options are captured once at sweep start so a mid-sweep config
+//     change does not produce inconsistent results across nodes.
+//   - Each node fires onProbeEvent("quality") for metrics parity.
+//   - The sweep is NOT gated by qualityEnabled() or triggerOnNewNodeEnabled().
+//   - Disabled subscription nodes and nil outbound are skipped silently.
+//   - No RecordResult is called (does not affect health/failure tracking).
+func (m *ProbeManager) performQualitySweep() {
+	if m.fetcher == nil {
+		return
+	}
+
+	// Fix runtime config at sweep start.
+	profile := LookupProfile(m.currentQualityProfile())
+	opts := m.currentQualityOptions()
+
+	// Inject scoring policy.
+	if m.qualityCfg != nil && m.qualityCfg.ScoringPolicy != nil {
+		policy := m.qualityCfg.ScoringPolicy()
+		opts.ScoringPolicy = policy
+	}
+
+	subLookup := m.pool.MakeSubLookup()
+
+	m.pool.Range(func(h node.Hash, entry *node.NodeEntry) bool {
+		// Check stop signal before each node.
+		select {
+		case <-m.stopCh:
+			return false
+		default:
+		}
+
+		if entry.IsDisabledBySubscriptions(subLookup) {
+			return true
+		}
+		if entry.Outbound.Load() == nil {
+			return true
+		}
+
+		// Fire probe event for metrics parity.
+		if m.onProbeEvent != nil {
+			m.onProbeEvent("quality")
+		}
+
+		m.performNodeQualityCheck(h, profile, opts)
+		return true
+	})
 }
 
 // ---------------------------------------------------------------------------

@@ -7,6 +7,48 @@ import (
 )
 
 // ---------------------------------------------------------------------------
+// Node action: POST /api/v1/nodes/{hash}/actions/probe-quality
+// ---------------------------------------------------------------------------
+
+// HandleNodeActionProbeQuality returns a handler for probe-quality on a single
+// node. Unlike proxy-check, this endpoint does not accept a request body — it
+// always uses the current runtime quality profile, options, and scoring policy.
+// It is a thin wrapper over ProbeQualitySync.
+func HandleNodeActionProbeQuality(cp *service.ControlPlaneService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		hash := PathParam(r, "hash")
+
+		result, err := cp.CheckProbeQuality(hash)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		WriteJSON(w, http.StatusOK, result)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Trigger all: POST /api/v1/proxy-check/actions/trigger-all
+// ---------------------------------------------------------------------------
+
+// HandleTriggerAllQualityProbes triggers an async quality sweep across all
+// eligible nodes. Returns 202 with candidate_count and coalesced fields.
+// Returns an error (not 202) when the queue rejects the task.
+func HandleTriggerAllQualityProbes(cp *service.ControlPlaneService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		result, err := cp.TriggerAllQualityProbes()
+		if err != nil {
+			// Any error here (incl. queue rejection) is returned as an error
+			// response, NOT 202 — the API contract guarantees 202 only on
+			// successful acceptance.
+			writeServiceError(w, err)
+			return
+		}
+		WriteJSON(w, http.StatusAccepted, result)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Node action: POST /api/v1/nodes/{hash}/actions/proxy-check
 // ---------------------------------------------------------------------------
 
