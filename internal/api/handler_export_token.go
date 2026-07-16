@@ -309,6 +309,13 @@ func HandleNodePoolExport(cp *service.ControlPlaneService) http.HandlerFunc {
 				tag = prefix
 			}
 
+			// Reconcile export tag with detected egress region.
+			region := entry.GetRegion(nil)
+			if cp.GeoIP != nil {
+				region = entry.GetRegion(cp.GeoIP.Lookup)
+			}
+			tag = reconcileExportName(tag, region)
+
 			outboundType := ""
 			var rawMap map[string]any
 			if err := json.Unmarshal(rawCopy, &rawMap); err == nil {

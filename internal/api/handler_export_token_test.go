@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -854,6 +855,48 @@ func setupExportTest(t *testing.T) (*Server, *service.ControlPlaneService, strin
 	return srv, cp, tokenValue
 }
 
+// setupReconciledExportTest creates a single-node pool with a controlled
+// tag and explicit egress region, and returns the server and export token.
+// The subscription name is "sub-a", so the display tag has the form "sub-a/<tag>".
+// When setEgressIP is false, no egress IP is assigned.
+// When geoIPEnabled is false, cp.GeoIP is set to nil so the handler takes the
+// cp.GeoIP == nil branch (GetRegion with nil geoLookup).
+func setupReconciledExportTest(t *testing.T, raw, tag, region string, setEgressIP, geoIPEnabled bool) (*Server, string) {
+	t.Helper()
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	if !geoIPEnabled {
+		cp.GeoIP = nil
+	}
+
+	sub := subscription.NewSubscription("11111111-1111-1111-1111-111111111111", "sub-a", "https://example.com/a", true, false)
+	cp.SubMgr.Register(sub)
+
+	egressAddr := "203.0.113.10"
+	if !setEgressIP {
+		egressAddr = ""
+	}
+	addNodeForNodeListTestWithTag(t, cp, sub, raw, egressAddr, tag)
+	markNodeHealthyForNodeListTest(t, cp, raw)
+
+	hash := node.HashFromRawOptions([]byte(raw))
+	entry, ok := cp.Pool.GetEntry(hash)
+	if !ok {
+		t.Fatalf("node %s missing after add", hash.Hex())
+	}
+	entry.SetEgressRegion(region)
+
+	createResp := doJSONRequest(t, srv, http.MethodPost, "/api/v1/export-tokens", map[string]any{
+		"name": "export-test",
+	}, true)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("setup: create token: got %d body=%s", createResp.Code, createResp.Body.String())
+	}
+	createBody := decodeJSONMap(t, createResp)
+	tokenValue, _ := createBody["token"].(string)
+	return srv, tokenValue
+}
+
 func assertContentType(t *testing.T, resp *httptest.ResponseRecorder, expected string) {
 	t.Helper()
 	ct := resp.Header().Get("Content-Type")
@@ -983,6 +1026,170 @@ func TestNodePoolExport_ClashTrojanWS_QuotedPassword(t *testing.T) {
 	body := resp.Body.String()
 	if !strings.Contains(body, `password: "666"`) {
 		t.Fatalf("raw YAML password should be a quoted scalar, got body=%q", body)
+	}
+}
+
+func TestNodePoolExport_ReconciledName(t *testing.T) {
+	// Common raw options for the SS node used in all subtests.
+	// When geoIPEnabled=true (default): the reconciling subtests set an explicit
+	// entry region via SetEgressRegion, which GetRegion returns immediately
+	// without reaching GeoIP fallback. The no-region no-op subtest clears the
+	// explicit region and has no egress IP, so GetRegion returns "" regardless
+	// of the GeoIP service (which uses NoOpOpen in this test infrastructure).
+	// When geoIPEnabled=false: cp.GeoIP is set to nil, so the handler takes the
+	// cp.GeoIP==nil branch and GetRegion receives nil geoLookup — only returns
+	// explicit region or "".
+	const rawSS = `{"type":"ss","server":"1.1.1.1","port":443,"method":"chacha20-ietf-poly1305","password":"testpass"}`
+
+	tests := []struct {
+		name           string
+		tag            string
+		region         string
+		setEgressIP    bool
+		geoIPEnabled   bool
+		wantReconciled string
+	}{
+		// ---- GeoIP-enabled (default) ----
+		{
+			name:           "matching bare marker canonicalizes",
+			tag:            "hk-node",
+			region:         "hk",
+			setEgressIP:    true,
+			geoIPEnabled:   true,
+			wantReconciled: "sub-a/[HK] node",
+		},
+		{
+			name:           "mismatching bare marker replaced",
+			tag:            "hk-node",
+			region:         "us",
+			setEgressIP:    true,
+			geoIPEnabled:   true,
+			wantReconciled: "sub-a/[US] node",
+		},
+		{
+			name:           "chinese opaque prepends canonical marker",
+			tag:            "美国节点01",
+			region:         "us",
+			setEgressIP:    true,
+			geoIPEnabled:   true,
+			wantReconciled: "sub-a/[US] 美国节点01",
+		},
+		{
+			name:           "unknown region no-op",
+			tag:            "hk-node",
+			region:         "xx",
+			setEgressIP:    true,
+			geoIPEnabled:   true,
+			wantReconciled: "sub-a/hk-node",
+		},
+		{
+			// No explicit region AND no egress IP → GetRegion returns "".
+			name:           "no region no-op",
+			tag:            "hk-node",
+			region:         "",
+			setEgressIP:    false,
+			geoIPEnabled:   true,
+			wantReconciled: "sub-a/hk-node",
+		},
+
+		// ---- cp.GeoIP == nil path ----
+		{
+			// GeoIP nil + explicit valid loc → reconciliation applies.
+			name:           "geoip nil with explicit region",
+			tag:            "hk-node",
+			region:         "hk",
+			setEgressIP:    true,
+			geoIPEnabled:   false,
+			wantReconciled: "sub-a/[HK] node",
+		},
+		{
+			// GeoIP nil + no explicit region + no egress IP → no-op.
+			name:           "geoip nil no region",
+			tag:            "hk-node",
+			region:         "",
+			setEgressIP:    false,
+			geoIPEnabled:   false,
+			wantReconciled: "sub-a/hk-node",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, tokenValue := setupReconciledExportTest(t, rawSS, tt.tag, tt.region, tt.setEgressIP, tt.geoIPEnabled)
+			exportBase := "/api/v1/node-pool/export?export_token=" + tokenValue
+
+			// ---- Sing-box: verify tag and raw options ----
+			resp := doJSONRequest(t, srv, http.MethodGet, exportBase+"&format=sing-box", nil, false)
+			if resp.Code != http.StatusOK {
+				t.Fatalf("sing-box: status=%d body=%s", resp.Code, resp.Body.String())
+			}
+			var sb struct {
+				Outbounds []map[string]any `json:"outbounds"`
+			}
+			if err := json.Unmarshal(resp.Body.Bytes(), &sb); err != nil {
+				t.Fatalf("sing-box unmarshal: %v body=%s", err, resp.Body.String())
+			}
+			if len(sb.Outbounds) != 1 {
+				t.Fatalf("sing-box: got %d outbounds, want 1", len(sb.Outbounds))
+			}
+			ob := sb.Outbounds[0]
+			if tag, _ := ob["tag"].(string); tag != tt.wantReconciled {
+				t.Errorf("sing-box tag = %q, want %q", tag, tt.wantReconciled)
+			}
+			// Verify raw options are preserved (non-tag fields from rawSS).
+			for key, want := range map[string]any{
+				"server":   "1.1.1.1",
+				"port":     float64(443),
+				"method":   "chacha20-ietf-poly1305",
+				"password": "testpass",
+			} {
+				if got, ok := ob[key]; !ok || got != want {
+					t.Errorf("sing-box %s = %v, want %v (present=%v)", key, got, want, ok)
+				}
+			}
+
+			// ---- Clash: verify name in YAML proxy ----
+			resp = doJSONRequest(t, srv, http.MethodGet, exportBase+"&format=clash", nil, false)
+			if resp.Code != http.StatusOK {
+				t.Fatalf("clash: status=%d body=%s", resp.Code, resp.Body.String())
+			}
+			var clashDoc struct {
+				Proxies []map[string]any `yaml:"proxies"`
+			}
+			if err := yaml.Unmarshal(resp.Body.Bytes(), &clashDoc); err != nil {
+				t.Fatalf("clash unmarshal: %v body=%s", err, resp.Body.String())
+			}
+			if len(clashDoc.Proxies) != 1 {
+				t.Fatalf("clash: got %d proxies, want 1", len(clashDoc.Proxies))
+			}
+			if name, _ := clashDoc.Proxies[0]["name"].(string); name != tt.wantReconciled {
+				t.Errorf("clash name = %q, want %q", name, tt.wantReconciled)
+			}
+
+			// ---- URI: verify fragment contains reconciled name ----
+			resp = doJSONRequest(t, srv, http.MethodGet, exportBase+"&format=uri", nil, false)
+			if resp.Code != http.StatusOK {
+				t.Fatalf("uri: status=%d body=%s", resp.Code, resp.Body.String())
+			}
+			body := resp.Body.String()
+			expectedFragment := url.QueryEscape(tt.wantReconciled)
+			if !strings.Contains(body, "#"+expectedFragment) {
+				t.Errorf("uri body missing fragment %q: body=%q", expectedFragment, body)
+			}
+
+			// ---- Base64: decode and verify same fragment ----
+			resp = doJSONRequest(t, srv, http.MethodGet, exportBase+"&format=base64", nil, false)
+			if resp.Code != http.StatusOK {
+				t.Fatalf("base64: status=%d body=%s", resp.Code, resp.Body.String())
+			}
+			decoded, err := base64.StdEncoding.DecodeString(resp.Body.String())
+			if err != nil {
+				t.Fatalf("base64 decode: %v body=%q", err, resp.Body.String())
+			}
+			if !strings.Contains(string(decoded), "#"+expectedFragment) {
+				t.Errorf("base64 decoded missing fragment %q: decoded=%q", expectedFragment, string(decoded))
+			}
+		})
 	}
 }
 
