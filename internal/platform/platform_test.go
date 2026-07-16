@@ -503,6 +503,70 @@ func TestPlatform_EvaluateNode_UnknownProtocolIncludeRejected(t *testing.T) {
 	}
 }
 
+func TestPlatform_EvaluateNode_ProtocolFilterIncludeTuic(t *testing.T) {
+	p := NewPlatform("p1", "Test", nil, nil)
+	p.ProtocolFilters = []string{"tuic"}
+	rawOptions := []byte(`{"type":"tuic"}`)
+	h := makeHash(string(rawOptions))
+	entry := makeFullyRoutableEntryWithRawOptions(h, rawOptions, "sub1")
+
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+
+	if p.View().Size() != 1 {
+		t.Fatal("tuic node should be routable with tuic protocol include filter")
+	}
+}
+
+func TestPlatform_EvaluateNode_ProtocolFilterExcludeTuic(t *testing.T) {
+	p := NewPlatform("p1", "Test", nil, nil)
+	p.ExcludeProtocolFilters = []string{"tuic"}
+	rawOptions := []byte(`{"type":"tuic"}`)
+	h := makeHash(string(rawOptions))
+	entry := makeFullyRoutableEntryWithRawOptions(h, rawOptions, "sub1")
+
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+
+	if p.View().Size() != 0 {
+		t.Fatal("tuic node should be excluded by tuic protocol exclude filter")
+	}
+}
+
+func TestPlatform_EvaluateNode_ProtocolFilterIncludeHysteria(t *testing.T) {
+	p := NewPlatform("p1", "Test", nil, nil)
+	p.ProtocolFilters = []string{"hysteria"}
+	rawOptions := []byte(`{"type":"hysteria"}`)
+	h := makeHash(string(rawOptions))
+	entry := makeFullyRoutableEntryWithRawOptions(h, rawOptions, "sub1")
+
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+
+	if p.View().Size() != 1 {
+		t.Fatal("hysteria node should be routable with hysteria protocol include filter")
+	}
+}
+
+func TestPlatform_EvaluateNode_ProtocolFilterExcludeHysteria(t *testing.T) {
+	p := NewPlatform("p1", "Test", nil, nil)
+	p.ExcludeProtocolFilters = []string{"hysteria"}
+	rawOptions := []byte(`{"type":"hysteria"}`)
+	h := makeHash(string(rawOptions))
+	entry := makeFullyRoutableEntryWithRawOptions(h, rawOptions, "sub1")
+
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+
+	if p.View().Size() != 0 {
+		t.Fatal("hysteria node should be excluded by hysteria protocol exclude filter")
+	}
+}
+
 // TestPlatform_EvaluateNode_QualityGradeFilter verifies grade-based quality filtering.
 func TestPlatform_EvaluateNode_QualityGradeFilter(t *testing.T) {
 	p := NewPlatform("p1", "Test", nil, nil)

@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/base64"
 	"encoding/json"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
@@ -1215,6 +1216,151 @@ func TestConvertHysteria2_FractionalBandwidth(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// outboundToClashProxy — TUIC structured tests
+// ---------------------------------------------------------------------------
+
+func TestConvertTUIC_Full(t *testing.T) {
+	raw := `{
+		"type":"tuic","server":"tuic.example.com","server_port":5000,
+		"uuid":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		"password":"tuicpass",
+		"congestion_control":"bbr",
+		"udp_relay_mode":"quic",
+		"zero_rtt_handshake":true,
+		"heartbeat":"10s",
+		"tls":{
+			"enabled":true,"server_name":"sni.example.com",
+			"insecure":true,
+			"alpn":["h3","h2"],
+			"disable_sni":true
+		}
+	}`
+	want := map[string]any{
+		"name":                  "tuic-full",
+		"type":                  "tuic",
+		"server":                "tuic.example.com",
+		"port":                  5000,
+		"uuid":                  "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		"password":              "tuicpass",
+		"udp":                   true,
+		"sni":                   "sni.example.com",
+		"skip-cert-verify":      true,
+		"alpn":                  []string{"h3", "h2"},
+		"disable-sni":           true,
+		"reduce-rtt":            true,
+		"udp-relay-mode":        "quic",
+		"congestion-controller": "bbr",
+		"heartbeat-interval":    10000,
+	}
+	got := convertOutbound(t, raw, "tuic-full")
+	if diff := diffMaps(want, got); diff != "" {
+		t.Errorf("mismatch:\n%s", diff)
+	}
+}
+
+func TestConvertTUIC_PasswordOptional(t *testing.T) {
+	raw := `{
+		"type":"tuic","server":"tuic.example.com","server_port":5000,
+		"uuid":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		"congestion_control":"bbr"
+	}`
+	want := map[string]any{
+		"name":                  "tuic-nopass",
+		"type":                  "tuic",
+		"server":                "tuic.example.com",
+		"port":                  5000,
+		"uuid":                  "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		"udp":                   true,
+		"congestion-controller": "bbr",
+	}
+	got := convertOutbound(t, raw, "tuic-nopass")
+	if diff := diffMaps(want, got); diff != "" {
+		t.Errorf("mismatch:\n%s", diff)
+	}
+}
+
+func TestConvertTUIC_EmptyUUID(t *testing.T) {
+	raw := `{"type":"tuic","server":"tuic.example.com","server_port":5000,"uuid":""}`
+	got := convertOutbound(t, raw, "tuic-nouuid")
+	if got != nil {
+		t.Errorf("expected nil for empty uuid, got %v", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// outboundToClashProxy — Hysteria v1 structured tests
+// ---------------------------------------------------------------------------
+
+func TestConvertHysteria1_Full(t *testing.T) {
+	raw := `{
+		"type":"hysteria","server":"hysteria.example.com","server_port":8443,
+		"auth_str":"auth123",
+		"up":"30 Mbps","down":"100 Mbps",
+		"obfs":"fuck",
+		"server_ports":["443","8000:9000"],
+		"recv_window_conn":65535,
+		"recv_window":1048576,
+		"disable_mtu_discovery":true,
+		"hop_interval":"12s",
+		"network":"udp",
+		"tls":{
+			"enabled":true,"server_name":"sni.example.com",
+			"insecure":true,
+			"alpn":["h3"],
+			"utls":{"enabled":true,"fingerprint":"chrome"}
+		}
+	}`
+	want := map[string]any{
+		"name":                  "hysteria1-full",
+		"type":                  "hysteria",
+		"server":                "hysteria.example.com",
+		"port":                  8443,
+		"udp":                   true,
+		"auth-str":              "auth123",
+		"up":                    "30 Mbps",
+		"down":                  "100 Mbps",
+		"obfs":                  "fuck",
+		"ports":                 "443,8000-9000",
+		"recv-window-conn":      65535,
+		"recv-window":           1048576,
+		"disable-mtu-discovery": true,
+		"hop-interval":          12,
+		"protocol":              "udp",
+		"sni":                   "sni.example.com",
+		"skip-cert-verify":      true,
+		"alpn":                  []string{"h3"},
+		"fingerprint":           "chrome",
+	}
+	got := convertOutbound(t, raw, "hysteria1-full")
+	if diff := diffMaps(want, got); diff != "" {
+		t.Errorf("mismatch:\n%s", diff)
+	}
+}
+
+func TestConvertHysteria1_UpMbpsCompat(t *testing.T) {
+	// When canonical has up_mbps/down_mbps numeric instead of up/down string.
+	raw := `{
+		"type":"hysteria","server":"hysteria.example.com","server_port":8443,
+		"up_mbps":50,"down_mbps":200,
+		"tls":{"enabled":true,"server_name":"sni.example.com"}
+	}`
+	want := map[string]any{
+		"name":   "hysteria1-mbps",
+		"type":   "hysteria",
+		"server": "hysteria.example.com",
+		"port":   8443,
+		"udp":    true,
+		"up":     50,
+		"down":   200,
+		"sni":    "sni.example.com",
+	}
+	got := convertOutbound(t, raw, "hysteria1-mbps")
+	if diff := diffMaps(want, got); diff != "" {
+		t.Errorf("mismatch:\n%s", diff)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // outboundToClashProxy — Shadowsocks Phase 2 structured tests
 // ---------------------------------------------------------------------------
 
@@ -1620,6 +1766,115 @@ func TestURI_Hysteria2_ScalarObfs(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// URI — TUIC
+// ---------------------------------------------------------------------------
+
+func TestURI_TUIC_Full(t *testing.T) {
+	raw := `{
+		"type":"tuic","server":"2001:db8::1","server_port":5000,
+		"uuid":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		"password":"tuic:p@ss",
+		"congestion_control":"bbr",
+		"udp_relay_mode":"quic",
+		"heartbeat":"10s",
+		"tls":{
+			"enabled":true,"server_name":"sni.example.com",
+			"insecure":true,
+			"alpn":["h3","h2"]
+		}
+	}`
+	o := ExportOutbound{Tag: "TUIC 节点/1", Raw: json.RawMessage(raw)}
+	uri := outboundToURI(o)
+	if uri == "" {
+		t.Fatal("expected non-empty URI")
+	}
+	// Use net/url to parse and verify structure.
+	parsed, err := url.Parse(uri)
+	if err != nil {
+		t.Fatalf("url.Parse error: %v", err)
+	}
+	if parsed.Scheme != "tuic" {
+		t.Errorf("scheme = %q, want tuic", parsed.Scheme)
+	}
+	if parsed.Host != "[2001:db8::1]:5000" {
+		t.Errorf("host = %q, want [2001:db8::1]:5000", parsed.Host)
+	}
+	if parsed.Fragment != "TUIC 节点/1" {
+		t.Errorf("fragment = %q, want TUIC 节点/1", parsed.Fragment)
+	}
+	user := parsed.User
+	if user == nil {
+		t.Fatal("expected userinfo")
+	}
+	gotUUID := user.Username()
+	if gotUUID != "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" {
+		t.Errorf("username (uuid) = %q, want aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", gotUUID)
+	}
+	gotPass, _ := user.Password()
+	if gotPass != "tuic:p@ss" {
+		t.Errorf("password = %q, want tuic:p@ss", gotPass)
+	}
+	q := parsed.Query()
+	if q.Get("congestion_control") != "bbr" {
+		t.Errorf("congestion_control = %q, want bbr", q.Get("congestion_control"))
+	}
+	if q.Get("udp_relay_mode") != "quic" {
+		t.Errorf("udp_relay_mode = %q, want quic", q.Get("udp_relay_mode"))
+	}
+	if q.Get("sni") != "sni.example.com" {
+		t.Errorf("sni = %q, want sni.example.com", q.Get("sni"))
+	}
+	if q.Get("allow_insecure") != "1" {
+		t.Errorf("allow_insecure = %q, want 1", q.Get("allow_insecure"))
+	}
+	if q.Get("heartbeat") != "10000" {
+		t.Errorf("heartbeat = %q, want 10000", q.Get("heartbeat"))
+	}
+	// ALPN: can be multi-valued (repeated) or single.  Accept both.
+	alpnVals := q["alpn"]
+	if len(alpnVals) == 0 {
+		t.Error("alpn param missing, want at least one value")
+	}
+}
+
+func TestURI_TUIC_NoPassword(t *testing.T) {
+	raw := `{
+		"type":"tuic","server":"tuic.example.com","server_port":5000,
+		"uuid":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	}`
+	o := ExportOutbound{Tag: "tuic-nopass-uri", Raw: json.RawMessage(raw)}
+	uri := outboundToURI(o)
+	if uri != "" {
+		t.Errorf("expected empty URI for missing password, got %q", uri)
+	}
+}
+
+func TestURI_TUIC_NoUUID(t *testing.T) {
+	raw := `{
+		"type":"tuic","server":"tuic.example.com","server_port":5000,
+		"password":"pass"
+	}`
+	o := ExportOutbound{Tag: "tuic-nouuid-uri", Raw: json.RawMessage(raw)}
+	uri := outboundToURI(o)
+	if uri != "" {
+		t.Errorf("expected empty URI for missing uuid, got %q", uri)
+	}
+}
+
+func TestURI_Hysteria_Empty(t *testing.T) {
+	// Hysteria v1 has no standard URI representation; must return empty.
+	raw := `{
+		"type":"hysteria","server":"hysteria.example.com","server_port":8443,
+		"auth_str":"auth123"
+	}`
+	o := ExportOutbound{Tag: "hy1-uri", Raw: json.RawMessage(raw)}
+	uri := outboundToURI(o)
+	if uri != "" {
+		t.Errorf("expected empty URI for hysteria v1, got %q", uri)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Round-trip: Clash JSON → canonical sing-box → Clash proxy map
 // ---------------------------------------------------------------------------
 
@@ -1871,6 +2126,91 @@ func TestRoundTrip_ClashIngest_Export(t *testing.T) {
 			"udp":      true,
 			"tls":      true,
 			"sni":      "hy2-bad.example.com",
+		}
+		if diff := diffMaps(want, got); diff != "" {
+			t.Errorf("mismatch:\n%s", diff)
+		}
+	})
+
+	t.Run("TUIC_full", func(t *testing.T) {
+		input := `{"proxies":[{
+			"name":"tuic-rt","type":"tuic","server":"tuic.example.com","port":5000,
+			"uuid":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+			"password":"tuicpass",
+			"congestion-controller":"bbr",
+			"udp-relay-mode":"quic",
+			"reduce-rtt":true,
+			"heartbeat-interval":10000,
+			"sni":"sni.example.com",
+			"skip-cert-verify":true,
+			"alpn":["h3","h2"],
+			"disable-sni":true
+		}]}`
+		got := parseClashRoundTrip(t, input)
+		want := map[string]any{
+			"name":                  "tuic-rt",
+			"type":                  "tuic",
+			"server":                "tuic.example.com",
+			"port":                  5000,
+			"uuid":                  "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+			"password":              "tuicpass",
+			"udp":                   true,
+			"congestion-controller": "bbr",
+			"udp-relay-mode":        "quic",
+			"reduce-rtt":            true,
+			"heartbeat-interval":    10000,
+			"sni":                   "sni.example.com",
+			"skip-cert-verify":      true,
+			"alpn":                  []string{"h3", "h2"},
+			"disable-sni":           true,
+		}
+		if diff := diffMaps(want, got); diff != "" {
+			t.Errorf("mismatch:\n%s", diff)
+		}
+	})
+
+	t.Run("Hysteria1_full", func(t *testing.T) {
+		// The Clash parser reads uTLS fingerprints from "client-fingerprint"
+		// and stores them in tls.utls.fingerprint.  Our export then maps
+		// that to Mihomo's "fingerprint" key for hysteria v1, so the
+		// round-trip is: client-fingerprint → utls.fingerprint → fingerprint.
+		input := `{"proxies":[{
+			"name":"hy1-rt","type":"hysteria","server":"hy1.example.com","port":8443,
+			"auth-str":"pass123",
+			"up":"30 Mbps","down":"100 Mbps",
+			"obfs":"fuck",
+			"ports":"443,8000-9000",
+			"recv-window-conn":65535,
+			"recv-window":1048576,
+			"disable-mtu-discovery":true,
+			"hop-interval":12,
+			"protocol":"udp",
+			"sni":"hy1.example.com",
+			"skip-cert-verify":true,
+			"alpn":["h3"],
+			"client-fingerprint":"chrome"
+		}]}`
+		got := parseClashRoundTrip(t, input)
+		want := map[string]any{
+			"name":                  "hy1-rt",
+			"type":                  "hysteria",
+			"server":                "hy1.example.com",
+			"port":                  8443,
+			"udp":                   true,
+			"auth-str":              "pass123",
+			"up":                    "30 Mbps",
+			"down":                  "100 Mbps",
+			"obfs":                  "fuck",
+			"ports":                 "443,8000-9000",
+			"recv-window-conn":      65535,
+			"recv-window":           1048576,
+			"disable-mtu-discovery": true,
+			"hop-interval":          12,
+			"protocol":              "udp",
+			"sni":                   "hy1.example.com",
+			"skip-cert-verify":      true,
+			"alpn":                  []string{"h3"},
+			"fingerprint":           "chrome",
 		}
 		if diff := diffMaps(want, got); diff != "" {
 			t.Errorf("mismatch:\n%s", diff)

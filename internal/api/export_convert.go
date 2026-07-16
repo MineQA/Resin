@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 	"time"
@@ -71,6 +72,10 @@ func outboundToClashProxy(o ExportOutbound) map[string]any {
 		return convertVLess(o.Tag, m, server, port)
 	case "hysteria2", "hy2":
 		return convertHysteria2(o.Tag, m, server, port)
+	case "hysteria":
+		return convertHysteria1(o.Tag, m, server, port)
+	case "tuic":
+		return convertTUIC(o.Tag, m, server, port)
 	case "http":
 		return convertHTTP(o.Tag, m, server, port)
 	case "socks", "socks5":
@@ -874,6 +879,198 @@ func extractHY2Obfs(m map[string]any) (obfs, obfsPass string) {
 	return
 }
 
+// convertTUIC converts a canonical TUIC outbound to a Clash proxy map.
+func convertTUIC(tag string, m map[string]any, server string, port int) map[string]any {
+	uuid, _ := m["uuid"].(string)
+	if uuid == "" {
+		return nil
+	}
+	proxy := map[string]any{
+		"name":   tag,
+		"type":   "tuic",
+		"server": server,
+		"port":   port,
+		"uuid":   uuid,
+		"udp":    true,
+	}
+	// Password is optional (canonical nodes may lack it without being invalid)
+	if password, ok := m["password"].(string); ok && password != "" {
+		proxy["password"] = password
+	}
+	// TLS fields (flattened to top-level Clash keys)
+	if tlsObj, ok := m["tls"].(map[string]any); ok {
+		if sni, ok := tlsObj["server_name"].(string); ok && sni != "" {
+			proxy["sni"] = sni
+		}
+		if v, ok := tlsObj["insecure"]; ok && toBool(v) {
+			proxy["skip-cert-verify"] = true
+		}
+		if v, ok := tlsObj["alpn"]; ok {
+			switch arr := v.(type) {
+			case string:
+				if s := strings.TrimSpace(arr); s != "" {
+					proxy["alpn"] = []string{s}
+				}
+			case []any:
+				alpn := make([]string, 0, len(arr))
+				for _, item := range arr {
+					if s, ok := item.(string); ok {
+						alpn = append(alpn, s)
+					}
+				}
+				if len(alpn) > 0 {
+					proxy["alpn"] = alpn
+				}
+			case []string:
+				if len(arr) > 0 {
+					proxy["alpn"] = arr
+				}
+			}
+		}
+		if v, ok := tlsObj["disable_sni"]; ok && toBool(v) {
+			proxy["disable-sni"] = true
+		}
+	}
+	// zero_rtt_handshake → reduce-rtt
+	if v, ok := m["zero_rtt_handshake"]; ok && toBool(v) {
+		proxy["reduce-rtt"] = true
+	}
+	// udp_relay_mode → udp-relay-mode
+	if urm, ok := m["udp_relay_mode"].(string); ok && urm != "" {
+		proxy["udp-relay-mode"] = urm
+	}
+	// congestion_control → congestion-controller
+	if cc, ok := m["congestion_control"].(string); ok && cc != "" {
+		proxy["congestion-controller"] = cc
+	}
+	// heartbeat duration string → heartbeat-interval (milliseconds integer)
+	if hb, ok := m["heartbeat"].(string); ok && hb != "" {
+		d, err := time.ParseDuration(hb)
+		if err == nil && d > 0 {
+			proxy["heartbeat-interval"] = int(d.Milliseconds())
+		}
+	}
+	return proxy
+}
+
+// convertHysteria1 converts a canonical Hysteria v1 outbound to a Clash proxy map.
+func convertHysteria1(tag string, m map[string]any, server string, port int) map[string]any {
+	proxy := map[string]any{
+		"name":   tag,
+		"type":   "hysteria",
+		"server": server,
+		"port":   port,
+		"udp":    true,
+	}
+	// auth_str / auth → auth-str
+	authStr := extractAuth(m)
+	if authStr != "" {
+		proxy["auth-str"] = authStr
+	}
+	// up/down – canonical string values (e.g. "30 Mbps") take precedence
+	if up, ok := m["up"].(string); ok && up != "" {
+		proxy["up"] = up
+	} else if upMbps, ok := m["up_mbps"]; ok {
+		if n, ok := toFloat(upMbps); ok && n > 0 {
+			proxy["up"] = toNumberOrFloat(n)
+		}
+	}
+	if down, ok := m["down"].(string); ok && down != "" {
+		proxy["down"] = down
+	} else if downMbps, ok := m["down_mbps"]; ok {
+		if n, ok := toFloat(downMbps); ok && n > 0 {
+			proxy["down"] = toNumberOrFloat(n)
+		}
+	}
+	// TLS fields (flattened to top-level)
+	if tlsObj, ok := m["tls"].(map[string]any); ok {
+		if sni, ok := tlsObj["server_name"].(string); ok && sni != "" {
+			proxy["sni"] = sni
+		}
+		if v, ok := tlsObj["insecure"]; ok && toBool(v) {
+			proxy["skip-cert-verify"] = true
+		}
+		if v, ok := tlsObj["alpn"]; ok {
+			switch arr := v.(type) {
+			case string:
+				if s := strings.TrimSpace(arr); s != "" {
+					proxy["alpn"] = []string{s}
+				}
+			case []any:
+				alpn := make([]string, 0, len(arr))
+				for _, item := range arr {
+					if s, ok := item.(string); ok {
+						alpn = append(alpn, s)
+					}
+				}
+				if len(alpn) > 0 {
+					proxy["alpn"] = alpn
+				}
+			case []string:
+				if len(arr) > 0 {
+					proxy["alpn"] = arr
+				}
+			}
+		}
+		// uTLS fingerprint for Hysteria v1 → "fingerprint" (not client-fingerprint)
+		if utls, ok := tlsObj["utls"].(map[string]any); ok {
+			if fp, ok := utls["fingerprint"].(string); ok && fp != "" {
+				proxy["fingerprint"] = fp
+			}
+		}
+	}
+	// obfs scalar
+	if obfs, ok := m["obfs"].(string); ok && obfs != "" {
+		proxy["obfs"] = obfs
+	}
+	// server_ports → ports (reuse HY2 helper)
+	if portsStr := convertServerPorts(m); portsStr != "" {
+		proxy["ports"] = portsStr
+	}
+	// recv_window_conn → recv-window-conn
+	if rwc, ok := m["recv_window_conn"]; ok {
+		if n, ok := toFloat(rwc); ok && n > 0 {
+			proxy["recv-window-conn"] = int(n)
+		}
+	}
+	// recv_window → recv-window
+	if rw, ok := m["recv_window"]; ok {
+		if n, ok := toFloat(rw); ok && n > 0 {
+			proxy["recv-window"] = int(n)
+		}
+	}
+	// disable_mtu_discovery → disable-mtu-discovery
+	if v, ok := m["disable_mtu_discovery"]; ok && toBool(v) {
+		proxy["disable-mtu-discovery"] = true
+	}
+	// hop_interval → hop-interval (seconds, reuse HY2 helper)
+	if hopSec, ok := convertHopInterval(m); ok {
+		proxy["hop-interval"] = hopSec
+	}
+	// network → protocol (non-empty)
+	if net, ok := m["network"].(string); ok && net != "" {
+		proxy["protocol"] = net
+	}
+	return proxy
+}
+
+// extractAuth extracts the auth string from canonical hysteria fields.
+// Canonical may store auth_str (string), auth (string), or auth ({"password":"..."}).
+func extractAuth(m map[string]any) string {
+	if v, ok := m["auth_str"].(string); ok && v != "" {
+		return v
+	}
+	if v, ok := m["auth"].(string); ok && v != "" {
+		return v
+	}
+	if v, ok := m["auth"].(map[string]any); ok {
+		if pwd, ok := v["password"].(string); ok && pwd != "" {
+			return pwd
+		}
+	}
+	return ""
+}
+
 func convertHTTP(tag string, m map[string]any, server string, port int) map[string]any {
 	ti := extractTLS(m)
 	proxy := map[string]any{
@@ -962,6 +1159,10 @@ func outboundToURI(o ExportOutbound) string {
 		return uriVLess(o.Tag, m, server, port)
 	case "hysteria2", "hy2":
 		return uriHysteria2(o.Tag, m, server, port)
+	case "hysteria":
+		return "" // Hysteria v1 has no standard URI representation
+	case "tuic":
+		return uriTUIC(o.Tag, m, server, port)
 	case "http":
 		return uriHTTP(o.Tag, m, server, port)
 	case "socks", "socks5":
@@ -1197,6 +1398,64 @@ func uriHysteria2(tag string, m map[string]any, server string, port int) string 
 		query = "?" + strings.Join(params, "&")
 	}
 	return fmt.Sprintf("hysteria2://%s@%s:%d%s#%s", url.QueryEscape(password), server, port, query, encodeFragment(tag))
+}
+
+// uriTUIC builds a tuic:// URI from canonical TUIC outbound fields.
+// UUID and password are both required; returns "" when either is missing.
+func uriTUIC(tag string, m map[string]any, server string, port int) string {
+	uuid, _ := m["uuid"].(string)
+	password, _ := m["password"].(string)
+	if uuid == "" || password == "" {
+		return ""
+	}
+	u := &url.URL{
+		Scheme:   "tuic",
+		User:     url.UserPassword(uuid, password),
+		Host:     net.JoinHostPort(server, fmt.Sprintf("%d", port)),
+		Fragment: tag,
+	}
+	q := url.Values{}
+	if cc, ok := m["congestion_control"].(string); ok && cc != "" {
+		q.Set("congestion_control", cc)
+	}
+	if urm, ok := m["udp_relay_mode"].(string); ok && urm != "" {
+		q.Set("udp_relay_mode", urm)
+	}
+	if tlsObj, ok := m["tls"].(map[string]any); ok {
+		if sni, ok := tlsObj["server_name"].(string); ok && sni != "" {
+			q.Set("sni", sni)
+		}
+		if v, ok := tlsObj["insecure"]; ok && toBool(v) {
+			q.Set("allow_insecure", "1")
+		}
+		if v, ok := tlsObj["alpn"]; ok {
+			switch arr := v.(type) {
+			case string:
+				if s := strings.TrimSpace(arr); s != "" {
+					q.Add("alpn", s)
+				}
+			case []any:
+				for _, item := range arr {
+					if s, ok := item.(string); ok {
+						q.Add("alpn", s)
+					}
+				}
+			case []string:
+				for _, s := range arr {
+					q.Add("alpn", s)
+				}
+			}
+		}
+	}
+	if hb, ok := m["heartbeat"].(string); ok && hb != "" {
+		if d, err := time.ParseDuration(hb); err == nil && d > 0 {
+			q.Set("heartbeat", fmt.Sprintf("%d", d.Milliseconds()))
+		}
+	}
+	if len(q) > 0 {
+		u.RawQuery = q.Encode()
+	}
+	return u.String()
 }
 
 func uriHTTP(tag string, m map[string]any, server string, port int) string {

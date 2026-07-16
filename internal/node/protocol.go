@@ -18,6 +18,8 @@ var protocolAliases = map[string]string{
 	"vmess1":      "vmess",
 	"trojan":      "trojan",
 	"vless":       "vless",
+	"tuic":        "tuic",
+	"hysteria":    "hysteria",
 	"hysteria2":   "hysteria2",
 	"hy2":         "hysteria2",
 	"anytls":      "anytls",

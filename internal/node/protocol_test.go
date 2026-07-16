@@ -25,6 +25,12 @@ func TestNormalizeProtocol(t *testing.T) {
 		{"trojan", "trojan"},
 		{"TROJAN", "trojan"},
 		{"vless", "vless"},
+		{"tuic", "tuic"},
+		{"TUIC", "tuic"},
+		{"  tuic  ", "tuic"},
+		{"hysteria", "hysteria"},
+		{"HYSTERIA", "hysteria"},
+		{"  hysteria  ", "hysteria"},
 		{"hysteria2", "hysteria2"},
 		{"hy2", "hysteria2"},
 		{"HY2", "hysteria2"},
@@ -37,7 +43,6 @@ func TestNormalizeProtocol(t *testing.T) {
 		{"ANYTLS", "anytls"},
 		{"  anytls  ", "anytls"},
 		// Unknown
-		{"tuic", ""},
 		{"wireguard", ""},
 		{"", ""},
 	}
@@ -88,7 +93,7 @@ func TestRawOptionsProtocol_NonStringType(t *testing.T) {
 }
 
 func TestRawOptionsProtocol_UnsupportedType(t *testing.T) {
-	raw := json.RawMessage(`{"type":"tuic"}`)
+	raw := json.RawMessage(`{"type":"wireguard"}`)
 	if got := RawOptionsProtocol(raw); got != "" {
 		t.Errorf("RawOptionsProtocol = %q, want empty", got)
 	}
@@ -98,6 +103,20 @@ func TestRawOptionsProtocol_Anytls(t *testing.T) {
 	raw := json.RawMessage(`{"type":"anytls","server":"1.1.1.1","port":443,"password":"x"}`)
 	if got := RawOptionsProtocol(raw); got != "anytls" {
 		t.Errorf("RawOptionsProtocol = %q, want %q", got, "anytls")
+	}
+}
+
+func TestRawOptionsProtocol_Tuic(t *testing.T) {
+	raw := json.RawMessage(`{"type":"tuic","server":"1.1.1.1","port":443,"password":"x"}`)
+	if got := RawOptionsProtocol(raw); got != "tuic" {
+		t.Errorf("RawOptionsProtocol = %q, want %q", got, "tuic")
+	}
+}
+
+func TestRawOptionsProtocol_Hysteria(t *testing.T) {
+	raw := json.RawMessage(`{"type":"hysteria","server":"1.1.1.1","port":443,"auth_str":"x"}`)
+	if got := RawOptionsProtocol(raw); got != "hysteria" {
+		t.Errorf("RawOptionsProtocol = %q, want %q", got, "hysteria")
 	}
 }
 
@@ -126,7 +145,7 @@ func TestCanonicalProtocols_NoDuplicates(t *testing.T) {
 }
 
 func TestCanonicalProtocols_ContainsExpectedSet(t *testing.T) {
-	expected := []string{"shadowsocks", "vmess", "trojan", "vless", "hysteria2", "anytls", "http", "socks"}
+	expected := []string{"shadowsocks", "vmess", "trojan", "vless", "tuic", "hysteria", "hysteria2", "anytls", "http", "socks"}
 	for _, exp := range expected {
 		found := false
 		for _, p := range CanonicalProtocols {

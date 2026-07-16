@@ -289,7 +289,7 @@ func TestPreviewFilter_ProtocolFilterUnknownProtocolIncludedRejected(t *testing.
 
 	_, err := svc.PreviewFilter(PreviewFilterRequest{
 		PlatformSpec: &PlatformSpecFilter{
-			ProtocolFilters: []string{"tuic"},
+			ProtocolFilters: []string{"wireguard"},
 		},
 	})
 	if err == nil {
@@ -314,7 +314,7 @@ func TestPreviewFilter_ProtocolFilterUnknownTypeNodeWithIncludeExcluded(t *testi
 	svc, _, _ := newPreviewFilterTestService(t)
 
 	// Add a node with unknown protocol type
-	raw := []byte(`{"type":"tuic","server":"3.3.3.3"}`)
+	raw := []byte(`{"type":"wireguard","server":"3.3.3.3"}`)
 	hash := node.HashFromRawOptions(raw)
 
 	// Mock GetEntry by directly putting the node in the pool
