@@ -62,6 +62,11 @@ type ExportOutbound struct {
 	Tag  string          `json:"tag"`
 	Type string          `json:"type"`
 	Raw  json.RawMessage `json:"-"`
+
+	// Internal fields for profile-mode naming (not serialized).
+	NodeHash string `json:"-"`
+	Region   string `json:"-"`
+	BaseTag  string `json:"-"`
 }
 
 // MarshalJSON implements json.Marshaler for ExportOutbound.
@@ -139,6 +144,18 @@ func HandleNodePoolExport(cp *service.ControlPlaneService) http.HandlerFunc {
 		default:
 			WriteError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
 				"format: supported formats are 'sing-box', 'clash', 'uri', 'base64'")
+			return
+		}
+
+		// --- Rule profile ID (clash-only) ---
+		profileID := r.URL.Query().Get("rule_profile_id")
+		if profileID != "" && format != "clash" {
+			WriteError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+				"rule_profile_id is only supported with format=clash")
+			return
+		}
+		if profileID != "" && !ValidateUUID(profileID) {
+			writeInvalidArgument(w, "rule_profile_id: must be a valid UUID")
 			return
 		}
 
@@ -308,6 +325,7 @@ func HandleNodePoolExport(cp *service.ControlPlaneService) http.HandlerFunc {
 				}
 				tag = prefix
 			}
+			baseTag := tag
 
 			// Reconcile export tag with detected egress region.
 			region := entry.GetRegion(nil)
@@ -325,9 +343,12 @@ func HandleNodePoolExport(cp *service.ControlPlaneService) http.HandlerFunc {
 			}
 
 			outbounds = append(outbounds, ExportOutbound{
-				Tag:  tag,
-				Type: outboundType,
-				Raw:  rawCopy,
+				Tag:      tag,
+				Type:     outboundType,
+				Raw:      rawCopy,
+				NodeHash: ns.NodeHash,
+				Region:   region,
+				BaseTag:  baseTag,
 			})
 		}
 
@@ -339,7 +360,11 @@ func HandleNodePoolExport(cp *service.ControlPlaneService) http.HandlerFunc {
 			WriteJSON(w, http.StatusOK, exportSingBoxResponse{Outbounds: page})
 
 		case "clash":
-			writeClash(w, page)
+			if profileID != "" {
+				writeClashWithProfile(w, page, cp, profileID)
+			} else {
+				writeClash(w, page)
+			}
 
 		case "uri":
 			writeURI(w, page)

@@ -1,6 +1,7 @@
 package state
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"reflect"
@@ -107,8 +108,8 @@ func TestMigrateStateDB_LegacyBaselineAdvancesToLatest(t *testing.T) {
 	if dirty {
 		t.Fatalf("schema_migrations dirty=true")
 	}
-	if version != stateVersionAddQualityCloudflareStatuses {
-		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddQualityCloudflareStatuses)
+	if version != stateVersionAddRuleProfiles {
+		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddRuleProfiles)
 	}
 	if ok, err := hasTableColumn(db, "subscriptions", "incremental_alive_nodes"); err != nil || !ok {
 		t.Fatalf("expected migrated column subscriptions.incremental_alive_nodes, ok=%v err=%v", ok, err)
@@ -118,6 +119,10 @@ func TestMigrateStateDB_LegacyBaselineAdvancesToLatest(t *testing.T) {
 	}
 	if ok, err := hasTableColumn(db, "subscriptions", "clash_fingerprint_policy"); err != nil || !ok {
 		t.Fatalf("expected migrated column subscriptions.clash_fingerprint_policy, ok=%v err=%v", ok, err)
+	}
+	// Verify rule_profiles table was created by latest migration.
+	if ok, err := hasTable(db, "rule_profiles"); err != nil || !ok {
+		t.Fatalf("expected rule_profiles table, ok=%v err=%v", ok, err)
 	}
 }
 
@@ -181,8 +186,8 @@ func TestMigrateStateDB_LegacyV8AdvancesToLatest(t *testing.T) {
 	if dirty {
 		t.Fatalf("schema_migrations dirty=true")
 	}
-	if version != stateVersionAddQualityCloudflareStatuses {
-		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddQualityCloudflareStatuses)
+	if version != stateVersionAddRuleProfiles {
+		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddRuleProfiles)
 	}
 
 	// v8 columns must still be present.
@@ -255,8 +260,8 @@ func TestMigrateStateDB_AddsIncrementalAliveNodesToLegacySubscriptions(t *testin
 	if dirty {
 		t.Fatalf("schema_migrations dirty=true")
 	}
-	if version != stateVersionAddQualityCloudflareStatuses {
-		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddQualityCloudflareStatuses)
+	if version != stateVersionAddRuleProfiles {
+		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddRuleProfiles)
 	}
 	if ok, err := hasTableColumn(db, "platforms", "passive_circuit_breaker_disabled"); err != nil || !ok {
 		t.Fatalf("expected migrated column platforms.passive_circuit_breaker_disabled, ok=%v err=%v", ok, err)
@@ -333,8 +338,8 @@ func TestMigrateStateDB_NormalizesLegacyRandomMissAction(t *testing.T) {
 	if dirty {
 		t.Fatalf("schema_migrations dirty=true")
 	}
-	if version != stateVersionAddQualityCloudflareStatuses {
-		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddQualityCloudflareStatuses)
+	if version != stateVersionAddRuleProfiles {
+		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddRuleProfiles)
 	}
 	if ok, err := hasTableColumn(db, "subscriptions", "incremental_alive_nodes"); err != nil || !ok {
 		t.Fatalf("expected migrated column subscriptions.incremental_alive_nodes, ok=%v err=%v", ok, err)
@@ -1169,6 +1174,402 @@ func TestPlatformCRUD_WithQualityCFStatuses(t *testing.T) {
 
 // TestMigrateStateDB_000011DownDropsCFStatusesColumn verifies rollback of
 // migration 000011.
+// --- Rule Profile Repo Tests ---
+
+func TestRuleProfileCRUD(t *testing.T) {
+	repo := newTestStateRepo(t)
+
+	// Create.
+	now := time.Now().UnixNano()
+	p1 := model.RuleProfile{
+		ID:           "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0001",
+		Name:         "My Profile",
+		TemplateYAML: "rules:\n  - MATCH,Proxy\n",
+		Enabled:      true,
+		CreatedAtNs:  now,
+		UpdatedAtNs:  now,
+	}
+	if err := repo.CreateRuleProfile(p1); err != nil {
+		t.Fatalf("CreateRuleProfile: %v", err)
+	}
+
+	// Get by ID.
+	got, err := repo.GetRuleProfile(p1.ID)
+	if err != nil {
+		t.Fatalf("GetRuleProfile: %v", err)
+	}
+	if got.ID != p1.ID || got.Name != p1.Name || got.TemplateYAML != p1.TemplateYAML || !got.Enabled {
+		t.Fatalf("GetRuleProfile mismatch: %+v", got)
+	}
+	if got.CreatedAtNs != now || got.UpdatedAtNs != now {
+		t.Fatalf("timestamps mismatch: created=%d updated=%d", got.CreatedAtNs, got.UpdatedAtNs)
+	}
+
+	// Get enabled by ID.
+	enabled, err := repo.GetEnabledRuleProfile(p1.ID)
+	if err != nil {
+		t.Fatalf("GetEnabledRuleProfile: %v", err)
+	}
+	if enabled.ID != p1.ID {
+		t.Fatalf("GetEnabledRuleProfile returned wrong id: %s", enabled.ID)
+	}
+
+	// List (should have 1).
+	all, err := repo.ListRuleProfiles(nil)
+	if err != nil {
+		t.Fatalf("ListRuleProfiles: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("ListRuleProfiles len=%d, want 1", len(all))
+	}
+
+	// Create another.
+	p2 := model.RuleProfile{
+		ID:           "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0002",
+		Name:         "Another Profile",
+		TemplateYAML: "rules:\n  - MATCH,Proxy\n",
+		Enabled:      false,
+		CreatedAtNs:  now + 1,
+		UpdatedAtNs:  now + 1,
+	}
+	if err := repo.CreateRuleProfile(p2); err != nil {
+		t.Fatalf("CreateRuleProfile p2: %v", err)
+	}
+
+	// List with enabled filter.
+	enabledOnly, err := repo.ListRuleProfiles(boolPtr(true))
+	if err != nil {
+		t.Fatalf("ListRuleProfiles enabled=true: %v", err)
+	}
+	if len(enabledOnly) != 1 || enabledOnly[0].ID != p1.ID {
+		t.Fatalf("enabled=true list: len=%d, expected 1 with id=%s", len(enabledOnly), p1.ID)
+	}
+
+	disabledOnly, err := repo.ListRuleProfiles(boolPtr(false))
+	if err != nil {
+		t.Fatalf("ListRuleProfiles enabled=false: %v", err)
+	}
+	if len(disabledOnly) != 1 || disabledOnly[0].ID != p2.ID {
+		t.Fatalf("enabled=false list: len=%d, expected 1 with id=%s", len(disabledOnly), p2.ID)
+	}
+
+	// GetEnabled on disabled profile returns ErrNotFound.
+	_, err = repo.GetEnabledRuleProfile(p2.ID)
+	if err != ErrNotFound {
+		t.Fatalf("GetEnabledRuleProfile on disabled: expected ErrNotFound, got %v", err)
+	}
+
+	// List order: by name COLLATE NOCASE, id (case-insensitive sort, tiebreak by id).
+	p3 := model.RuleProfile{
+		ID:           "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0003",
+		Name:         "zzz last",
+		TemplateYAML: "rules:\n  - MATCH,Proxy\n",
+		Enabled:      true,
+		CreatedAtNs:  now + 2,
+		UpdatedAtNs:  now + 2,
+	}
+	if err := repo.CreateRuleProfile(p3); err != nil {
+		t.Fatalf("CreateRuleProfile p3: %v", err)
+	}
+
+	all, err = repo.ListRuleProfiles(nil)
+	if err != nil {
+		t.Fatalf("ListRuleProfiles: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("len=%d, want 3", len(all))
+	}
+	// Order: "Another Profile" (p2) < "My Profile" (p1) < "zzz last" (p3)
+	if all[0].ID != p2.ID {
+		t.Fatalf("all[0] id=%s, expected p2(%s)", all[0].ID, p2.ID)
+	}
+	if all[1].ID != p1.ID {
+		t.Fatalf("all[1] id=%s, expected p1(%s)", all[1].ID, p1.ID)
+	}
+	if all[2].ID != p3.ID {
+		t.Fatalf("all[2] id=%s, expected p3(%s)", all[2].ID, p3.ID)
+	}
+
+	// Update.
+	now2 := time.Now().UnixNano()
+	if err := repo.UpdateRuleProfile(p1.ID, "Updated Name", "", nil, now2); err != nil {
+		t.Fatalf("UpdateRuleProfile name: %v", err)
+	}
+	got, err = repo.GetRuleProfile(p1.ID)
+	if err != nil {
+		t.Fatalf("GetRuleProfile after update: %v", err)
+	}
+	if got.Name != "Updated Name" {
+		t.Fatalf("name after update = %q, want %q", got.Name, "Updated Name")
+	}
+	if got.UpdatedAtNs != now2 {
+		t.Fatalf("updated_at_ns after name update = %d, want %d", got.UpdatedAtNs, now2)
+	}
+	if got.TemplateYAML != p1.TemplateYAML {
+		t.Fatalf("template changed unexpectedly: got %q, want %q", got.TemplateYAML, p1.TemplateYAML)
+	}
+
+	// Update enabled.
+	disabled := false
+	if err := repo.UpdateRuleProfile(p1.ID, "", "", &disabled, now2+1); err != nil {
+		t.Fatalf("UpdateRuleProfile enabled: %v", err)
+	}
+	got, err = repo.GetRuleProfile(p1.ID)
+	if err != nil {
+		t.Fatalf("GetRuleProfile after enabled update: %v", err)
+	}
+	if got.Enabled {
+		t.Fatal("expected profile to be disabled")
+	}
+
+	// Update template.
+	if err := repo.UpdateRuleProfile(p1.ID, "", "rules:\n  - DOMAIN-SUFFIX,example.com,Proxy\n  - MATCH,Proxy\n", nil, now2+2); err != nil {
+		t.Fatalf("UpdateRuleProfile template: %v", err)
+	}
+	got, err = repo.GetRuleProfile(p1.ID)
+	if err != nil {
+		t.Fatalf("GetRuleProfile after template update: %v", err)
+	}
+	if got.TemplateYAML != "rules:\n  - DOMAIN-SUFFIX,example.com,Proxy\n  - MATCH,Proxy\n" {
+		t.Fatalf("unexpected template after update: %q", got.TemplateYAML)
+	}
+
+	// Delete.
+	if err := repo.DeleteRuleProfile(p2.ID); err != nil {
+		t.Fatalf("DeleteRuleProfile: %v", err)
+	}
+	_, err = repo.GetRuleProfile(p2.ID)
+	if err != ErrNotFound {
+		t.Fatalf("GetRuleProfile after delete: expected ErrNotFound, got %v", err)
+	}
+
+	// Delete not-found.
+	err = repo.DeleteRuleProfile("nonexistent")
+	if err != ErrNotFound {
+		t.Fatalf("DeleteRuleProfile nonexistent: expected ErrNotFound, got %v", err)
+	}
+
+	// Update not-found.
+	err = repo.UpdateRuleProfile("nonexistent", "x", "", nil, now)
+	if err != ErrNotFound {
+		t.Fatalf("UpdateRuleProfile nonexistent: expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestRuleProfileUniqueName(t *testing.T) {
+	repo := newTestStateRepo(t)
+	now := time.Now().UnixNano()
+
+	p1 := model.RuleProfile{
+		ID:           "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0010",
+		Name:         "Alpha",
+		TemplateYAML: "rules:\n  - MATCH,Proxy\n",
+		Enabled:      true,
+		CreatedAtNs:  now,
+		UpdatedAtNs:  now,
+	}
+	if err := repo.CreateRuleProfile(p1); err != nil {
+		t.Fatalf("CreateRuleProfile: %v", err)
+	}
+
+	p2 := model.RuleProfile{
+		ID:           "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0011",
+		Name:         "Beta",
+		TemplateYAML: "rules:\n  - MATCH,Proxy\n",
+		Enabled:      true,
+		CreatedAtNs:  now + 1,
+		UpdatedAtNs:  now + 1,
+	}
+	if err := repo.CreateRuleProfile(p2); err != nil {
+		t.Fatalf("CreateRuleProfile p2: %v", err)
+	}
+
+	// Same name (different case) should conflict due to COLLATE NOCASE.
+	p3 := model.RuleProfile{
+		ID:           "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0012",
+		Name:         "alpha",
+		TemplateYAML: "rules:\n  - MATCH,Proxy\n",
+		Enabled:      true,
+		CreatedAtNs:  now + 2,
+		UpdatedAtNs:  now + 2,
+	}
+	err := repo.CreateRuleProfile(p3)
+	if err == nil {
+		t.Fatal("expected error for duplicate name (case-insensitive)")
+	}
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict, got %v", err)
+	}
+
+	// Update p2 to a name taken by p1 (case-insensitive) should fail.
+	err = repo.UpdateRuleProfile(p2.ID, "ALPHA", "", nil, now+3)
+	if err == nil {
+		t.Fatal("expected error for update to conflicting name")
+	}
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict on update conflict, got %v", err)
+	}
+}
+
+func TestRuleProfileGetNotFound(t *testing.T) {
+	repo := newTestStateRepo(t)
+	_, err := repo.GetRuleProfile("nonexistent")
+	if err != ErrNotFound {
+		t.Fatalf("GetRuleProfile nonexistent: expected ErrNotFound, got %v", err)
+	}
+
+	_, err = repo.GetEnabledRuleProfile("nonexistent")
+	if err != ErrNotFound {
+		t.Fatalf("GetEnabledRuleProfile nonexistent: expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestMigrateStateDB_RuleProfilesTableCreated(t *testing.T) {
+	dir := t.TempDir()
+	db, err := OpenDB(dir + "/state.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if err := MigrateStateDB(db); err != nil {
+		t.Fatalf("MigrateStateDB: %v", err)
+	}
+
+	ok, err := hasTable(db, "rule_profiles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("rule_profiles table not found after migration")
+	}
+
+	// Verify columns.
+	columns := []string{"id", "name", "template_yaml", "enabled", "created_at_ns", "updated_at_ns"}
+	for _, col := range columns {
+		exists, err := hasTableColumn(db, "rule_profiles", col)
+		if err != nil {
+			t.Fatalf("check column %s: %v", col, err)
+		}
+		if !exists {
+			t.Fatalf("column %s missing from rule_profiles", col)
+		}
+	}
+}
+
+func TestMigrateStateDB_000012DownDropsRuleProfilesTable(t *testing.T) {
+	dir := t.TempDir()
+	db, err := OpenDB(dir + "/state.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if err := MigrateStateDB(db); err != nil {
+		t.Fatalf("MigrateStateDB: %v", err)
+	}
+
+	downSQL, err := migrationsFS.ReadFile("migrations/state/000012_rule_profiles.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(downSQL)); err != nil {
+		t.Fatalf("apply state migration 000012 down: %v", err)
+	}
+	ok, err := hasTable(db, "rule_profiles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("rule_profiles table still present after migration down")
+	}
+}
+
+func boolPtr(v bool) *bool { return &v }
+
+func TestMigrateStateDB_LegacyBaselineWithRuleProfiles(t *testing.T) {
+	dir := t.TempDir()
+	db, err := OpenDB(dir + "/state.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Create a legacy-like latest schema (matching 000012 state).
+	_, err = db.Exec(`
+		CREATE TABLE platforms (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL UNIQUE,
+			sticky_ttl_ns INTEGER NOT NULL,
+			regex_filters_json TEXT NOT NULL DEFAULT '[]',
+			region_filters_json TEXT NOT NULL DEFAULT '[]',
+			reverse_proxy_miss_action TEXT NOT NULL DEFAULT 'RANDOM',
+			reverse_proxy_empty_account_behavior TEXT NOT NULL DEFAULT 'RANDOM',
+			reverse_proxy_fixed_account_header TEXT NOT NULL DEFAULT '',
+			allocation_policy TEXT NOT NULL DEFAULT 'BALANCED',
+			passive_circuit_breaker_disabled INTEGER NOT NULL DEFAULT 0,
+			protocol_filters_json TEXT NOT NULL DEFAULT '[]',
+			exclude_protocol_filters_json TEXT NOT NULL DEFAULT '[]',
+			quality_grade TEXT NOT NULL DEFAULT '',
+			quality_min_score REAL NOT NULL DEFAULT 0,
+			quality_cloudflare_challenged INTEGER,
+			quality_cloudflare_statuses_json TEXT NOT NULL DEFAULT '[]',
+			quality_checked_since_ns INTEGER NOT NULL DEFAULT 0,
+			quality_profile TEXT NOT NULL DEFAULT '',
+			updated_at_ns INTEGER NOT NULL
+		);
+		CREATE TABLE subscriptions (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			source_type TEXT NOT NULL DEFAULT 'remote',
+			url TEXT NOT NULL,
+			content TEXT NOT NULL DEFAULT '',
+			update_interval_ns INTEGER NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			ephemeral INTEGER NOT NULL DEFAULT 0,
+			ephemeral_node_evict_delay_ns INTEGER NOT NULL,
+			incremental_alive_nodes INTEGER NOT NULL DEFAULT 0,
+			clash_fingerprint_policy TEXT NOT NULL DEFAULT '',
+			created_at_ns INTEGER NOT NULL,
+			updated_at_ns INTEGER NOT NULL
+		);
+		CREATE TABLE rule_profiles (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+			template_yaml TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			created_at_ns INTEGER NOT NULL,
+			updated_at_ns INTEGER NOT NULL
+		);
+	`)
+	if err != nil {
+		t.Fatalf("create legacy schema with rule_profiles: %v", err)
+	}
+
+	if err := MigrateStateDB(db); err != nil {
+		t.Fatalf("MigrateStateDB with legacy baseline: %v", err)
+	}
+
+	// Verify migration version set to 12.
+	ver, err := getCurrentMigrationVersion(db, migrateDefaultTable)
+	if err != nil {
+		t.Fatalf("get version: %v", err)
+	}
+	if ver != stateVersionAddRuleProfiles {
+		t.Fatalf("migration version = %d, want %d", ver, stateVersionAddRuleProfiles)
+	}
+}
+
+func getCurrentMigrationVersion(db *sql.DB, table string) (int, error) {
+	var version int
+	var dirty bool
+	err := db.QueryRow(fmt.Sprintf("SELECT version, dirty FROM %s", table)).Scan(&version, &dirty)
+	if err != nil {
+		return 0, err
+	}
+	return version, nil
+}
+
 func TestMigrateStateDB_000011DownDropsCFStatusesColumn(t *testing.T) {
 	dir := t.TempDir()
 	db, err := OpenDB(dir + "/state.db")

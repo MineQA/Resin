@@ -34,9 +34,11 @@ import {
 import {
   CloudflareStatusBadge,
   ScoreBreakdownExplanation,
-} from "../../components/ScoreBreakdown";import { listPlatforms } from "../platforms/api";
+} from "../../components/ScoreBreakdown";
+import { listPlatforms } from "../platforms/api";
 import type { Platform } from "../platforms/types";
 import { listSubscriptions } from "../subscriptions/api";
+import { listRuleProfiles } from "../systemConfig/api";
 import { buildNodePoolExportURL, exportNodePoolText, getNode, listNodes, probeEgress, probeLatency, probeQuality } from "./api";
 import type { NodeQuality, NodeSummary } from "./types";
 import { getAllRegions, getRegionName } from "./regions";
@@ -58,6 +60,7 @@ type NodeExportSettings = {
   tagKeyword: string;
   protocol: string;
   excludeProtocol: string;
+  ruleProfileID: string;
 };
 
 type NodeListSettings = {
@@ -112,6 +115,7 @@ const DEFAULT_EXPORT_SETTINGS: NodeExportSettings = {
   tagKeyword: "",
   protocol: "",
   excludeProtocol: "",
+  ruleProfileID: "",
 };
 const DEFAULT_NODE_LIST_SETTINGS: NodeListSettings = {
   pageSize: 200,
@@ -604,6 +608,25 @@ export function NodesPage() {
   });
   const subscriptions = subscriptionsQuery.data ?? [];
 
+  // Enabled rule profiles for the Clash export selector. Only enabled profiles
+  // are routable for export; the selector is shown only when format === "clash".
+  const ruleProfilesQuery = useQuery({
+    queryKey: ["rule-profiles", "enabled"],
+    queryFn: () => listRuleProfiles(true),
+    staleTime: 30_000,
+  });
+  const enabledRuleProfiles = ruleProfilesQuery.data ?? [];
+  const selectedRuleProfile = exportSettings.ruleProfileID
+    ? enabledRuleProfiles.find((profile) => profile.id === exportSettings.ruleProfileID) ?? null
+    : null;
+  const selectedRuleProfileUnavailable = Boolean(exportSettings.ruleProfileID)
+    && (
+      ruleProfilesQuery.data === undefined
+      || ruleProfilesQuery.isError
+      || ruleProfilesQuery.isFetching
+      || !selectedRuleProfile
+    );
+
   const nodesQuery = useQuery({
     queryKey: ["nodes", activeFilters, sortBy, sortOrder, page, pageSize],
     queryFn: () =>
@@ -1035,6 +1058,7 @@ export function NodesPage() {
       },
       trimmedToken,
       exportSettings.format,
+      exportSettings.format === "clash" ? exportSettings.ruleProfileID : undefined,
     );
     if (typeof window === "undefined") {
       return relative;
@@ -1043,6 +1067,10 @@ export function NodesPage() {
   };
 
   const copyExportURL = async () => {
+    if (exportSettings.format === "clash" && selectedRuleProfileUnavailable) {
+      showToast("error", t("所选 Rule Profile 已禁用、删除或无法加载，请重新选择。导出不会自动降级为仅 proxies。"));
+      return;
+    }
     const url = buildAbsoluteExportURL();
     if (!url) {
       showToast("error", t("请先填写导出令牌"));
@@ -1062,8 +1090,17 @@ export function NodesPage() {
       showToast("error", t("请先填写导出令牌"));
       return;
     }
+    if (exportSettings.format === "clash" && selectedRuleProfileUnavailable) {
+      showToast("error", t("所选 Rule Profile 已禁用、删除或无法加载，请重新选择。导出不会自动降级为仅 proxies。"));
+      return;
+    }
     try {
-      const text = await exportNodePoolText({ ...exportFilters(), limit: 100000, offset: 0 }, trimmedToken, exportSettings.format);
+      const text = await exportNodePoolText(
+        { ...exportFilters(), limit: 100000, offset: 0 },
+        trimmedToken,
+        exportSettings.format,
+        exportSettings.format === "clash" ? exportSettings.ruleProfileID : undefined,
+      );
       const meta = exportFileMeta();
       const blob = new Blob([text], { type: meta.type });
       const url = URL.createObjectURL(blob);
@@ -1664,6 +1701,49 @@ export function NodesPage() {
                       <option value="sing-box">sing-box JSON</option>
                     </Select>
                   </div>
+                  <div style={{ ...NODE_FILTER_ITEM_STYLE, flex: "1 1 220px" }}>
+                    <label htmlFor="node-export-rule-profile" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                      {t("Rule Profile / 规则配置")}
+                    </label>
+                    <Select
+                      id="node-export-rule-profile"
+                      value={exportSettings.ruleProfileID}
+                      disabled={exportSettings.format !== "clash" || ruleProfilesQuery.isFetching}
+                      onChange={(event) => updateExportSettings({ ruleProfileID: event.target.value })}
+                      style={NODE_FILTER_CONTROL_STYLE}
+                      aria-describedby="node-export-rule-profile-help"
+                    >
+                      <option value="">{t("不使用（仅 proxies）")}</option>
+                      {exportSettings.ruleProfileID && !selectedRuleProfile ? (
+                        <option value={exportSettings.ruleProfileID} disabled>
+                          {t("当前选择不可用，请重新选择")}
+                        </option>
+                      ) : null}
+                      {enabledRuleProfiles.map((profile) => (
+                        <option key={profile.id} value={profile.id}>{profile.name}</option>
+                      ))}
+                    </Select>
+                    <small
+                      id="node-export-rule-profile-help"
+                      style={{
+                        color: selectedRuleProfileUnavailable ? "var(--danger)" : "var(--text-muted)",
+                        fontSize: 11,
+                        lineHeight: 1.35,
+                      }}
+                    >
+                      {exportSettings.format !== "clash"
+                        ? t("Rule Profile 仅适用于 Clash YAML，当前格式不会发送 rule_profile_id。")
+                        : exportSettings.ruleProfileID && ruleProfilesQuery.isFetching
+                          ? t("正在确认所选 Profile，复制和下载暂时不可用。")
+                        : selectedRuleProfileUnavailable
+                          ? t("所选 Profile 已禁用、删除或列表加载失败。请重新选择；复制和下载已阻止，不会静默降级。")
+                          : ruleProfilesQuery.isError
+                            ? t("Rule Profile 列表加载失败，不影响不使用 Profile 的导出。")
+                            : selectedRuleProfile
+                              ? t("将输出完整 Mihomo 配置。删除或禁用此 Profile 后，已有 URL 会返回 404，不会回退。")
+                              : t("不选时保持旧 Clash proxies-only 输出。")}
+                    </small>
+                  </div>
                   <div style={{ ...NODE_FILTER_ITEM_STYLE, flex: "1 1 150px" }}>
                     <label htmlFor="node-export-routable" style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
                       {t("可路由")}
@@ -1796,7 +1876,7 @@ export function NodesPage() {
                 </div>
                 <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
                   {t(
-                    "导出默认跟随当前列表筛选；上方选项可覆盖可路由、启用状态、Outbound、协议、排除协议和标签条件。转换器建议使用 URL query token。",
+                    "导出默认跟随当前列表筛选；上方选项可覆盖可路由、启用状态、Outbound、协议、排除协议和标签条件。选择 Rule Profile 后输出完整 Mihomo 配置；不选保持旧 Clash proxies-only。转换器建议使用 URL query token。",
                   )}
                 </span>
               </div>

@@ -30,6 +30,7 @@ const (
 	stateVersionAddClashFingerprintPolicy        = 9
 	stateVersionAddPlatformQualityFilters        = 10
 	stateVersionAddQualityCloudflareStatuses     = 11
+	stateVersionAddRuleProfiles                  = 12
 	stateLegacyBaselineVersion                   = stateVersionAddFixedAccountHeader
 
 	stateBaseSchemaMigration = stateMigrationsPath + "/000001_state_base.up.sql"
@@ -141,8 +142,14 @@ func prepareLegacyStateBaseline(db *sql.DB, driver migratedb.Driver) error {
 	if err != nil {
 		return err
 	}
+	hasRuleProfiles, err := hasTable(db, "rule_profiles")
+	if err != nil {
+		return err
+	}
 
 	switch {
+	case hasEmptyBehavior && hasFixedHeader && hasIncrementalAliveNodes && hasPassiveCircuitBreakerDisabled && hasClashFingerprintPolicy && hasProtocolFilters && hasExcludeProtocolFilters && hasQualityGrade && hasQualityCFStatuses && hasRuleProfiles:
+		return setLegacyMigrationVersion(db, driver, stateVersionAddRuleProfiles)
 	case hasEmptyBehavior && hasFixedHeader && hasIncrementalAliveNodes && hasPassiveCircuitBreakerDisabled && hasClashFingerprintPolicy && hasProtocolFilters && hasExcludeProtocolFilters && hasQualityGrade && hasQualityCFStatuses:
 		return setLegacyMigrationVersion(db, driver, stateVersionAddQualityCloudflareStatuses)
 	case hasEmptyBehavior && hasFixedHeader && hasIncrementalAliveNodes && hasPassiveCircuitBreakerDisabled && hasClashFingerprintPolicy && hasProtocolFilters && hasExcludeProtocolFilters && hasQualityGrade:

@@ -51,6 +51,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 			status = http.StatusBadRequest
 		case "NOT_FOUND":
 			status = http.StatusNotFound
+		case "RULE_PROFILE_UNAVAILABLE":
+			status = http.StatusNotFound
 		case "CONFLICT":
 			status = http.StatusConflict
 		default:

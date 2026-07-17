@@ -679,3 +679,175 @@ func (r *StateRepo) TouchExportTokenLastUsed(id string, lastUsedAtNs int64) erro
 func int64Ptr(v int64) *int64 {
 	return &v
 }
+
+// --- rule_profiles ---
+
+// ListRuleProfiles returns all rule profiles (summary only, without template_yaml),
+// ordered by name COLLATE NOCASE, id.
+// When enabledPtr is non-nil, only profiles with the matching enabled state are returned.
+func (r *StateRepo) ListRuleProfiles(enabledPtr *bool) ([]model.RuleProfile, error) {
+	var rows *sql.Rows
+	var err error
+	const listCols = "id, name, enabled, created_at_ns, updated_at_ns"
+	if enabledPtr != nil {
+		enabledInt := 0
+		if *enabledPtr {
+			enabledInt = 1
+		}
+		rows, err = r.db.Query(`SELECT `+listCols+`
+			FROM rule_profiles WHERE enabled = ? ORDER BY name COLLATE NOCASE, id`, enabledInt)
+	} else {
+		rows, err = r.db.Query(`SELECT ` + listCols + `
+			FROM rule_profiles ORDER BY name COLLATE NOCASE, id`)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []model.RuleProfile
+	for rows.Next() {
+		var p model.RuleProfile
+		var enabled int
+		if err := rows.Scan(&p.ID, &p.Name, &enabled, &p.CreatedAtNs, &p.UpdatedAtNs); err != nil {
+			return nil, err
+		}
+		p.Enabled = enabled != 0
+		// TemplateYAML remains zero-value (empty string) for list/summary.
+		result = append(result, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if result == nil {
+		result = []model.RuleProfile{}
+	}
+	return result, nil
+}
+
+// GetRuleProfile returns a rule profile by ID.
+func (r *StateRepo) GetRuleProfile(id string) (*model.RuleProfile, error) {
+	row := r.db.QueryRow(`SELECT id, name, template_yaml, enabled, created_at_ns, updated_at_ns
+		FROM rule_profiles WHERE id = ?`, id)
+	var p model.RuleProfile
+	var enabled int
+	if err := row.Scan(&p.ID, &p.Name, &p.TemplateYAML, &enabled, &p.CreatedAtNs, &p.UpdatedAtNs); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	p.Enabled = enabled != 0
+	return &p, nil
+}
+
+// GetEnabledRuleProfile returns an enabled rule profile by ID.
+// Returns ErrNotFound if the profile does not exist or is disabled.
+func (r *StateRepo) GetEnabledRuleProfile(id string) (*model.RuleProfile, error) {
+	row := r.db.QueryRow(`SELECT id, name, template_yaml, enabled, created_at_ns, updated_at_ns
+		FROM rule_profiles WHERE id = ? AND enabled = 1`, id)
+	var p model.RuleProfile
+	var enabled int
+	if err := row.Scan(&p.ID, &p.Name, &p.TemplateYAML, &enabled, &p.CreatedAtNs, &p.UpdatedAtNs); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	p.Enabled = enabled != 0
+	return &p, nil
+}
+
+// CreateRuleProfile inserts a new rule profile.
+func (r *StateRepo) CreateRuleProfile(p model.RuleProfile) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	enabled := 0
+	if p.Enabled {
+		enabled = 1
+	}
+	_, err := r.db.Exec(`
+		INSERT INTO rule_profiles (id, name, template_yaml, enabled, created_at_ns, updated_at_ns)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, p.ID, p.Name, p.TemplateYAML, enabled, p.CreatedAtNs, p.UpdatedAtNs)
+	if err != nil {
+		if isSQLiteUniqueConstraint(err) {
+			return fmt.Errorf("%w: rule profile name already exists", ErrConflict)
+		}
+		return err
+	}
+	return nil
+}
+
+// UpdateRuleProfile updates a rule profile by ID. Only non-zero/non-nil fields
+// from the provided partial model are applied. Name and TemplateYAML are only
+// updated when non-empty; Enabled is only updated when the pointer is non-nil.
+// CreatedAtNs and ID are never updated via this method.
+func (r *StateRepo) UpdateRuleProfile(id string, name string, templateYAML string, enabledPtr *bool, updatedAtNs int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var sets []string
+	var args []any
+
+	if name != "" {
+		sets = append(sets, "name = ?")
+		args = append(args, name)
+	}
+	if templateYAML != "" {
+		sets = append(sets, "template_yaml = ?")
+		args = append(args, templateYAML)
+	}
+	if enabledPtr != nil {
+		v := 0
+		if *enabledPtr {
+			v = 1
+		}
+		sets = append(sets, "enabled = ?")
+		args = append(args, v)
+	}
+	if len(sets) == 0 {
+		// Nothing to update; still check existence.
+		var dummy int
+		err := r.db.QueryRow(`SELECT 1 FROM rule_profiles WHERE id = ?`, id).Scan(&dummy)
+		if err == sql.ErrNoRows {
+			return ErrNotFound
+		}
+		return err
+	}
+
+	sets = append(sets, "updated_at_ns = ?")
+	args = append(args, updatedAtNs)
+	args = append(args, id)
+
+	q := "UPDATE rule_profiles SET " + strings.Join(sets, ", ") + " WHERE id = ?"
+	result, err := r.db.Exec(q, args...)
+	if err != nil {
+		if isSQLiteUniqueConstraint(err) {
+			return fmt.Errorf("%w: rule profile name already exists", ErrConflict)
+		}
+		return err
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DeleteRuleProfile removes a rule profile by ID.
+func (r *StateRepo) DeleteRuleProfile(id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	result, err := r.db.Exec("DELETE FROM rule_profiles WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}

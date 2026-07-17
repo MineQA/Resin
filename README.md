@@ -94,6 +94,122 @@ http://127.0.0.1:2260/api/v1/node-pool/export?format=clash&export_token=<token>
 
 Supported export filters are the same node-list filters: `platform_id`, `subscription_id`, `region`, `egress_ip`, `tag_keyword`, `circuit_open=true|false`, `has_outbound=true|false`, `enabled=true|false`, `routable=true|false`, `probed_since=<RFC3339 time>`, `quality_profile`, `quality_grade`, `quality_min_score`, `quality_cloudflare_challenged=true|false`, `quality_cloudflare_status` (repeatable, OR semantics), `quality_checked_since=<RFC3339 time>`, `limit`, and `offset`. If `routable` is omitted, Resin does not apply a routable-only filter.
 
+### Rule Profiles (Mihomo YAML templates)
+
+A Rule Profile is a persistent, named full Mihomo YAML configuration managed in **System Settings**. It lets you wrap Resin's node pool into a complete Mihomo configuration with your own proxy groups, rules, and other advanced settings.
+
+**Mihomo-first:** Resin targets Mihomo (not legacy Clash). Templates use standard Mihomo YAML — no Resin DSL, placeholders, or custom directives. Unsupported or unknown Mihomo keys are passed through; Resin does not fully validate group references, DAG integrity, or provider reachability.
+
+<details>
+<summary><b>Creating and managing Rule Profiles</b></summary>
+
+- **Management API (admin-auth):** `GET /api/v1/rule-profiles` lists all profiles (summary only), `POST /api/v1/rule-profiles` creates a new one, `GET /api/v1/rule-profiles/{id}`, `PATCH /api/v1/rule-profiles/{id}`, `DELETE /api/v1/rule-profiles/{id}`.
+- **Web UI:** Under **System Settings** → **Rule Profiles**, you can create, edit, and delete profiles.
+- **Export area:** Under **Nodes**, a Rule Profile selector appears when the export format is `clash`.
+</details>
+
+<details>
+<summary><b>Export URL with Rule Profile</b></summary>
+
+Add `&rule_profile_id=<immutable UUID>` to the export URL. This parameter is only valid for `format=clash`; using it with `base64`, `uri`, or `sing-box` returns a 400 error.
+
+```text
+http://127.0.0.1:2260/api/v1/node-pool/export?format=clash&rule_profile_id=a1b2c3d4-e5f6-7890-abcd-ef1234567890&export_token=<token>
+```
+
+Resin replaces the top-level `proxies:` field in the template with the filtered, converted node list. The template **must not** declare a non-empty `proxies:` — it can be omitted, `null`, or an empty array `[]`. All proxy-group names, provider URLs, and rules come from the template.
+
+Without `rule_profile_id`, `format=clash` still returns only a top-level `proxies:` list, suitable as converter input for subconverter-style tools. The `base64`, `uri`, and `sing-box` formats keep their existing output and do not use Rule Profiles.
+</details>
+
+<details>
+<summary><b>Node naming contract</b></summary>
+
+When a Rule Profile is applied, node names follow these rules for consistency:
+
+- **Region tag:** The effective assigned region is normalized at the start of the final path leaf (for example, `[US] Node Name` or `provider/[HK] Node Name`). If the region is unknown or invalid, `[??]` is used instead, and any misleading country marker in the original leaf is stripped.
+- **Collision handling:** Only names in a collision group receive stable node-hash suffixes; non-colliding names remain unchanged.
+- **Unsupported outbounds:** Proxy types that cannot be converted to Clash format are silently skipped; groups in the template reference only the final `proxies:` list.
+</details>
+
+<details>
+<summary><b>Template validation contract</b></summary>
+
+Resin performs basic validation before saving a Rule Profile:
+
+| Rule | Description |
+| :--- | :--- |
+| Single YAML document | The template must be a single YAML document (top-level mapping). |
+| `rules` required | The `rules` key must exist. The final rule must be `MATCH,<target>`. |
+| `proxy-group` names | All group names must be non-empty and unique. |
+| `http` provider URLs | Must be absolute HTTPS URLs. |
+| Unknown keys allowed | Resin does not strip or reject unknown Mihomo YAML keys. |
+| References not validated | Resin does not check group references, DAG cycles, or provider reachability. |
+
+> **Provider fetching:** Resin never fetches URLs declared in `proxy-providers` or `rule-providers`. The Mihomo client downloads them directly. An arbitrary HTTPS provider URL will cause the Mihomo client to access that address — you are responsible for trusting those URLs and ensuring network security.
+</details>
+
+<details>
+<summary><b>Error semantics</b></summary>
+
+| Scenario | HTTP Status | Error Code |
+| :--- | :--- | :--- |
+| `rule_profile_id` is not a valid UUID | 400 | `INVALID_ARGUMENT` |
+| `rule_profile_id` with non-`clash` format | 400 | `INVALID_ARGUMENT` |
+| Profile not found, deleted, or disabled | 404 | `RULE_PROFILE_UNAVAILABLE` |
+
+- Resin **never** falls back to a proxies-only response when a Rule Profile is requested but unavailable. Deleting or disabling a profile causes its old export URLs to fail.
+- The 404 response is uniform for missing, deleted, and disabled profiles to avoid leaking existence information.
+</details>
+
+<details>
+<summary><b>Minimal template example</b></summary>
+
+```yaml
+proxies: []
+
+proxy-groups:
+  - name: AUTO
+    type: url-test
+    include-all-proxies: true
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+
+  - name: MANUAL
+    type: select
+    include-all-proxies: true
+
+  - name: US
+    type: select
+    include-all-proxies: true
+    filter: "(?:^|/)\\[US\\](?: [^/]*|)$"
+
+  - name: PROXY
+    type: select
+    proxies:
+      - AUTO
+      - MANUAL
+      - US
+      - DIRECT
+
+rules:
+  - GEOIP,CN,DIRECT
+  - MATCH,PROXY
+```
+
+Notes:
+- The `include-all-proxies: true` dynamic group automatically includes all nodes from the `proxies:` list. Use `filter` with a regex to match names whose final path leaf starts with a region marker (the example filters for `[US]`).
+- `AUTO`, `MANUAL`, and `US` are policy groups defined in the template, not injected proxy nodes.
+- Region groups may be empty if no nodes match the filter — adjust according to your node pool.
+- Do not force `proxy-providers` entries; let Resin manage the node pool via `proxies:` directly.
+- The server only requires a non-empty `target` in the final `MATCH,<target>` rule. The example uses `MATCH,PROXY` so unmatched traffic stays on a proxy policy instead of silently going direct.
+- If a provider URL is initially unreachable and has no local cache, rules from that provider cannot match; evaluation continues to later rules, including the final `MATCH`. Design that target and each group's fallback behavior deliberately.
+</details>
+
+> **Pagination and `limit`:** Pagination (`limit`/`offset`) is applied before Clash conversion. Unsupported node types count toward the `limit` slot, so the final `proxies:` list may contain fewer entries than requested.
+>
+> **Compatibility with subconverter:** If you prefer subconverter-style workflow, continue using the proxies-only export URL (without `rule_profile_id`) as input to your converter. Resin does not ship a built-in ACL4SSR preset.
+
 ## 🚀 Quick Start
 
 In just three steps, you can turn your proxy subscriptions into a highly available proxy pool.

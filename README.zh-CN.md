@@ -94,6 +94,121 @@ http://127.0.0.1:2260/api/v1/node-pool/export?format=clash&export_token=<token>
 
 支持的导出筛选参数与节点列表一致：`platform_id`、`subscription_id`、`region`、`egress_ip`、`tag_keyword`、`circuit_open=true|false`、`has_outbound=true|false`、`enabled=true|false`、`routable=true|false`、`probed_since=<RFC3339 时间>`、`quality_profile`、`quality_grade`、`quality_min_score`、`quality_cloudflare_challenged=true|false`、`quality_cloudflare_status`（可重复，OR 语义）、`quality_checked_since=<RFC3339 时间>`、`limit`、`offset`。如果不传 `routable`，不会默认只导出可路由节点。
 
+### 规则模板（Rule Profile / Mihomo YAML 模板）
+
+规则模板（Rule Profile）是在**系统设置**中管理的持久化、命名的完整 Mihomo YAML 配置。它将 Resin 的节点池封装为完整的 Mihomo 配置，包含你自定义的代理组、规则以及其他高级设置。
+
+**Mihomo 优先：** Resin 以 Mihomo（而非旧版 Clash）为目标。模板使用标准 Mihomo YAML — 不含 Resin DSL、占位符或自定义指令。未知的 Mihomo key 会被透传；Resin 不会完整校验组引用、DAG 完整性或 provider 可达性。
+
+<details>
+<summary><b>创建与管理规则模板</b></summary>
+
+- **管理 API（admin-auth）：** `GET /api/v1/rule-profiles` 列出所有模板（仅摘要），`POST /api/v1/rule-profiles` 创建新模板，`GET /api/v1/rule-profiles/{id}`、`PATCH /api/v1/rule-profiles/{id}`、`DELETE /api/v1/rule-profiles/{id}`。
+- **Web UI：** 在**系统设置** → **规则模板**中创建、编辑和删除模板。
+- **导出区域：** 在**节点池**页面，当导出格式为 `clash` 时会出现规则模板选择器。
+</details>
+
+<details>
+<summary><b>使用规则模板的导出 URL</b></summary>
+
+在导出 URL 中添加 `&rule_profile_id=<不可变 UUID>`。此参数仅对 `format=clash` 有效；与 `base64`、`uri` 或 `sing-box` 格式共用将返回 400 错误。
+
+```text
+http://127.0.0.1:2260/api/v1/node-pool/export?format=clash&rule_profile_id=a1b2c3d4-e5f6-7890-abcd-ef1234567890&export_token=<token>
+```
+
+Resin 会将模板顶层的 `proxies:` 字段替换为经筛选和转换后的节点列表。模板**不能**声明非空的 `proxies:` — 可以省略、设为 `null` 或空数组 `[]`。所有代理组名称、provider URL 和规则均来自模板。
+
+不传 `rule_profile_id` 时，`format=clash` 仍然只返回顶层的 `proxies:` 列表，适合作为 subconverter 等工具的转换器输入。`base64`、`uri` 和 `sing-box` 保持原有输出，不使用规则模板。
+</details>
+
+<details>
+<summary><b>节点命名约定</b></summary>
+
+当应用规则模板时，节点名称遵循以下规则以确保一致性：
+
+- **地区标签：** 实际分配的地区会被规范到最终路径叶子的开头（例如 `[US] Node Name` 或 `provider/[HK] Node Name`）。如果地区未知或无效，则使用 `[??]`，并去除原叶子中可能存在的误导性国家标记。
+- **冲突处理：** 只有发生同名冲突的名称组会追加稳定的节点哈希后缀；未冲突名称保持不变。
+- **不支持的出站：** 无法转换为 Clash 格式的代理类型会被静默跳过；模板中的组仅引用最终的 `proxies:` 列表。
+</details>
+
+<details>
+<summary><b>模板验证合同</b></summary>
+
+保存规则模板前，Resin 会执行以下基本验证：
+
+| 规则 | 说明 |
+| :--- | :--- |
+| 单一 YAML 文档 | 模板必须是单个 YAML 文档（顶层 mapping）。 |
+| 必须包含 `rules` | `rules` key 必须存在。最后一条规则必须是 `MATCH,<目标>`。 |
+| `proxy-group` 名称 | 所有组名称必须非空且唯一。 |
+| `http` provider URL | 必须是绝对 HTTPS URL。 |
+| 允许未知 key | Resin 不会剥离或拒绝未知的 Mihomo YAML key。 |
+| 不验证引用 | Resin 不检查组引用、DAG 循环或 provider 可达性。 |
+
+> **Provider 拉取：** Resin 永远不会主动访问模板中 `proxy-providers` 或 `rule-providers` 声明的 URL。Mihomo 客户端会直接下载它们。任意的 HTTPS provider URL 会导致 Mihomo 客户端访问对应地址 — 你需要自行信任这些 URL 并确保网络安全。
+</details>
+
+<details>
+<summary><b>错误语义</b></summary>
+
+| 场景 | HTTP 状态码 | 错误码 |
+| :--- | :--- | :--- |
+| `rule_profile_id` 不是有效 UUID | 400 | `INVALID_ARGUMENT` |
+| `rule_profile_id` 与非 `clash` 格式共用 | 400 | `INVALID_ARGUMENT` |
+| 模板不存在、已删除或已禁用 | 404 | `RULE_PROFILE_UNAVAILABLE` |
+
+- 当请求了规则模板但无法获取时，Resin **绝不会**回退为仅 proxies 的响应。删除或禁用模板会导致旧的导出 URL 全部失效。
+- 对于不存在、已删除和已禁用的模板，统一返回 404，避免泄漏存在性信息。
+</details>
+
+<details>
+<summary><b>最小模板示例</b></summary>
+
+```yaml
+proxies: []
+
+proxy-groups:
+  - name: AUTO
+    type: url-test
+    include-all-proxies: true
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+
+  - name: MANUAL
+    type: select
+    include-all-proxies: true
+
+  - name: US
+    type: select
+    include-all-proxies: true
+    filter: "(?:^|/)\\[US\\](?: [^/]*|)$"
+
+  - name: PROXY
+    type: select
+    proxies:
+      - AUTO
+      - MANUAL
+      - US
+      - DIRECT
+
+rules:
+  - GEOIP,CN,DIRECT
+  - MATCH,PROXY
+```
+
+说明：
+- `include-all-proxies: true` 动态组会自动包含 `proxies:` 列表中的所有节点。使用 `filter` 配合正则表达式匹配最终路径叶子以地区 marker 开头的节点名（示例筛选 `[US]`）。
+- `AUTO`、`MANUAL` 和 `US` 是模板中定义的策略组，不是 Resin 注入的代理节点。
+- 地区组可能在没有节点匹配筛选条件时为空 — 请根据你的节点池调整。
+- 不要强制填写 `proxy-providers`；让 Resin 通过 `proxies:` 直接管理节点池。
+- 服务端仅要求最后一条 `MATCH,<target>` 规则中的 target 非空。示例使用 `MATCH,PROXY`，让未匹配流量继续走代理策略，而不是静默直连。
+- 如果 provider URL 首次拉取不可达且无本地缓存，该 provider 的规则无法匹配，规则评估会继续到后续规则（包括最终 `MATCH`）。请谨慎设计最终 target 和各策略组的 fallback 行为。
+</details>
+
+> **分页与 `limit`：** 分页（`limit`/`offset`）在 Clash 转换前应用。不支持的节点类型会计入 `limit` 槽位，因此最终的 `proxies:` 列表可能少于请求数量。
+>
+> **与 subconverter 的兼容性：** 如果你更偏好 subconverter 工作流，可继续使用纯 proxies 的导出 URL（不传 `rule_profile_id`）作为转换器输入。Resin 不自带内置 ACL4SSR 预设。
 
 ## 🚀 Quick Start
 

@@ -41,6 +41,7 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
   "加载报文内容中...": "Loading payload...",
   "查询": "Lookup",
   "重置": "Reset",
+  "重试": "Retry",
   "重置中...": "Resetting...",
   "清除中...": "Clearing...",
   "清除所有租约": "Clear All Leases",
@@ -71,6 +72,7 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
   "待测": "Pending Test",
   "运行中": "Running",
   "已停用": "Disabled",
+  "已启用": "Enabled",
   "启用": "Enabled",
   "仅启用": "Enabled only",
   "仅禁用": "Disabled only",
@@ -300,6 +302,7 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
     "Enter a valid http/https target URL to generate the reverse proxy URL.",
   "复制": "Copy",
   "已复制": "Copied",
+  "复制失败，请手动复制": "Copy failed. Please copy it manually.",
   "HTTP": "HTTP",
   "随机选择节点": "Select node randomly",
   "按空账号处理": "Treat as empty account",
@@ -931,6 +934,68 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
     "Multi-select OR; intersects with “Cloudflare challenge” filter. Empty means no restriction.",
   "多选 OR，与上方“Cloudflare 拦截”取交集。":
     "Multi-select OR; intersects with the “Cloudflare challenge” filter above.",
+  // ── Rule Profile / Mihomo export templates ────────────────────────────
+  "Rule Profile / 规则配置": "Rule Profile",
+  "保存完整 Mihomo YAML 模板，并在 Clash 节点导出时按不可变 Profile ID 选择使用。":
+    "Save complete Mihomo YAML templates and select them by immutable Profile ID for Clash node exports.",
+  "新建 Rule Profile": "Create Rule Profile",
+  "编辑 Rule Profile": "Edit Rule Profile",
+  "创建 Rule Profile": "Create Rule Profile",
+  "保存 Rule Profile": "Save Rule Profile",
+  "Rule Profile {{name}} 已创建": "Rule Profile {{name}} created",
+  "Rule Profile {{name}} 已更新": "Rule Profile {{name}} updated",
+  "Rule Profile {{name}} 已启用": "Rule Profile {{name}} enabled",
+  "Rule Profile {{name}} 已禁用": "Rule Profile {{name}} disabled",
+  "Rule Profile 已删除": "Rule Profile deleted",
+  "尚未创建 Rule Profile": "No Rule Profiles have been created",
+  "正在加载 Rule Profile...": "Loading Rule Profiles...",
+  "正在加载 Rule Profile 详情...": "Loading Rule Profile details...",
+  "Mihomo 优先；Resin 保存时由服务端校验 YAML 结构。":
+    "Designed for Mihomo; Resin validates the YAML structure on the server when saving.",
+  "模板内容会完整下发给订阅持有者": "The full template is delivered to subscription users",
+  "任何持有有效 export token 并知道 Profile ID 的人都能读取模板完整内容。不要在模板中放入 API keys、私有订阅 URL、Authorization headers、cookies 或其他 secret。":
+    "Anyone with a valid export token and the Profile ID can read the complete template. Do not place API keys, private subscription URLs, Authorization headers, cookies, or other secrets in it.",
+  "Resin 导出时会替换顶层 proxies。动态组请使用 Mihomo include-all-proxies 和 filter，不要手写动态节点名。未知地区节点标记为 [??]；远程 provider URL 由 Mihomo 客户端访问，Resin 不代拉。":
+    "Resin replaces the top-level proxies during export. Use Mihomo include-all-proxies and filter for dynamic groups; do not hard-code dynamic node names. Unknown regions are marked [??]. Remote provider URLs are fetched by the Mihomo client, not Resin.",
+  "Profile ID（不可变）": "Profile ID (immutable)",
+  "复制 Profile ID": "Copy Profile ID",
+  "Profile ID 已复制": "Profile ID copied",
+  "更新于 {{updated}} · 创建于 {{created}}": "Updated {{updated}} · Created {{created}}",
+  "启停 Rule Profile {{name}}": "Enable or disable Rule Profile {{name}}",
+  "停用": "Off",
+  "名称不能为空": "Name is required",
+  "模板 YAML 不能为空": "Template YAML is required",
+  "载入示例模板": "Load example template",
+  "载入示例模板会覆盖当前 YAML，是否继续？": "Loading the example will replace the current YAML. Continue?",
+  "Mihomo 模板 YAML": "Mihomo template YAML",
+  "顶层 proxies 可省略或保持为空，导出时由 Resin 替换。动态组使用 include-all-proxies/filter。":
+    "The top-level proxies may be omitted or left empty; Resin replaces them during export. Use include-all-proxies/filter for dynamic groups.",
+  "启用此 Rule Profile": "Enable this Rule Profile",
+  "禁用后，使用此 ID 的公开导出会返回 404，不会降级。":
+    "When disabled, public exports using this ID return 404 and do not fall back.",
+  "不要保存 API keys、私有订阅 URL、headers、cookies 或其他 secret；模板会完整返回给持有 export token 且知道 Profile ID 的人。":
+    "Do not store API keys, private subscription URLs, headers, cookies, or other secrets. The full template is returned to anyone with an export token and the Profile ID.",
+  "确认禁用 Rule Profile {{name}}？所有带有该 Profile ID 的现有导出 URL 将返回 404 RULE_PROFILE_UNAVAILABLE，不会回退为仅 proxies 输出。":
+    "Disable Rule Profile {{name}}? Every existing export URL containing this Profile ID will return 404 RULE_PROFILE_UNAVAILABLE and will not fall back to proxies-only output.",
+  "确认删除 Rule Profile {{name}}？所有带有该 Profile ID 的现有导出 URL 将返回 404 RULE_PROFILE_UNAVAILABLE，不会回退为仅 proxies 输出。此操作不可撤销。":
+    "Delete Rule Profile {{name}}? Every existing export URL containing this Profile ID will return 404 RULE_PROFILE_UNAVAILABLE and will not fall back to proxies-only output. This cannot be undone.",
+  "不使用（仅 proxies）": "Do not use (proxies only)",
+  "当前选择不可用，请重新选择": "Current selection unavailable; select another",
+  "Rule Profile 仅适用于 Clash YAML，当前格式不会发送 rule_profile_id。":
+    "Rule Profiles only apply to Clash YAML. The current format will not send rule_profile_id.",
+  "所选 Profile 已禁用、删除或列表加载失败。请重新选择；复制和下载已阻止，不会静默降级。":
+    "The selected Profile is disabled, deleted, or its list failed to load. Select another; copy and download are blocked and will not silently fall back.",
+  "正在确认所选 Profile，复制和下载暂时不可用。":
+    "Confirming the selected Profile. Copy and download are temporarily unavailable.",
+  "Rule Profile 列表加载失败，不影响不使用 Profile 的导出。":
+    "The Rule Profile list failed to load. Exports without a Profile remain available.",
+  "将输出完整 Mihomo 配置。删除或禁用此 Profile 后，已有 URL 会返回 404，不会回退。":
+    "Exports a complete Mihomo configuration. If this Profile is deleted or disabled, existing URLs return 404 and do not fall back.",
+  "不选时保持旧 Clash proxies-only 输出。": "Leave unselected to keep the previous Clash proxies-only output.",
+  "所选 Rule Profile 已禁用、删除或无法加载，请重新选择。导出不会自动降级为仅 proxies。":
+    "The selected Rule Profile is disabled, deleted, or unavailable. Select another. Export will not automatically fall back to proxies only.",
+  "导出默认跟随当前列表筛选；上方选项可覆盖可路由、启用状态、Outbound、协议、排除协议和标签条件。选择 Rule Profile 后输出完整 Mihomo 配置；不选保持旧 Clash proxies-only。转换器建议使用 URL query token。":
+    "Export follows the current list filters by default. The options above can override routability, enabled state, Outbound, protocol, excluded protocol, and tag filters. Selecting a Rule Profile outputs a complete Mihomo configuration; leaving it unselected keeps the previous Clash proxies-only output. URL query tokens are recommended for converters.",
 };
 
 export function translateDocumentTitle(locale: AppLocale): string {

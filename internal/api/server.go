@@ -127,6 +127,13 @@ func NewServerWithAddress(
 		authed.Handle("POST /api/v1/export-tokens", HandleCreateExportToken(cp))
 		authed.Handle("DELETE /api/v1/export-tokens/{id}", HandleDeleteExportToken(cp))
 
+		// Rule profiles (admin management).
+		authed.Handle("GET /api/v1/rule-profiles", HandleListRuleProfiles(cp))
+		authed.Handle("POST /api/v1/rule-profiles", HandleCreateRuleProfile(cp))
+		authed.Handle("GET /api/v1/rule-profiles/{id}", HandleGetRuleProfile(cp))
+		authed.Handle("PATCH /api/v1/rule-profiles/{id}", HandleUpdateRuleProfile(cp))
+		authed.Handle("DELETE /api/v1/rule-profiles/{id}", HandleDeleteRuleProfile(cp))
+
 		// Proxy sources (built-in safe list).
 		authed.Handle("GET /api/v1/proxy-sources", HandleListProxySources())
 		authed.Handle("POST /api/v1/proxy-sources/fetch", HandleFetchProxySources(cp))

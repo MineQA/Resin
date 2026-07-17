@@ -14,6 +14,7 @@ import { useToast } from "../../hooks/useToast";
 import i18next, { useI18n } from "../../i18n";
 import { formatApiErrorMessage } from "../../lib/error-message";
 import { formatDateTime, formatRelativeTime } from "../../lib/time";
+import { RuleProfileSection } from "./RuleProfileSection";
 import {
   deriveEffectivePolicy,
   isValidCustomTargetURL,
@@ -1391,8 +1392,11 @@ export function SystemConfigPage() {
                     </div>
                   ) : null}
                 </section>
+
               </Card>
             )}
+
+            <RuleProfileSection showToast={showToast} />
           </div>
 
           <div className="syscfg-side">
@@ -1456,6 +1460,7 @@ export function SystemConfigPage() {
           </div>
         </div>
       )}
+
     </section>
   );
 }

@@ -5,7 +5,7 @@ import {
   type CloudflareStatusToken,
   type ScoringPolicy,
 } from "../../lib/cloudflareStatus";
-import type { CreatedExportToken, EnvConfig, ExportToken, ProxyCheckProfile, RuntimeConfig, RuntimeConfigPatch } from "./types";
+import type { CreatedExportToken, EnvConfig, ExportToken, ProxyCheckProfile, RuleProfileCreateBody, RuleProfileDetail, RuleProfilePatchBody, RuleProfileSummary, RuntimeConfig, RuntimeConfigPatch } from "./types";
 
 const path = "/api/v1/system/config";
 
@@ -342,6 +342,41 @@ export async function createExportToken(name: string): Promise<CreatedExportToke
 
 export async function deleteExportToken(id: string): Promise<void> {
   await apiRequest<void>(`/api/v1/export-tokens/${id}`, {
+    method: "DELETE",
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Rule Profiles
+// ---------------------------------------------------------------------------
+
+const ruleProfilePath = "/api/v1/rule-profiles";
+
+export async function listRuleProfiles(enabled?: boolean): Promise<RuleProfileSummary[]> {
+  const url = enabled === undefined ? ruleProfilePath : `${ruleProfilePath}?enabled=${String(enabled)}`;
+  return await apiRequest<RuleProfileSummary[]>(url);
+}
+
+export async function getRuleProfile(id: string): Promise<RuleProfileDetail> {
+  return await apiRequest<RuleProfileDetail>(`${ruleProfilePath}/${id}`);
+}
+
+export async function createRuleProfile(body: RuleProfileCreateBody): Promise<RuleProfileDetail> {
+  return await apiRequest<RuleProfileDetail>(ruleProfilePath, {
+    method: "POST",
+    body,
+  });
+}
+
+export async function updateRuleProfile(id: string, body: RuleProfilePatchBody): Promise<RuleProfileDetail> {
+  return await apiRequest<RuleProfileDetail>(`${ruleProfilePath}/${id}`, {
+    method: "PATCH",
+    body,
+  });
+}
+
+export async function deleteRuleProfile(id: string): Promise<void> {
+  await apiRequest<void>(`${ruleProfilePath}/${id}`, {
     method: "DELETE",
   });
 }

@@ -91,3 +91,29 @@ export type ExportToken = {
 export type CreatedExportToken = ExportToken & {
   token: string;
 };
+
+// Rule Profile: named Mihomo template injected into Clash exports.
+
+export type RuleProfileSummary = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RuleProfileDetail = RuleProfileSummary & {
+  template_yaml: string;
+};
+
+export type RuleProfileCreateBody = {
+  name: string;
+  template_yaml: string;
+  enabled?: boolean;
+};
+
+export type RuleProfilePatchBody = {
+  name?: string;
+  template_yaml?: string;
+  enabled?: boolean;
+};

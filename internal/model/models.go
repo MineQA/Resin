@@ -148,6 +148,16 @@ type SubscriptionNodeKey struct {
 	NodeHash       string
 }
 
+// RuleProfile represents a named Clash YAML template for rule-mode exports.
+type RuleProfile struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	TemplateYAML string `json:"template_yaml"`
+	Enabled      bool   `json:"enabled"`
+	CreatedAtNs  int64  `json:"created_at_ns"`
+	UpdatedAtNs  int64  `json:"updated_at_ns"`
+}
+
 // ExportToken represents an API token used for exporting node-pool data.
 type ExportToken struct {
 	ID           string `json:"id"`

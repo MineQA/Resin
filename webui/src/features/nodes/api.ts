@@ -246,7 +246,12 @@ export async function probeQuality(hash: string): Promise<ProbeQualityResult> {
   });
 }
 
-export function buildNodePoolExportURL(filters: NodeListQuery, exportToken: string, format: string = "clash"): string {
+export function buildNodePoolExportURL(
+  filters: NodeListQuery,
+  exportToken: string,
+  format: string = "clash",
+  ruleProfileID?: string,
+): string {
   const query = buildNodeListSearchParams({
     ...filters,
     sort_by: undefined,
@@ -256,6 +261,10 @@ export function buildNodePoolExportURL(filters: NodeListQuery, exportToken: stri
   });
   query.set("format", format);
   query.set("export_token", exportToken);
+  // rule_profile_id is only valid for clash; defense-in-depth, never attach for other formats.
+  if (format === "clash" && ruleProfileID && ruleProfileID.trim()) {
+    query.set("rule_profile_id", ruleProfileID.trim());
+  }
   return `/api/v1/node-pool/export?${query.toString()}`;
 }
 
@@ -272,8 +281,13 @@ function apiURL(path: string): string {
   return `${API_BASE_URL}${path}`;
 }
 
-export async function exportNodePoolText(filters: NodeListQuery, exportToken: string, format: string = "clash"): Promise<string> {
-  const url = buildNodePoolExportURL(filters, exportToken, format);
+export async function exportNodePoolText(
+  filters: NodeListQuery,
+  exportToken: string,
+  format: string = "clash",
+  ruleProfileID?: string,
+): Promise<string> {
+  const url = buildNodePoolExportURL(filters, exportToken, format, ruleProfileID);
   const res = await fetch(apiURL(url));
   if (!res.ok) {
     throw new Error(`export failed: ${res.status} ${res.statusText}`);
