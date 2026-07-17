@@ -996,6 +996,285 @@ const EXACT_ZH_TO_EN: Record<string, string> = {
     "The selected Rule Profile is disabled, deleted, or unavailable. Select another. Export will not automatically fall back to proxies only.",
   "导出默认跟随当前列表筛选；上方选项可覆盖可路由、启用状态、Outbound、协议、排除协议和标签条件。选择 Rule Profile 后输出完整 Mihomo 配置；不选保持旧 Clash proxies-only。转换器建议使用 URL query token。":
     "Export follows the current list filters by default. The options above can override routability, enabled state, Outbound, protocol, excluded protocol, and tag filters. Selecting a Rule Profile outputs a complete Mihomo configuration; leaving it unselected keeps the previous Clash proxies-only output. URL query tokens are recommended for converters.",
+  // ── Rule Profile Phase 3: ACL4SSR preview + YAML assist ───────────────
+  "从 ACL4SSR 导入（预览）": "Import from ACL4SSR (preview)",
+  "预览与「应用到 YAML」只更新本地草稿，不会保存 Rule Profile。只有下方创建/保存才会写入服务器。":
+    "Preview and “Apply to YAML” only update the local draft. They do not save a Rule Profile. Only Create/Save below writes to the server.",
+  "导入方式": "Import method",
+  "ACL4SSR Online Full": "ACL4SSR Online Full",
+  "粘贴 [custom] INI": "Paste [custom] INI",
+  "使用服务端固定来源 acl4ssr-online-full（ACL4SSR Online Full）。Resin 仅在你点击预览时抓取一次，不会在导出时自动同步。":
+    "Uses the server allowlisted source acl4ssr-online-full (ACL4SSR Online Full). Resin fetches once when you preview; it does not auto-sync on export.",
+  "ACL4SSR [custom] INI": "ACL4SSR [custom] INI",
+  "粘贴包含 [custom]、custom_proxy_group= 与 ruleset= 的 INI…":
+    "Paste INI that includes [custom], custom_proxy_group=, and ruleset=…",
+  "转换预览": "Preview conversion",
+  "预览中...": "Previewing...",
+  "预览不会保存；应用后仍需创建/保存才会持久化。":
+    "Preview does not save. After applying, you still need Create/Save to persist.",
+  "转换报告": "Conversion report",
+  "未保存": "Not saved",
+  "组 {{count}}": "Groups {{count}}",
+  "Provider {{count}}": "Providers {{count}}",
+  "规则 {{count}}": "Rules {{count}}",
+  "来源": "Source",
+  "许可": "License",
+  "转换警告（{{count}}）": "Conversion warnings ({{count}})",
+  "无转换警告。": "No conversion warnings.",
+  "应用到 YAML（尚未保存）": "Apply to YAML (not saved yet)",
+  "应用预览会覆盖当前编辑器中的 YAML（尚未保存到服务器）。是否继续？":
+    "Applying the preview will replace the YAML in the editor (not yet saved to the server). Continue?",
+  "已应用到本地 YAML（尚未保存）": "Applied to local YAML (not saved yet)",
+  "MATCH → {{target}}{{order}}": "MATCH → {{target}}{{order}}",
+  "（非末条）": " (not last)",
+  "无 MATCH": "No MATCH",
+  "本地结构摘要仅供参考；保存时仍以服务端校验为准。":
+    "Local structure summary is advisory only. Server validation remains authoritative on save.",
+  "正在加载 YAML 编辑器…": "Loading YAML editor…",
+  "高级编辑器不可用，已切换为纯文本编辑。": "Advanced editor unavailable; switched to plain-text editing.",
+  // YAML structural summary (localized keys; parser detail stays verbatim after prefix)
+  "YAML 解析错误：{{detail}}": "YAML parse error: {{detail}}",
+  "YAML 警告：{{detail}}": "YAML warning: {{detail}}",
+  "（第 {{line}} 行）": " (line {{line}})",
+  "根文档必须是 YAML 映射": "Root document must be a YAML mapping",
+  "proxy-groups 应为序列（sequence），不能是映射或其他类型":
+    "proxy-groups must be a sequence, not a mapping or other type",
+  "rule-providers 应为映射（mapping），不能是序列或其他类型":
+    "rule-providers must be a mapping, not a sequence or other type",
+  "rules 应为序列（sequence），不能是映射或其他类型":
+    "rules must be a sequence, not a mapping or other type",
+  "未找到 MATCH 规则": "No MATCH rule found",
+  "MATCH 不是最后一条规则": "MATCH is not the last rule",
+  "发现多条 MATCH 规则（{{count}}）": "Multiple MATCH rules found ({{count}})",
+
+  // ── Rule Profile Phase 4: visual Groups / Providers / Rules ───────────
+  "YAML": "YAML",
+  "分组": "Groups",
+  "Provider": "Provider",
+  "规则": "Rules",
+  "Rule Profile 编辑模式": "Rule Profile editor mode",
+  "YAML 为唯一持久化源。分组/Provider/规则页签的更改需点「应用可视化到 YAML」才会写入本地草稿；创建/保存才会写入服务器。":
+    "YAML is the only persisted source. Changes on Groups/Providers/Rules tabs enter the local draft only after “Apply visual to YAML”; Create/Save writes to the server.",
+  "可视化未应用": "Visual not applied",
+  "YAML 已变 · 草稿过期": "YAML changed · draft stale",
+  "可视化已同步": "Visual in sync",
+  "原始项 {{count}}": "Raw items {{count}}",
+  "校验错误 {{count}}": "Validation errors {{count}}",
+  "阻断 {{count}}": "Blockers {{count}}",
+  "警告 {{count}}": "Warnings {{count}}",
+  "从 YAML 重新加载": "Reload from YAML",
+  "应用可视化到 YAML（尚未保存）": "Apply visual to YAML (not saved yet)",
+  "YAML 已在可视化之后被修改。草稿已过期，不能应用。请从 YAML 重新加载可视化。":
+    "YAML was changed after the visual draft. The draft is stale and cannot be applied. Reload the visual editor from YAML.",
+  "无法解析可视化草稿": "Cannot parse visual draft",
+  "请先在 YAML 页签修复解析错误，再重新加载。":
+    "Fix parse errors on the YAML tab first, then reload.",
+  "尚未加载可视化草稿。点击「从 YAML 重新加载」。":
+    "No visual draft loaded. Click “Reload from YAML”.",
+  "请先从 YAML 加载可视化草稿。": "Load a visual draft from YAML first.",
+  "可视化草稿已过期。请先从 YAML 重新加载。":
+    "The visual draft is stale. Reload from YAML first.",
+  "应用可视化失败": "Failed to apply visual draft",
+  "无法从 YAML 解析可视化草稿，请先修复 YAML。":
+    "Cannot parse a visual draft from YAML. Fix the YAML first.",
+  "从 YAML 重新加载会丢弃未应用的可视化更改，是否继续？":
+    "Reloading from YAML discards unapplied visual changes. Continue?",
+  "可视化草稿有未应用更改。关闭将丢弃这些更改（YAML 本身若已改动仍会丢失未保存内容）。是否关闭？":
+    "The visual draft has unapplied changes. Closing discards them (unsaved YAML edits are also lost). Close?",
+  "可视化草稿有未应用更改。载入示例会覆盖 YAML 并丢弃可视化草稿，是否继续？":
+    "The visual draft has unapplied changes. Loading the example replaces YAML and discards the visual draft. Continue?",
+  "可视化草稿有未应用更改。应用 ACL4SSR 预览会覆盖 YAML 并丢弃可视化草稿，是否继续？":
+    "The visual draft has unapplied changes. Applying the ACL4SSR preview replaces YAML and discards the visual draft. Continue?",
+  "可视化草稿有未应用更改。请先「应用可视化到 YAML」，或丢弃可视化更改后再保存。":
+    "The visual draft has unapplied changes. Apply visual to YAML first, or discard visual changes before saving.",
+  "丢弃未应用的可视化更改？当前 YAML 保持不变，可再次点击创建/保存写入服务器。":
+    "Discard unapplied visual changes? Current YAML stays unchanged; click Create/Save again to write to the server.",
+  "前往可视化并应用": "Go to visual and apply",
+  "丢弃可视化更改": "Discard visual changes",
+  "删除会移动后面的原始项位置，请先在 YAML 中处理原始项":
+    "Deleting would shift later raw item positions. Handle raw items in YAML first.",
+  "无法删除组 {{name}}：其后有原始项锚点":
+    "Cannot delete group {{name}}: a raw item is anchored after it",
+  "无法删除 Provider {{name}}：其后有原始项锚点":
+    "Cannot delete provider {{name}}: a raw item is anchored after it",
+  "无法删除规则 {{index}}：其后有原始项锚点":
+    "Cannot delete rule {{index}}: a raw item is anchored after it",
+  // Visual finding localization (by stable core code)
+  "组名称不能为空": "Group name must not be empty",
+  "重复的组名称：{{name}}": "Duplicate group name: {{name}}",
+  "url-test 组「{{name}}」需要测速 URL": "url-test group “{{name}}” requires a health-check URL",
+  "url-test 组「{{name}}」的 URL 必须使用 http 或 https":
+    "url-test group “{{name}}” URL must use http or https",
+  "url-test 组「{{name}}」的 URL 必须包含主机名":
+    "url-test group “{{name}}” URL must have a host",
+  "url-test 组「{{name}}」的 URL 无效": "url-test group “{{name}}” URL is not valid",
+  "url-test 组「{{name}}」的 interval 必须是正有限数":
+    "url-test group “{{name}}” interval must be a positive finite number",
+  "url-test 组「{{name}}」的 timeout 必须是正有限数":
+    "url-test group “{{name}}” timeout must be a positive finite number",
+  "url-test 组「{{name}}」的 tolerance 必须是非负有限数":
+    "url-test group “{{name}}” tolerance must be a non-negative finite number",
+  "组「{{name}}」有 filter 但未开启 include-all-proxies":
+    "Group “{{name}}” has a filter without include-all-proxies",
+  "组「{{name}}」既无 proxies 成员也未开启 include-all-proxies":
+    "Group “{{name}}” has no proxies and no include-all-proxies",
+  "Provider key 不能为空": "Provider key must not be empty",
+  "重复的 Provider key：{{key}}": "Duplicate provider key: {{key}}",
+  "Provider「{{key}}」的 URL 不能为空": "Provider “{{key}}” URL must not be empty",
+  "Provider「{{key}}」的 URL 必须使用 HTTPS": "Provider “{{key}}” URL must use HTTPS",
+  "Provider「{{key}}」的 URL 必须包含主机名": "Provider “{{key}}” URL must have a host",
+  "Provider「{{key}}」的 URL 不能包含 userinfo": "Provider “{{key}}” URL must not contain userinfo",
+  "Provider「{{key}}」的 URL 不能包含 fragment": "Provider “{{key}}” URL must not contain a fragment",
+  "Provider「{{key}}」的 URL 无效": "Provider “{{key}}” URL is not valid",
+  "Provider「{{key}}」的 interval 必须是正有限数":
+    "Provider “{{key}}” interval must be a positive finite number",
+  "MATCH 规则的策略目标不能为空": "MATCH rule must have a non-empty policy",
+  "RULE-SET 的 provider 不能为空": "RULE-SET must have a non-empty provider",
+  "RULE-SET 的策略目标不能为空": "RULE-SET must have a non-empty policy",
+  "GEOIP 的国家/地区代码不能为空": "GEOIP country/region code must not be empty",
+  "GEOIP 的策略目标不能为空": "GEOIP policy must not be empty",
+  "存在多条 MATCH 规则": "Multiple MATCH rules found",
+  "MATCH 必须是最后一条规则": "MATCH must be the last rule",
+  "缺少 MATCH 规则；有效配置需要一条 MATCH":
+    "No MATCH rule found; a MATCH rule is required for a valid configuration",
+  "RULE-SET 引用了未定义的 provider「{{key}}」":
+    "RULE-SET references undefined provider “{{key}}”",
+  "组「{{name}}」的 proxies 引用了未知成员「{{member}}」":
+    "Group “{{name}}” proxies list references unknown member “{{member}}”",
+  "规则策略「{{policy}}」不匹配任何已知组名":
+    "Rule policy “{{policy}}” does not match any known group name",
+  "基础 YAML 无法解析；已禁用应用": "Base YAML cannot be parsed; apply disabled",
+  "基础 YAML 存在解析错误；已禁用应用": "Base YAML has parse errors; apply disabled",
+  "可视化草稿已过期：基础 YAML 已变化": "Visual draft is stale; base YAML has changed",
+  "根文档不是 YAML 映射": "Root document is not a YAML mapping",
+  "区段因锚点/别名或错误类型被阻断，无法可视化编辑":
+    "Section is blocked (anchors/aliases or wrong type) and cannot be edited visually",
+  "未知顶层键「{{key}}」将原样保留": "Unknown top-level key “{{key}}” will be preserved as-is",
+  "{{count}} 个原始组将保留（可视化只读）":
+    "{{count}} raw group(s) preserved (read-only in visual mode)",
+  "{{count}} 个原始 Provider 将保留（可视化只读）":
+    "{{count}} raw provider(s) preserved (read-only in visual mode)",
+  "{{count}} 条原始规则将保留（可视化只读）":
+    "{{count}} raw rule(s) preserved (read-only in visual mode)",
+  "组「{{name}}」有 {{count}} 个未知字段将保留":
+    "Group “{{name}}” has {{count}} unknown field(s) preserved",
+  "Provider「{{key}}」有 {{count}} 个未知字段将保留":
+    "Provider “{{key}}” has {{count}} unknown field(s) preserved",
+  "proxy-providers 将原样保留（仅 YAML，不可可视化编辑）":
+    "proxy-providers is preserved as-is (YAML-only, not visually editable)",
+  "顶层 proxies 将原样保留（仅 YAML）":
+    "Top-level proxies list is preserved as-is (YAML-only)",
+  "组已从「{{from}}」重命名为「{{to}}」。引用旧名称的规则或成员不会自动更新。":
+    "Group renamed from “{{from}}” to “{{to}}”. Rules or members referencing the old name are not auto-updated.",
+  "Provider 已从「{{from}}」重命名为「{{to}}」。引用旧 key 的 RULE-SET 不会自动更新。":
+    "Provider renamed from “{{from}}” to “{{to}}”. RULE-SET rules referencing the old key are not auto-updated.",
+  "正在删除带注释的建模项；相关注释可能丢失。":
+    "A modeled item with comments is being deleted. Comments may be lost.",
+  "规则已重排；与节点关联的注释会随节点保留。":
+    "Rules have been reordered. Comments stay with their rule nodes.",
+  "区段键前有注释；将随节点保留。":
+    "Section key has a preceding comment; it will be preserved with its node.",
+  "区段已重排；注释随原节点保留，但项间注释关联可能偏移。":
+    "Section reordered; comments stay with original nodes, but inter-item comment association may shift.",
+  "应用计划表明当前草稿无法应用": "Apply plan indicates this draft cannot be applied",
+  "存在被阻断的区段，无法应用": "Blocked section(s) prevent apply",
+  "YAML 解析失败：{{detail}}": "YAML parse failed: {{detail}}",
+  "应用失败：{{detail}}": "Apply failed: {{detail}}",
+  "序列化失败：{{detail}}": "Stringify failed: {{detail}}",
+  "原始组不可增删或移动位置": "Raw groups cannot be added, deleted, or moved",
+  "原始 Provider 不可增删或移动位置": "Raw providers cannot be added, deleted, or moved",
+  "原始规则不可增删或移动位置": "Raw rules cannot be added, deleted, or moved",
+  "（{{code}}）{{detail}}": "({{code}}) {{detail}}",
+  "应用可视化到 YAML — 保真报告": "Apply visual to YAML — fidelity report",
+  "尚未保存到服务器": "Not saved to the server yet",
+  "将用当前可视化草稿覆盖 YAML 中的 proxy-groups、rule-providers、rules。其他顶层键尽量保留。注释/锚点/格式可能变化；原始/不支持项仅 YAML 可精确编辑。确认后只更新本地 YAML，仍需创建/保存才会写入服务器。":
+    "The current visual draft will overwrite proxy-groups, rule-providers, and rules in YAML. Other top-level keys are preserved when possible. Comments/anchors/formatting may change; raw/unsupported items are YAML-only. Confirming updates local YAML only; Create/Save still writes to the server.",
+  "组变更 {{count}}": "Group changes {{count}}",
+  "Provider 变更 {{count}}": "Provider changes {{count}}",
+  "规则变更 {{count}}": "Rule changes {{count}}",
+  "操作：{{ops}}": "Ops: {{ops}}",
+  "无语义变更（可原样回写）": "No semantic changes (may write back as-is)",
+  "校验错误（{{count}}）— 阻止应用": "Validation errors ({{count}}) — block apply",
+  "保真阻断（{{count}}）": "Fidelity blockers ({{count}})",
+  "校验警告（{{count}}）": "Validation warnings ({{count}})",
+  "保真警告（{{count}}）— 请审阅后确认": "Fidelity warnings ({{count}}) — review before confirm",
+  "保真信息（{{count}}）": "Fidelity info ({{count}})",
+  "未发现额外保真提示；仍请确认再应用。":
+    "No extra fidelity notes; still confirm before applying.",
+  "确认应用（尚未保存）": "Confirm apply (not saved yet)",
+  "应用中...": "Applying...",
+  "存在阻断项，无法应用。请修复校验错误或回到 YAML 处理不支持结构。":
+    "Blockers prevent apply. Fix validation errors or handle unsupported structure in YAML.",
+  "proxy-groups 区段因错误类型或锚点/别名被阻断，仅可在 YAML 中编辑。请修复后从 YAML 重新加载。":
+    "The proxy-groups section is blocked due to wrong type or anchors/aliases. Edit in YAML only, then reload.",
+  "rule-providers 区段因错误类型或锚点/别名被阻断，仅可在 YAML 中编辑。请修复后从 YAML 重新加载。":
+    "The rule-providers section is blocked due to wrong type or anchors/aliases. Edit in YAML only, then reload.",
+  "rules 区段因错误类型或锚点/别名被阻断，仅可在 YAML 中编辑。请修复后从 YAML 重新加载。":
+    "The rules section is blocked due to wrong type or anchors/aliases. Edit in YAML only, then reload.",
+  "顶层 proxies 由 Resin 导出时替换。动态节点请用 include-all-proxies 与 filter；不要手写池内动态节点名。原始/不支持组类型仅 YAML 可编辑。":
+    "Top-level proxies are replaced by Resin on export. Use include-all-proxies and filter for dynamic nodes; do not hard-code pool node names. Raw/unsupported group types are YAML-only.",
+  "仅建模 HTTP + classical + text 的 rule-providers。远程 URL 由 Mihomo 客户端拉取，Resin 不代拉。proxy-providers 始终仅 YAML 透传。":
+    "Only HTTP + classical + text rule-providers are modeled. Remote URLs are fetched by the Mihomo client, not Resin. proxy-providers always stay YAML-only passthrough.",
+  "仅建模 RULE-SET / GEOIP / MATCH。其他规则类型为原始项，不可在可视化中重排或删除。新规则插入在末尾 MATCH 之前。":
+    "Only RULE-SET / GEOIP / MATCH are modeled. Other rule types are raw items and cannot be reordered or deleted visually. New rules insert before the terminal MATCH.",
+  "添加 select 组": "Add select group",
+  "添加 url-test 组": "Add url-test group",
+  "添加 HTTP provider": "Add HTTP provider",
+  "添加 RULE-SET": "Add RULE-SET",
+  "添加 GEOIP": "Add GEOIP",
+  "添加 MATCH": "Add MATCH",
+  "暂无 proxy-groups。可添加，或从 YAML / ACL4SSR 导入。":
+    "No proxy-groups yet. Add one, or import from YAML / ACL4SSR.",
+  "暂无 rule-providers。可添加，或从 YAML / ACL4SSR 导入。":
+    "No rule-providers yet. Add one, or import from YAML / ACL4SSR.",
+  "暂无 rules。请添加 MATCH 作为末条，或从 YAML / ACL4SSR 导入。":
+    "No rules yet. Add a terminal MATCH, or import from YAML / ACL4SSR.",
+  "仅 YAML": "YAML only",
+  "未命名组": "Unnamed group",
+  "未命名 Provider": "Unnamed provider",
+  "原始规则": "Raw rule",
+  "不支持的组类型或结构；请在 YAML 中精确编辑。":
+    "Unsupported group type or structure; edit precisely in YAML.",
+  "不支持的 provider 形态；请在 YAML 中精确编辑。":
+    "Unsupported provider shape; edit precisely in YAML.",
+  "不支持的规则类型；请在 YAML 中精确编辑。":
+    "Unsupported rule type; edit precisely in YAML.",
+  "未知字段 {{count}}": "Unknown fields {{count}}",
+  "上移组 {{name}}": "Move group up {{name}}",
+  "下移组 {{name}}": "Move group down {{name}}",
+  "删除组 {{name}}": "Delete group {{name}}",
+  "上移 Provider {{name}}": "Move provider up {{name}}",
+  "下移 Provider {{name}}": "Move provider down {{name}}",
+  "删除 Provider {{name}}": "Delete provider {{name}}",
+  "上移规则 {{index}}": "Move rule up {{index}}",
+  "下移规则 {{index}}": "Move rule down {{index}}",
+  "删除规则 {{index}}": "Delete rule {{index}}",
+  "类型": "Type",
+  "include-all-proxies": "include-all-proxies",
+  "与 proxies 成员列表相互独立；可同时存在。":
+    "Independent from the proxies member list; both may exist together.",
+  "filter（可选）": "filter (optional)",
+  "留空表示省略 filter": "Leave empty to omit filter",
+  "proxies 成员（每行一个）": "proxies members (one per line)",
+  "组名 / DIRECT / REJECT …": "Group name / DIRECT / REJECT …",
+  "测速 URL": "Health-check URL",
+  "interval": "interval",
+  "timeout": "timeout",
+  "tolerance": "tolerance",
+  "Provider key": "Provider key",
+  "interval（秒）": "interval (seconds)",
+  "HTTPS URL": "HTTPS URL",
+  "须为绝对 HTTPS URL；不要放入含 secret 的私有地址。客户端而非 Resin 会访问此 URL。":
+    "Must be an absolute HTTPS URL; do not put private URLs with secrets. The client, not Resin, fetches this URL.",
+  "需要恰好一条末尾 MATCH 规则。可添加 MATCH，或在 YAML 中修复。":
+    "Exactly one terminal MATCH rule is required. Add MATCH, or fix it in YAML.",
+  "发现多条 MATCH 规则（{{count}}）。请删除多余项或在 YAML 中整理。":
+    "Multiple MATCH rules found ({{count}}). Remove extras or fix in YAML.",
+  "末条固定": "Terminal pinned",
+  "国家/地区代码": "Country/region code",
+  "策略目标": "Policy target",
+  "GEOIP 等场景常用；RULE-SET 按需开启。":
+    "Common for GEOIP; enable for RULE-SET as needed.",
 };
 
 export function translateDocumentTitle(locale: AppLocale): string {

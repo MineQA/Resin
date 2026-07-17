@@ -71,6 +71,11 @@ type ControlPlaneService struct {
 	// otherwise. The closure is wired in cmd/resin/app_runtime.go and is
 	// responsible for building/using/closing the outbound.
 	RawProxyChecker RawProxyChecker
+
+	// ACL4SSRFetcher fetches ACL4SSR source INI content for the preview
+	// endpoint. Must be set for source_id-based preview; may be nil if only
+	// inline content preview is used. Wired in cmd/resin/app_runtime.go.
+	ACL4SSRFetcher ACL4SSRFetcher
 }
 
 // ------------------------------------------------------------------

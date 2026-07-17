@@ -55,6 +55,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 			status = http.StatusNotFound
 		case "CONFLICT":
 			status = http.StatusConflict
+		case "UNAVAILABLE":
+			status = http.StatusBadGateway
 		default:
 			status = http.StatusInternalServerError
 		}

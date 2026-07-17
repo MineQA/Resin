@@ -92,6 +92,26 @@ func HandleUpdateRuleProfile(cp *service.ControlPlaneService) http.HandlerFunc {
 	}
 }
 
+// HandleACL4SSRPreview returns a handler for POST /api/v1/rule-profiles/acl4ssr/preview.
+// It converts an ACL4SSR [custom] INI (inline or from a known source) to a
+// preview Clash/Mihomo YAML template without persisting anything.
+func HandleACL4SSRPreview(cp *service.ControlPlaneService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body service.ACL4SSRPreviewRequest
+		if err := DecodeBody(r, &body); err != nil {
+			writeDecodeBodyError(w, err)
+			return
+		}
+
+		resp, err := cp.PreviewACL4SSRConversion(r.Context(), body)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		WriteJSON(w, http.StatusOK, resp)
+	}
+}
+
 // HandleDeleteRuleProfile returns a handler for DELETE /api/v1/rule-profiles/{id}.
 func HandleDeleteRuleProfile(cp *service.ControlPlaneService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

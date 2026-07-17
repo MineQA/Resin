@@ -384,16 +384,17 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 	}
 
 	cpService := &service.ControlPlaneService{
-		RuntimeCfg:     a.runtimeCfg,
-		EnvCfg:         a.envCfg,
-		Engine:         engine,
-		Pool:           a.topoRuntime.pool,
-		SubMgr:         a.topoRuntime.subManager,
-		Scheduler:      a.topoRuntime.scheduler,
-		Router:         a.topoRuntime.router,
-		ProbeMgr:       a.topoRuntime.probeMgr,
-		GeoIP:          a.geoSvc,
-		MatcherRuntime: a.accountMatcher,
+		RuntimeCfg:      a.runtimeCfg,
+		EnvCfg:          a.envCfg,
+		Engine:          engine,
+		Pool:            a.topoRuntime.pool,
+		SubMgr:          a.topoRuntime.subManager,
+		Scheduler:       a.topoRuntime.scheduler,
+		Router:          a.topoRuntime.router,
+		ProbeMgr:        a.topoRuntime.probeMgr,
+		GeoIP:           a.geoSvc,
+		MatcherRuntime:  a.accountMatcher,
+		ACL4SSRFetcher:  netutil.FetchSafeHTTPS,
 		RawProxyChecker: func(raw json.RawMessage, profile probe.TargetProfile, opts probe.ProxyCheckOptions) (*probe.ProxyScore, error) {
 			ob, err := a.topoRuntime.singboxBuilder.Build(raw)
 			if err != nil {

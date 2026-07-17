@@ -5,7 +5,20 @@ import {
   type CloudflareStatusToken,
   type ScoringPolicy,
 } from "../../lib/cloudflareStatus";
-import type { CreatedExportToken, EnvConfig, ExportToken, ProxyCheckProfile, RuleProfileCreateBody, RuleProfileDetail, RuleProfilePatchBody, RuleProfileSummary, RuntimeConfig, RuntimeConfigPatch } from "./types";
+import type {
+  ACL4SSRPreviewRequest,
+  ACL4SSRPreviewResponse,
+  CreatedExportToken,
+  EnvConfig,
+  ExportToken,
+  ProxyCheckProfile,
+  RuleProfileCreateBody,
+  RuleProfileDetail,
+  RuleProfilePatchBody,
+  RuleProfileSummary,
+  RuntimeConfig,
+  RuntimeConfigPatch,
+} from "./types";
 
 const path = "/api/v1/system/config";
 
@@ -378,6 +391,19 @@ export async function updateRuleProfile(id: string, body: RuleProfilePatchBody):
 export async function deleteRuleProfile(id: string): Promise<void> {
   await apiRequest<void>(`${ruleProfilePath}/${id}`, {
     method: "DELETE",
+  });
+}
+
+/** Dry-run ACL4SSR → Mihomo YAML conversion. Never persists a Rule Profile. */
+export async function previewACL4SSR(body: ACL4SSRPreviewRequest): Promise<ACL4SSRPreviewResponse> {
+  // Send exactly one field; omit the other so JSON matches the server contract.
+  const payload: Record<string, string> =
+    body.source_id !== undefined && body.source_id !== ""
+      ? { source_id: body.source_id }
+      : { ini_content: body.ini_content ?? "" };
+  return await apiRequest<ACL4SSRPreviewResponse>(`${ruleProfilePath}/acl4ssr/preview`, {
+    method: "POST",
+    body: payload,
   });
 }
 

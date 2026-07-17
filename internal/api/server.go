@@ -134,6 +134,9 @@ func NewServerWithAddress(
 		authed.Handle("PATCH /api/v1/rule-profiles/{id}", HandleUpdateRuleProfile(cp))
 		authed.Handle("DELETE /api/v1/rule-profiles/{id}", HandleDeleteRuleProfile(cp))
 
+		// ACL4SSR conversion preview (admin only, never persists).
+		authed.Handle("POST /api/v1/rule-profiles/acl4ssr/preview", HandleACL4SSRPreview(cp))
+
 		// Proxy sources (built-in safe list).
 		authed.Handle("GET /api/v1/proxy-sources", HandleListProxySources())
 		authed.Handle("POST /api/v1/proxy-sources/fetch", HandleFetchProxySources(cp))

@@ -117,3 +117,30 @@ export type RuleProfilePatchBody = {
   template_yaml?: string;
   enabled?: boolean;
 };
+
+// ACL4SSR conversion preview (admin dry-run; never persists).
+
+/** Fixed allowlisted source for ACL4SSR Online Full. */
+export const ACL4SSR_ONLINE_FULL_SOURCE_ID = "acl4ssr-online-full" as const;
+
+/** Exactly one of source_id or ini_content must be sent (server-enforced). */
+export type ACL4SSRPreviewRequest = {
+  source_id?: string;
+  ini_content?: string;
+};
+
+export type ACL4SSRSourceAttribution = {
+  name: string;
+  url?: string;
+  license: string;
+};
+
+export type ACL4SSRPreviewResponse = {
+  template_yaml: string;
+  warnings: string[];
+  group_count: number;
+  provider_count: number;
+  rule_count: number;
+  source: ACL4SSRSourceAttribution;
+  attribution: string;
+};

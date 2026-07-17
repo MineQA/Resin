@@ -1,10 +1,14 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/Resinat/Resin/internal/service"
 )
 
 // --- helpers ---
@@ -459,6 +463,228 @@ func TestRuleProfileCreate_LongName(t *testing.T) {
 	}, true)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for long name, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// --- ACL4SSR Preview ---
+
+func TestACL4SSRPreview_INIContentSuccess(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+	cp.ACL4SSRFetcher = nil // not used for inline content
+
+	rec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/rule-profiles/acl4ssr/preview", map[string]any{
+		"ini_content": "[custom]\ncustom_proxy_group=Test`select`.*\nruleset=Test,https://example.com/r.list\nruleset=Final,[]FINAL\n",
+	}, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeJSONMap(t, rec)
+
+	// Core conversion fields.
+	if _, ok := body["template_yaml"]; !ok {
+		t.Fatal("missing template_yaml")
+	}
+	if _, ok := body["warnings"]; !ok {
+		t.Fatal("missing warnings")
+	}
+	if v, _ := body["group_count"].(float64); v != 1 {
+		t.Errorf("group_count = %v, want 1", v)
+	}
+	if v, _ := body["provider_count"].(float64); v != 1 {
+		t.Errorf("provider_count = %v, want 1", v)
+	}
+	if v, _ := body["rule_count"].(float64); v != 2 {
+		t.Errorf("rule_count = %v, want 2", v)
+	}
+
+	// Source attribution — genuinely neutral, no false provenance claim.
+	source, ok := body["source"].(map[string]any)
+	if !ok {
+		t.Fatal("missing source object")
+	}
+	if source["name"] != "User-provided content" {
+		t.Errorf("source.name = %v", source["name"])
+	}
+	if source["license"] != "Unknown / user-provided" {
+		t.Errorf("source.license = %v", source["license"])
+	}
+	if _, ok := body["attribution"]; !ok {
+		t.Fatal("missing attribution")
+	}
+	// Must not falsely claim ACL4SSR/ACL4SSR provenance for generic inline input.
+	attr, _ := body["attribution"].(string)
+	if strings.Contains(attr, "ACL4SSR/ACL4SSR") {
+		t.Error("attribution must not claim ACL4SSR/ACL4SSR provenance for user-provided content")
+	}
+}
+
+func TestACL4SSRPreview_SourceSuccessViaFetcher(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+	cp.ACL4SSRFetcher = mockFetcherForACL4SSR("[custom]\ncustom_proxy_group=Test`select`.*\nruleset=Test,https://example.com/r.list\nruleset=Final,[]FINAL\n")
+
+	rec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/rule-profiles/acl4ssr/preview", map[string]any{
+		"source_id": "acl4ssr-online-full",
+	}, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeJSONMap(t, rec)
+
+	// Source attribution for ACL4SSR/ACL4SSR.
+	source, ok := body["source"].(map[string]any)
+	if !ok {
+		t.Fatal("missing source object")
+	}
+	if source["name"] != "ACL4SSR/ACL4SSR" {
+		t.Errorf("source.name = %v", source["name"])
+	}
+	if source["license"] != "CC-BY-SA-4.0" {
+		t.Errorf("source.license = %v", source["license"])
+	}
+	if _, ok := body["attribution"]; !ok {
+		t.Fatal("missing attribution")
+	}
+}
+
+func TestACL4SSRPreview_Unauthenticated(t *testing.T) {
+	srv, _, _ := newControlPlaneTestServer(t)
+	rec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/rule-profiles/acl4ssr/preview", map[string]any{
+		"ini_content": "test",
+	}, false)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+}
+
+func TestACL4SSRPreview_BothFields(t *testing.T) {
+	srv, _, _ := newControlPlaneTestServer(t)
+	rec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/rule-profiles/acl4ssr/preview", map[string]any{
+		"ini_content": "test",
+		"source_id":   "acl4ssr-online-full",
+	}, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestACL4SSRPreview_NeitherField(t *testing.T) {
+	srv, _, _ := newControlPlaneTestServer(t)
+	rec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/rule-profiles/acl4ssr/preview", map[string]any{}, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestACL4SSRPreview_UnknownSourceID(t *testing.T) {
+	srv, _, _ := newControlPlaneTestServer(t)
+	rec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/rule-profiles/acl4ssr/preview", map[string]any{
+		"source_id": "bogus-source",
+	}, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestACL4SSRPreview_UnknownField(t *testing.T) {
+	srv, _, _ := newControlPlaneTestServer(t)
+	// DecodeBody with DisallowUnknownFields rejects unknown fields.
+	rec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/rule-profiles/acl4ssr/preview", map[string]any{
+		"ini_content":  "test",
+		"unknown_attr": "value",
+	}, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown field, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestACL4SSRPreview_ConverterError(t *testing.T) {
+	srv, _, _ := newControlPlaneTestServer(t)
+	rec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/rule-profiles/acl4ssr/preview", map[string]any{
+		"ini_content": "[custom]\n",
+	}, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for converter error, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestACL4SSRPreview_FetchFailure(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+	cp.ACL4SSRFetcher = mockFetcherForACL4SSRError("connection refused")
+
+	rec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/rule-profiles/acl4ssr/preview", map[string]any{
+		"source_id": "acl4ssr-online-full",
+	}, true)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 for fetch failure, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	assertErrorCode(t, rec, "UNAVAILABLE")
+}
+
+func TestACL4SSRPreview_NoPersistence(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+	cp.ACL4SSRFetcher = mockFetcherForACL4SSR("[custom]\ncustom_proxy_group=Test`select`.*\nruleset=Test,https://example.com/r.list\nruleset=Final,[]FINAL\n")
+
+	// Preview with source_id.
+	rec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/rule-profiles/acl4ssr/preview", map[string]any{
+		"source_id": "acl4ssr-online-full",
+	}, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preview: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// List rule profiles must remain empty.
+	rec = doJSONRequest(t, srv, http.MethodGet, "/api/v1/rule-profiles", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: status=%d", rec.Code)
+	}
+	var list []any
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("unmarshal list: %v", err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("expected 0 persisted profiles after preview, got %d", len(list))
+	}
+}
+
+// mockFetcherForACL4SSR returns an ACL4SSRFetcher that returns the given data.
+func mockFetcherForACL4SSR(data string) service.ACL4SSRFetcher {
+	return func(_ context.Context, _ string) ([]byte, string, error) {
+		return []byte(data), "", nil
+	}
+}
+
+// mockFetcherForACL4SSRError returns an ACL4SSRFetcher that returns the given error.
+func mockFetcherForACL4SSRError(msg string) service.ACL4SSRFetcher {
+	return func(_ context.Context, _ string) ([]byte, string, error) {
+		return nil, "", fmt.Errorf("%s", msg)
+	}
+}
+
+func TestACL4SSRPreview_WhitespaceOnlyContent(t *testing.T) {
+	srv, _, _ := newControlPlaneTestServer(t)
+	rec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/rule-profiles/acl4ssr/preview", map[string]any{
+		"ini_content": "   \n\t  ",
+	}, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for whitespace-only, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestACL4SSRPreview_MalformedJSON(t *testing.T) {
+	srv, _, _ := newControlPlaneTestServer(t)
+	rec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/rule-profiles/acl4ssr/preview", "{bad json}", true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for malformed JSON, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestACL4SSRPreview_EmptySourceIDString(t *testing.T) {
+	srv, _, _ := newControlPlaneTestServer(t)
+	rec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/rule-profiles/acl4ssr/preview", map[string]any{
+		"source_id": "",
+	}, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty source_id, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
