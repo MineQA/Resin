@@ -127,13 +127,19 @@ func TestConvertVMess_HTTP(t *testing.T) {
 		"network": "http",
 		"tls":     true,
 		"http-opts": map[string]any{
-			"path": "/api",
-			"host": []string{"http.example.com"},
+			"path":    []string{"/api"},
+			"headers": map[string]any{"Host": []string{"http.example.com"}},
 		},
 	}
 	got := convertOutbound(t, raw, "vmess-http")
 	if diff := diffMaps(want, got); diff != "" {
 		t.Errorf("mismatch:\n%s", diff)
+	}
+	// Assert no top-level host key in http-opts.
+	if opts, _ := got["http-opts"].(map[string]any); opts != nil {
+		if _, exists := opts["host"]; exists {
+			t.Error("http-opts contains unexpected top-level host key")
+		}
 	}
 }
 
@@ -185,13 +191,19 @@ func TestConvertVMess_HTTP_MultipleHosts(t *testing.T) {
 		"network": "http",
 		"tls":     true,
 		"http-opts": map[string]any{
-			"path": "/",
-			"host": []string{"a.example.com", "b.example.com"},
+			"path":    []string{"/"},
+			"headers": map[string]any{"Host": []string{"a.example.com", "b.example.com"}},
 		},
 	}
 	got := convertOutbound(t, raw, "vmess-mhost")
 	if diff := diffMaps(want, got); diff != "" {
 		t.Errorf("mismatch:\n%s", diff)
+	}
+	// Assert no top-level host key in http-opts.
+	if opts, _ := got["http-opts"].(map[string]any); opts != nil {
+		if _, exists := opts["host"]; exists {
+			t.Error("http-opts contains unexpected top-level host key")
+		}
 	}
 }
 
@@ -392,13 +404,19 @@ func TestConvertTrojan_HTTP(t *testing.T) {
 		"tls":      true,
 		"network":  "http",
 		"http-opts": map[string]any{
-			"path": "/tr",
-			"host": []string{"http.example.com"},
+			"path":    []string{"/tr"},
+			"headers": map[string]any{"Host": []string{"http.example.com"}},
 		},
 	}
 	got := convertOutbound(t, raw, "trojan-http")
 	if diff := diffMaps(want, got); diff != "" {
 		t.Errorf("mismatch:\n%s", diff)
+	}
+	// Assert no top-level host key in http-opts.
+	if opts, _ := got["http-opts"].(map[string]any); opts != nil {
+		if _, exists := opts["host"]; exists {
+			t.Error("http-opts contains unexpected top-level host key")
+		}
 	}
 }
 
@@ -564,13 +582,19 @@ func TestConvertVLess_HTTP(t *testing.T) {
 		"tls":     true,
 		"network": "http",
 		"http-opts": map[string]any{
-			"path": "/vl",
-			"host": []string{"http.example.com"},
+			"path":    []string{"/vl"},
+			"headers": map[string]any{"Host": []string{"http.example.com"}},
 		},
 	}
 	got := convertOutbound(t, raw, "vless-http")
 	if diff := diffMaps(want, got); diff != "" {
 		t.Errorf("mismatch:\n%s", diff)
+	}
+	// Assert no top-level host key in http-opts.
+	if opts, _ := got["http-opts"].(map[string]any); opts != nil {
+		if _, exists := opts["host"]; exists {
+			t.Error("http-opts contains unexpected top-level host key")
+		}
 	}
 }
 
@@ -1992,8 +2016,8 @@ func TestRoundTrip_ClashIngest_Export(t *testing.T) {
 			"network": "http", // parser normalised h2→http
 			"tls":     true,
 			"http-opts": map[string]any{
-				"path": "/h2-path",
-				"host": []string{"h2a.example.com", "h2b.example.com"},
+				"path":    []string{"/h2-path"},
+				"headers": map[string]any{"Host": []string{"h2a.example.com", "h2b.example.com"}},
 			},
 		}
 		if diff := diffMaps(want, got); diff != "" {
@@ -2002,6 +2026,57 @@ func TestRoundTrip_ClashIngest_Export(t *testing.T) {
 		// Assert NOT h2-opts / network=h2.
 		if _, ok := got["h2-opts"]; ok {
 			t.Error("output has h2-opts key when parser normalised h2→http")
+		}
+		// Assert no top-level host key in http-opts.
+		if opts, _ := got["http-opts"].(map[string]any); opts != nil {
+			if _, exists := opts["host"]; exists {
+				t.Error("http-opts contains unexpected top-level host key")
+			}
+		}
+	})
+
+	t.Run("VLESS_HTTP", func(t *testing.T) {
+		// VLESS with Clash network=http + http-opts must round-trip:
+		// Clash input → parser (store as transport.type=http) →
+		// outboundToClashProxy → network=http + http-opts{path, host}.
+		input := `{"proxies":[{
+			"name":"vless-http-rt","type":"vless","server":"vl-http.example.com","port":443,
+			"uuid":"d5e6f7a8-b9c0-1234-defa-345678901234",
+			"tls":true,"servername":"http.example.com",
+			"network":"http",
+			"http-opts":{"path":"/vl","host":"http.example.com"}
+		}]}`
+		got := parseClashRoundTrip(t, input)
+		want := map[string]any{
+			"name":       "vless-http-rt",
+			"type":       "vless",
+			"server":     "vl-http.example.com",
+			"port":       443,
+			"uuid":       "d5e6f7a8-b9c0-1234-defa-345678901234",
+			"udp":        true,
+			"tls":        true,
+			"servername": "http.example.com",
+			"network":    "http",
+			"http-opts": map[string]any{
+				"path":    []string{"/vl"},
+				"headers": map[string]any{"Host": []string{"http.example.com"}},
+			},
+		}
+		if diff := diffMaps(want, got); diff != "" {
+			t.Errorf("mismatch:\n%s", diff)
+		}
+		// Assert it does NOT produce h2-opts or network=h2.
+		if _, ok := got["h2-opts"]; ok {
+			t.Error("output has h2-opts key for Clash network=http input")
+		}
+		if n, _ := got["network"].(string); n != "http" {
+			t.Errorf("network = %q, want http", n)
+		}
+		// Assert no top-level host key in http-opts.
+		if opts, _ := got["http-opts"].(map[string]any); opts != nil {
+			if _, exists := opts["host"]; exists {
+				t.Error("http-opts contains unexpected top-level host key")
+			}
 		}
 	})
 

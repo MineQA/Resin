@@ -221,14 +221,19 @@ func applyClashTransport(proxy map[string]any, ti transportInfo) {
 		}
 
 	case "http":
+		// Mihomo http-opts: path is []string, host goes into headers.Host (also []string).
 		opts := make(map[string]any)
 		if ti.Path != "" {
-			opts["path"] = ti.Path
+			opts["path"] = []string{ti.Path}
 		}
+		var hostList []string
 		if len(ti.Hosts) > 0 {
-			opts["host"] = ti.Hosts
+			hostList = ti.Hosts
 		} else if ti.Host != "" {
-			opts["host"] = ti.Host
+			hostList = []string{ti.Host}
+		}
+		if len(hostList) > 0 {
+			opts["headers"] = map[string]any{"Host": hostList}
 		}
 		if len(opts) > 0 {
 			proxy["http-opts"] = opts
