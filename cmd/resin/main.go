@@ -425,6 +425,30 @@ func newTopologyRuntime(
 		SubManager: subManager,
 		Pool:       pool,
 		Downloader: downloader,
+		OnSubUpdated: func(sub *subscription.Subscription) {
+			ms := model.Subscription{
+				ID:                        sub.ID,
+				Name:                      sub.Name(),
+				SourceType:                sub.SourceType(),
+				URL:                       sub.URL(),
+				Content:                   sub.Content(),
+				UpdateIntervalNs:          sub.UpdateIntervalNs(),
+				UpdateMode:                sub.UpdateMode(),
+				UpdateTime:                sub.UpdateTime(),
+				UpdateTimezone:            sub.UpdateTimezone(),
+				Enabled:                   sub.Enabled(),
+				Ephemeral:                 sub.Ephemeral(),
+				IncrementalAliveNodes:     sub.IncrementalAliveNodes(),
+				EphemeralNodeEvictDelayNs: sub.EphemeralNodeEvictDelayNs(),
+				ClashFingerprintPolicy:    sub.ClashFingerprintPolicy().String(),
+				LastCheckedNs:             sub.LastCheckedNs.Load(),
+				CreatedAtNs:               sub.CreatedAtNs,
+				UpdatedAtNs:               time.Now().UnixNano(),
+			}
+			if err := engine.UpsertSubscription(ms); err != nil {
+				log.Printf("persist subscription %s after update: %v", sub.ID, err)
+			}
+		},
 		OnSubReenabledNode: func(hash node.Hash) {
 			outboundMgr.EnsureNodeOutbound(hash)
 			probeMgr.TriggerImmediateEgressProbe(hash)
@@ -498,11 +522,15 @@ func bootstrapTopology(
 		sub.SetFetchConfig(ms.URL, ms.UpdateIntervalNs)
 		sub.SetSourceType(ms.SourceType)
 		sub.SetContent(ms.Content)
+		sub.SetUpdateMode(ms.UpdateMode)
+		sub.SetUpdateTime(ms.UpdateTime)
+		sub.SetUpdateTimezone(ms.UpdateTimezone)
 		sub.SetIncrementalAliveNodes(ms.IncrementalAliveNodes)
 		sub.SetEphemeralNodeEvictDelayNs(ms.EphemeralNodeEvictDelayNs)
 		sub.SetClashFingerprintPolicy(subscription.ParseClashFingerprintPolicy(ms.ClashFingerprintPolicy))
 		sub.CreatedAtNs = ms.CreatedAtNs
 		sub.UpdatedAtNs = ms.UpdatedAtNs
+		sub.LastCheckedNs.Store(ms.LastCheckedNs)
 		subManager.Register(sub)
 	}
 	log.Printf("Loaded %d subscriptions from state.db", len(dbSubs))

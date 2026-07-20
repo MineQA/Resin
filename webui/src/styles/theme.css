@@ -2331,6 +2331,42 @@ a {
   color: var(--text-muted);
 }
 
+.subscriptions-plan-cell {
+  max-width: 220px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.subscription-update-schedule {
+  gap: 10px;
+}
+
+.subscription-update-mode-tabs {
+  margin-bottom: 0;
+  width: 100%;
+}
+
+.subscription-update-schedule-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.subscription-daily-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: 12px;
+}
+
+.subscription-schedule-hint {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
 .subscriptions-status-cell {
   display: flex;
   flex-wrap: nowrap;
@@ -3773,6 +3809,10 @@ a {
   }
 
   .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .subscription-daily-grid {
     grid-template-columns: 1fr;
   }
 

@@ -7,6 +7,7 @@ import {
   type SubscriptionCreateInput,
   type SubscriptionUpdateInput,
 } from "./types";
+import { normalizeUpdateMode } from "./updateSchedule";
 
 const basePath = "/api/v1/subscriptions";
 
@@ -23,10 +24,16 @@ function normalizeClashFingerprintPolicy(value: unknown): ClashFingerprintPolicy
   return CLASH_FINGERPRINT_POLICY_DEFAULT;
 }
 
-type ApiSubscription = Omit<Subscription, "last_checked" | "last_updated" | "last_error"> & {
+type ApiSubscription = Omit<
+  Subscription,
+  "last_checked" | "last_updated" | "last_error" | "update_mode" | "update_time" | "update_timezone"
+> & {
   source_type?: "remote" | "local";
   content?: string;
   clash_fingerprint_policy?: ClashFingerprintPolicy;
+  update_mode?: string | null;
+  update_time?: string | null;
+  update_timezone?: string | null;
   last_checked?: string | null;
   last_updated?: string | null;
   last_error?: string | null;
@@ -38,6 +45,9 @@ function normalizeSubscription(raw: ApiSubscription): Subscription {
     source_type: raw.source_type ?? "remote",
     content: raw.content ?? "",
     clash_fingerprint_policy: normalizeClashFingerprintPolicy(raw.clash_fingerprint_policy),
+    update_mode: normalizeUpdateMode(raw.update_mode),
+    update_time: typeof raw.update_time === "string" ? raw.update_time : "",
+    update_timezone: typeof raw.update_timezone === "string" ? raw.update_timezone : "",
     last_checked: raw.last_checked || "",
     last_updated: raw.last_updated || "",
     last_error: raw.last_error || "",

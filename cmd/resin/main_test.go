@@ -16,6 +16,7 @@ import (
 	"github.com/Resinat/Resin/internal/outbound"
 	"github.com/Resinat/Resin/internal/platform"
 	"github.com/Resinat/Resin/internal/state"
+	"github.com/Resinat/Resin/internal/subscription"
 	"github.com/Resinat/Resin/internal/testutil"
 	"github.com/Resinat/Resin/internal/topology"
 )
@@ -1066,5 +1067,91 @@ func TestMarkNodeRemovedDirty_DeletesStaticDynamicAndLatency(t *testing.T) {
 	}
 	if len(qualities) != 0 {
 		t.Fatalf("node_quality not deleted: %+v", qualities)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: Bootstrap restores LastCheckedNs and daily schedules are due after
+// a missed day.
+// ---------------------------------------------------------------------------
+
+func TestBootstrapTopology_DailyMissedYesterdayRestoresLastChecked(t *testing.T) {
+	engine, closer, err := state.PersistenceBootstrap(t.TempDir(), t.TempDir())
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	// Create a daily subscription in the DB with LastCheckedNs set to yesterday
+	// at 08:00 (before yesterday's scheduled 10:00 — meaning yesterday was missed).
+	now := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC) // today 09:00 UTC
+	yesterday8AM := time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC).UnixNano()
+
+	ms := model.Subscription{
+		ID:                        "daily-bootstrap-1",
+		Name:                      "DailyMissed",
+		SourceType:                "remote",
+		URL:                       "https://example.com/missed",
+		UpdateIntervalNs:          int64(time.Hour),
+		UpdateMode:                "daily",
+		UpdateTime:                "10:00",
+		UpdateTimezone:            "UTC",
+		Enabled:                   true,
+		Ephemeral:                 false,
+		EphemeralNodeEvictDelayNs: int64(72 * time.Hour),
+		ClashFingerprintPolicy:    "reject",
+		LastCheckedNs:             yesterday8AM,
+		CreatedAtNs:               now.UnixNano(),
+		UpdatedAtNs:               now.UnixNano(),
+	}
+	if err := engine.UpsertSubscription(ms); err != nil {
+		t.Fatalf("UpsertSubscription: %v", err)
+	}
+
+	// Bootstrap topology — this should restore LastCheckedNs.
+	envCfg := newDefaultPlatformEnvConfig()
+	subManager := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subManager.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+	if err := bootstrapTopology(engine, subManager, pool, envCfg); err != nil {
+		t.Fatalf("bootstrapTopology: %v", err)
+	}
+
+	// Verify the runtime subscription has LastCheckedNs restored.
+	sub := subManager.Lookup("daily-bootstrap-1")
+	if sub == nil {
+		t.Fatal("subscription not found after bootstrap")
+	}
+	restoredLC := sub.LastCheckedNs.Load()
+	if restoredLC != yesterday8AM {
+		t.Fatalf("LastCheckedNs after bootstrap: got %d, want %d", restoredLC, yesterday8AM)
+	}
+
+	// Simulate the scheduler's due check: now = today 09:00 UTC, scheduled at 10:00.
+	// Yesterday's schedule was missed (lastChecked < yesterdayScheduled),
+	// today's schedule hasn't arrived yet → should be due.
+	due := subscription.IsSubscriptionDue(restoredLC, now, "daily", int64(time.Hour), "10:00", "UTC")
+	if !due {
+		t.Fatal("IsSubscriptionDue should return true: yesterday missed, today not yet done")
+	}
+
+	// Also verify that a never-checked subscription (lastChecked=0) is NOT due
+	// before the first scheduled time of the day.
+	dueNeverChecked := subscription.IsSubscriptionDue(0, now, "daily", int64(time.Hour), "10:00", "UTC")
+	if dueNeverChecked {
+		t.Fatal("IsSubscriptionDue should return false for never-checked sub before first scheduled time")
+	}
+
+	// And verify that a recently-checked subscription (after yesterday's schedule)
+	// is NOT due.
+	yesterday11AM := time.Date(2026, 7, 19, 11, 0, 0, 0, time.UTC).UnixNano()
+	dueRecent := subscription.IsSubscriptionDue(yesterday11AM, now, "daily", int64(time.Hour), "10:00", "UTC")
+	if dueRecent {
+		t.Fatal("IsSubscriptionDue should return false: yesterday was checked after schedule, today not yet due")
 	}
 }

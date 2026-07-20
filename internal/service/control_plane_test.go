@@ -2591,3 +2591,487 @@ func TestPlatformQualityCloudflareStatusesGetListRoundtrip(t *testing.T) {
 		t.Fatal("created platform not found in ListPlatforms")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Tests: update_mode daily – create and patch validation
+// ---------------------------------------------------------------------------
+
+func TestCreateSubscription_DailyMode_Valid(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	cp := &ControlPlaneService{
+		Engine: engine,
+		Pool:   pool,
+		SubMgr: subMgr,
+	}
+
+	name := "daily-sub"
+	mode := "daily"
+	updateTime := "06:30"
+	updateTZ := "America/New_York"
+	resp, err := cp.CreateSubscription(CreateSubscriptionRequest{
+		Name:          &name,
+		URL:           strPtr("https://example.com/daily"),
+		UpdateMode:    &mode,
+		UpdateTime:    &updateTime,
+		UpdateTimezone: &updateTZ,
+	})
+	if err != nil {
+		t.Fatalf("CreateSubscription daily: %v", err)
+	}
+	if resp.UpdateMode != "daily" {
+		t.Fatalf("update_mode: got %q, want %q", resp.UpdateMode, "daily")
+	}
+	if resp.UpdateTime != "06:30" {
+		t.Fatalf("update_time: got %q, want %q", resp.UpdateTime, "06:30")
+	}
+	if resp.UpdateTimezone != "America/New_York" {
+		t.Fatalf("update_timezone: got %q, want %q", resp.UpdateTimezone, "America/New_York")
+	}
+
+	// Verify runtime state.
+	sub := subMgr.Lookup(resp.ID)
+	if sub == nil {
+		t.Fatal("runtime subscription not found")
+	}
+	if sub.UpdateMode() != "daily" {
+		t.Fatalf("runtime update_mode: got %q, want %q", sub.UpdateMode(), "daily")
+	}
+	if sub.UpdateTime() != "06:30" {
+		t.Fatalf("runtime update_time: got %q, want %q", sub.UpdateTime(), "06:30")
+	}
+	if sub.UpdateTimezone() != "America/New_York" {
+		t.Fatalf("runtime update_timezone: got %q, want %q", sub.UpdateTimezone(), "America/New_York")
+	}
+}
+
+func TestCreateSubscription_DailyMode_InvalidHHMM(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	cp := &ControlPlaneService{Engine: engine}
+
+	name := "bad-time"
+	mode := "daily"
+	badTime := "25:00"
+	updateTZ := "UTC"
+	_, err = cp.CreateSubscription(CreateSubscriptionRequest{
+		Name:          &name,
+		URL:           strPtr("https://example.com/bad"),
+		UpdateMode:    &mode,
+		UpdateTime:    &badTime,
+		UpdateTimezone: &updateTZ,
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid HH:mm")
+	}
+	var svcErr *ServiceError
+	if !errors.As(err, &svcErr) {
+		t.Fatalf("expected ServiceError, got %T: %v", err, err)
+	}
+	if svcErr.Code != "INVALID_ARGUMENT" {
+		t.Fatalf("code: got %q, want INVALID_ARGUMENT", svcErr.Code)
+	}
+	if !strings.Contains(svcErr.Message, "update_time") {
+		t.Fatalf("message missing update_time: %q", svcErr.Message)
+	}
+}
+
+func TestCreateSubscription_DailyMode_InvalidTimezone(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	cp := &ControlPlaneService{Engine: engine}
+
+	name := "bad-tz"
+	mode := "daily"
+	updateTime := "12:00"
+	badTZ := "Mars/Olympus"
+	_, err = cp.CreateSubscription(CreateSubscriptionRequest{
+		Name:          &name,
+		URL:           strPtr("https://example.com/bad-tz"),
+		UpdateMode:    &mode,
+		UpdateTime:    &updateTime,
+		UpdateTimezone: &badTZ,
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid IANA timezone")
+	}
+	var svcErr *ServiceError
+	if !errors.As(err, &svcErr) {
+		t.Fatalf("expected ServiceError, got %T: %v", err, err)
+	}
+	if svcErr.Code != "INVALID_ARGUMENT" {
+		t.Fatalf("code: got %q, want INVALID_ARGUMENT", svcErr.Code)
+	}
+	if !strings.Contains(svcErr.Message, "update_timezone") {
+		t.Fatalf("message missing update_timezone: %q", svcErr.Message)
+	}
+}
+
+func TestCreateSubscription_DailyMode_MissingFields(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	cp := &ControlPlaneService{Engine: engine}
+
+	tests := []struct {
+		name         string
+		req          CreateSubscriptionRequest
+		expectField  string
+	}{
+		{
+			name: "missing update_time",
+			req: CreateSubscriptionRequest{
+				Name:          strPtr("no-time"),
+				URL:           strPtr("https://example.com/no-time"),
+				UpdateMode:    strPtr("daily"),
+				UpdateTimezone: strPtr("UTC"),
+			},
+			expectField: "update_time",
+		},
+		{
+			name: "missing update_timezone",
+			req: CreateSubscriptionRequest{
+				Name:       strPtr("no-tz"),
+				URL:        strPtr("https://example.com/no-tz"),
+				UpdateMode: strPtr("daily"),
+				UpdateTime: strPtr("10:00"),
+			},
+			expectField: "update_timezone",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := cp.CreateSubscription(tc.req)
+			if err == nil {
+				t.Fatal("expected error for missing daily field")
+			}
+			var svcErr *ServiceError
+			if !errors.As(err, &svcErr) {
+				t.Fatalf("expected ServiceError, got %T: %v", err, err)
+			}
+			if svcErr.Code != "INVALID_ARGUMENT" {
+				t.Fatalf("code: got %q, want INVALID_ARGUMENT", svcErr.Code)
+			}
+			if !strings.Contains(svcErr.Message, tc.expectField) {
+				t.Fatalf("message missing %q: %q", tc.expectField, svcErr.Message)
+			}
+		})
+	}
+}
+
+func TestCreateSubscription_LocalPlusDaily_Rejected(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	cp := &ControlPlaneService{Engine: engine}
+
+	name := "local-daily"
+	sourceType := "local"
+	mode := "daily"
+	content := "proxies:"
+	updateTime := "12:00"
+	updateTZ := "UTC"
+	_, err = cp.CreateSubscription(CreateSubscriptionRequest{
+		Name:          &name,
+		SourceType:    &sourceType,
+		Content:       &content,
+		UpdateMode:    &mode,
+		UpdateTime:    &updateTime,
+		UpdateTimezone: &updateTZ,
+	})
+	if err == nil {
+		t.Fatal("expected error for local+daily subscription")
+	}
+	var svcErr *ServiceError
+	if !errors.As(err, &svcErr) {
+		t.Fatalf("expected ServiceError, got %T: %v", err, err)
+	}
+	if svcErr.Code != "INVALID_ARGUMENT" {
+		t.Fatalf("code: got %q, want INVALID_ARGUMENT", svcErr.Code)
+	}
+	if !strings.Contains(svcErr.Message, "local") || !strings.Contains(svcErr.Message, "daily") {
+		t.Fatalf("message should mention local and daily: %q", svcErr.Message)
+	}
+}
+
+func TestUpdateSubscription_LocalPatchDaily_Rejected(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	cp := &ControlPlaneService{
+		Engine: engine,
+		Pool:   pool,
+		SubMgr: subMgr,
+	}
+
+	// Create a local subscription with interval mode.
+	content := "proxies:"
+	sourceType := "local"
+	createResp, err := cp.CreateSubscription(CreateSubscriptionRequest{
+		Name:       strPtr("local-int"),
+		SourceType: &sourceType,
+		Content:    &content,
+	})
+	if err != nil {
+		t.Fatalf("CreateSubscription local: %v", err)
+	}
+	subID := createResp.ID
+
+	// Attempt to PATCH update_mode to daily.
+	patch := json.RawMessage(`{"update_mode": "daily", "update_time": "08:00", "update_timezone": "UTC"}`)
+	_, err = cp.UpdateSubscription(subID, patch)
+	if err == nil {
+		t.Fatal("expected error for patching local subscription to daily")
+	}
+	var svcErr *ServiceError
+	if !errors.As(err, &svcErr) {
+		t.Fatalf("expected ServiceError, got %T: %v", err, err)
+	}
+	if svcErr.Code != "INVALID_ARGUMENT" {
+		t.Fatalf("code: got %q, want INVALID_ARGUMENT", svcErr.Code)
+	}
+	if !strings.Contains(svcErr.Message, "local") || !strings.Contains(svcErr.Message, "daily") {
+		t.Fatalf("message should mention local and daily: %q", svcErr.Message)
+	}
+
+	// Verify the subscription is unchanged (still interval).
+	sub := subMgr.Lookup(subID)
+	if sub == nil {
+		t.Fatal("runtime subscription not found")
+	}
+	if sub.UpdateMode() != "interval" {
+		t.Fatalf("update_mode should remain interval after rejected patch, got %q", sub.UpdateMode())
+	}
+}
+
+func TestUpdateSubscription_IntervalToDaily(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	cp := &ControlPlaneService{
+		Engine: engine,
+		Pool:   pool,
+		SubMgr: subMgr,
+	}
+
+	// Create interval subscription.
+	createResp, err := cp.CreateSubscription(CreateSubscriptionRequest{
+		Name: strPtr("interval-to-daily"),
+		URL:  strPtr("https://example.com/itd"),
+	})
+	if err != nil {
+		t.Fatalf("CreateSubscription: %v", err)
+	}
+	subID := createResp.ID
+	if createResp.UpdateMode != "interval" {
+		t.Fatalf("expected default interval, got %q", createResp.UpdateMode)
+	}
+
+	// Patch to daily with all required fields.
+	patch := json.RawMessage(`{"update_mode": "daily", "update_time": "22:15", "update_timezone": "Asia/Tokyo"}`)
+	resp, err := cp.UpdateSubscription(subID, patch)
+	if err != nil {
+		t.Fatalf("UpdateSubscription interval->daily: %v", err)
+	}
+	if resp.UpdateMode != "daily" {
+		t.Fatalf("update_mode: got %q, want %q", resp.UpdateMode, "daily")
+	}
+	if resp.UpdateTime != "22:15" {
+		t.Fatalf("update_time: got %q, want %q", resp.UpdateTime, "22:15")
+	}
+	if resp.UpdateTimezone != "Asia/Tokyo" {
+		t.Fatalf("update_timezone: got %q, want %q", resp.UpdateTimezone, "Asia/Tokyo")
+	}
+
+	// Verify runtime state.
+	sub := subMgr.Lookup(subID)
+	if sub.UpdateMode() != "daily" {
+		t.Fatalf("runtime update_mode: got %q, want %q", sub.UpdateMode(), "daily")
+	}
+	if sub.UpdateTime() != "22:15" {
+		t.Fatalf("runtime update_time: got %q, want %q", sub.UpdateTime(), "22:15")
+	}
+	if sub.UpdateTimezone() != "Asia/Tokyo" {
+		t.Fatalf("runtime update_timezone: got %q, want %q", sub.UpdateTimezone(), "Asia/Tokyo")
+	}
+
+	// Patching interval fields while daily should work.
+	patch2 := json.RawMessage(`{"update_interval": "10m"}`)
+	resp2, err := cp.UpdateSubscription(subID, patch2)
+	if err != nil {
+		t.Fatalf("UpdateSubscription interval field while daily: %v", err)
+	}
+	if resp2.UpdateMode != "daily" {
+		t.Fatalf("update_mode should remain daily: got %q", resp2.UpdateMode)
+	}
+}
+
+func TestUpdateSubscription_DailyToIntervalToDaily_PreservesFields(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	cp := &ControlPlaneService{
+		Engine: engine,
+		Pool:   pool,
+		SubMgr: subMgr,
+	}
+
+	// Create daily subscription.
+	mode := "daily"
+	updateTime := "03:00"
+	updateTZ := "Europe/Berlin"
+	createResp, err := cp.CreateSubscription(CreateSubscriptionRequest{
+		Name:          strPtr("daily-roundtrip"),
+		URL:           strPtr("https://example.com/rt"),
+		UpdateMode:    &mode,
+		UpdateTime:    &updateTime,
+		UpdateTimezone: &updateTZ,
+	})
+	if err != nil {
+		t.Fatalf("CreateSubscription daily: %v", err)
+	}
+	subID := createResp.ID
+	if createResp.UpdateTime != "03:00" || createResp.UpdateTimezone != "Europe/Berlin" {
+		t.Fatalf("daily fields on create: time=%q tz=%q", createResp.UpdateTime, createResp.UpdateTimezone)
+	}
+
+	// Switch to interval (daily fields persist in DB but are not used).
+	patch1 := json.RawMessage(`{"update_mode": "interval"}`)
+	resp1, err := cp.UpdateSubscription(subID, patch1)
+	if err != nil {
+		t.Fatalf("UpdateSubscription daily->interval: %v", err)
+	}
+	if resp1.UpdateMode != "interval" {
+		t.Fatalf("update_mode: got %q, want %q", resp1.UpdateMode, "interval")
+	}
+	if resp1.UpdateTime != "03:00" {
+		t.Fatalf("update_time should persist: got %q, want %q", resp1.UpdateTime, "03:00")
+	}
+	if resp1.UpdateTimezone != "Europe/Berlin" {
+		t.Fatalf("update_timezone should persist: got %q, want %q", resp1.UpdateTimezone, "Europe/Berlin")
+	}
+
+	// Switch back to daily — should succeed without re-sending time/tz fields.
+	patch2 := json.RawMessage(`{"update_mode": "daily"}`)
+	resp2, err := cp.UpdateSubscription(subID, patch2)
+	if err != nil {
+		t.Fatalf("UpdateSubscription interval->daily: %v", err)
+	}
+	if resp2.UpdateMode != "daily" {
+		t.Fatalf("update_mode: got %q, want %q", resp2.UpdateMode, "daily")
+	}
+	if resp2.UpdateTime != "03:00" {
+		t.Fatalf("update_time should be preserved: got %q, want %q", resp2.UpdateTime, "03:00")
+	}
+	if resp2.UpdateTimezone != "Europe/Berlin" {
+		t.Fatalf("update_timezone should be preserved: got %q, want %q", resp2.UpdateTimezone, "Europe/Berlin")
+	}
+
+	// Verify runtime state.
+	sub := subMgr.Lookup(subID)
+	if sub.UpdateMode() != "daily" {
+		t.Fatalf("runtime update_mode: got %q, want %q", sub.UpdateMode(), "daily")
+	}
+	if sub.UpdateTime() != "03:00" {
+		t.Fatalf("runtime update_time: got %q, want %q", sub.UpdateTime(), "03:00")
+	}
+	if sub.UpdateTimezone() != "Europe/Berlin" {
+		t.Fatalf("runtime update_timezone: got %q, want %q", sub.UpdateTimezone(), "Europe/Berlin")
+	}
+}

@@ -2,6 +2,8 @@ export type ClashFingerprintPolicy = "reject" | "drop_safe" | "drop_always";
 
 export const CLASH_FINGERPRINT_POLICY_DEFAULT: ClashFingerprintPolicy = "reject";
 
+export type SubscriptionUpdateMode = "interval" | "daily";
+
 export type Subscription = {
   id: string;
   name: string;
@@ -9,6 +11,9 @@ export type Subscription = {
   url: string;
   content: string;
   update_interval: string;
+  update_mode: SubscriptionUpdateMode;
+  update_time: string;
+  update_timezone: string;
   node_count: number;
   healthy_node_count: number;
   ephemeral: boolean;
@@ -35,6 +40,9 @@ export type SubscriptionCreateInput = {
   url?: string;
   content?: string;
   update_interval?: string;
+  update_mode?: SubscriptionUpdateMode;
+  update_time?: string;
+  update_timezone?: string;
   enabled?: boolean;
   ephemeral?: boolean;
   incremental_alive_nodes?: boolean;
@@ -47,6 +55,9 @@ export type SubscriptionUpdateInput = {
   url?: string;
   content?: string;
   update_interval?: string;
+  update_mode?: SubscriptionUpdateMode;
+  update_time?: string;
+  update_timezone?: string;
   enabled?: boolean;
   ephemeral?: boolean;
   incremental_alive_nodes?: boolean;

@@ -108,8 +108,8 @@ func TestMigrateStateDB_LegacyBaselineAdvancesToLatest(t *testing.T) {
 	if dirty {
 		t.Fatalf("schema_migrations dirty=true")
 	}
-	if version != stateVersionAddRuleProfiles {
-		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddRuleProfiles)
+	if version != stateVersionAddUpdateSchedule {
+		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddUpdateSchedule)
 	}
 	if ok, err := hasTableColumn(db, "subscriptions", "incremental_alive_nodes"); err != nil || !ok {
 		t.Fatalf("expected migrated column subscriptions.incremental_alive_nodes, ok=%v err=%v", ok, err)
@@ -123,6 +123,20 @@ func TestMigrateStateDB_LegacyBaselineAdvancesToLatest(t *testing.T) {
 	// Verify rule_profiles table was created by latest migration.
 	if ok, err := hasTable(db, "rule_profiles"); err != nil || !ok {
 		t.Fatalf("expected rule_profiles table, ok=%v err=%v", ok, err)
+	}
+	// Verify update schedule columns were created by latest migration.
+	if ok, err := hasTableColumn(db, "subscriptions", "update_mode"); err != nil || !ok {
+		t.Fatalf("expected migrated column subscriptions.update_mode, ok=%v err=%v", ok, err)
+	}
+	if ok, err := hasTableColumn(db, "subscriptions", "update_time"); err != nil || !ok {
+		t.Fatalf("expected migrated column subscriptions.update_time, ok=%v err=%v", ok, err)
+	}
+	if ok, err := hasTableColumn(db, "subscriptions", "update_timezone"); err != nil || !ok {
+		t.Fatalf("expected migrated column subscriptions.update_timezone, ok=%v err=%v", ok, err)
+	}
+	// Verify last_checked_ns column was created by latest migration.
+	if ok, err := hasTableColumn(db, "subscriptions", "last_checked_ns"); err != nil || !ok {
+		t.Fatalf("expected migrated column subscriptions.last_checked_ns, ok=%v err=%v", ok, err)
 	}
 }
 
@@ -186,8 +200,13 @@ func TestMigrateStateDB_LegacyV8AdvancesToLatest(t *testing.T) {
 	if dirty {
 		t.Fatalf("schema_migrations dirty=true")
 	}
-	if version != stateVersionAddRuleProfiles {
-		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddRuleProfiles)
+	if version != stateVersionAddUpdateSchedule {
+		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddUpdateSchedule)
+	}
+
+	// Verify update schedule columns were created by latest migration.
+	if ok, err := hasTableColumn(db, "subscriptions", "update_mode"); err != nil || !ok {
+		t.Fatalf("expected migrated column subscriptions.update_mode, ok=%v err=%v", ok, err)
 	}
 
 	// v8 columns must still be present.
@@ -260,8 +279,11 @@ func TestMigrateStateDB_AddsIncrementalAliveNodesToLegacySubscriptions(t *testin
 	if dirty {
 		t.Fatalf("schema_migrations dirty=true")
 	}
-	if version != stateVersionAddRuleProfiles {
-		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddRuleProfiles)
+	if version != stateVersionAddUpdateSchedule {
+		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddUpdateSchedule)
+	}
+	if ok, err := hasTableColumn(db, "subscriptions", "incremental_alive_nodes"); err != nil || !ok {
+		t.Fatalf("expected migrated column subscriptions.incremental_alive_nodes, ok=%v err=%v", ok, err)
 	}
 	if ok, err := hasTableColumn(db, "platforms", "passive_circuit_breaker_disabled"); err != nil || !ok {
 		t.Fatalf("expected migrated column platforms.passive_circuit_breaker_disabled, ok=%v err=%v", ok, err)
@@ -338,8 +360,8 @@ func TestMigrateStateDB_NormalizesLegacyRandomMissAction(t *testing.T) {
 	if dirty {
 		t.Fatalf("schema_migrations dirty=true")
 	}
-	if version != stateVersionAddRuleProfiles {
-		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddRuleProfiles)
+	if version != stateVersionAddUpdateSchedule {
+		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddUpdateSchedule)
 	}
 	if ok, err := hasTableColumn(db, "subscriptions", "incremental_alive_nodes"); err != nil || !ok {
 		t.Fatalf("expected migrated column subscriptions.incremental_alive_nodes, ok=%v err=%v", ok, err)
@@ -741,6 +763,125 @@ func TestStateRepo_Subscription_LocalSourcePersists(t *testing.T) {
 	}
 	if list[0].ClashFingerprintPolicy != "drop_always" {
 		t.Fatalf("clash_fingerprint_policy: got %q, want %q", list[0].ClashFingerprintPolicy, "drop_always")
+	}
+}
+
+func TestStateRepo_Subscription_UpdateModeFieldsRoundTrip(t *testing.T) {
+	repo := newTestStateRepo(t)
+	now := time.Now().UnixNano()
+
+	// Create with daily mode.
+	s := model.Subscription{
+		ID:                        "sub-daily-1",
+		Name:                      "DailySub",
+		SourceType:                "remote",
+		URL:                       "https://example.com/sub",
+		Content:                   "",
+		UpdateIntervalNs:          int64(time.Hour),
+		UpdateMode:                "daily",
+		UpdateTime:                "10:30",
+		UpdateTimezone:            "Asia/Shanghai",
+		Enabled:                   true,
+		Ephemeral:                 false,
+		IncrementalAliveNodes:     false,
+		EphemeralNodeEvictDelayNs: int64(72 * time.Hour),
+		ClashFingerprintPolicy:    "reject",
+		LastCheckedNs:             int64(1000000),
+		CreatedAtNs:               now,
+		UpdatedAtNs:               now,
+	}
+	if err := repo.UpsertSubscription(s); err != nil {
+		t.Fatalf("UpsertSubscription with daily fields: %v", err)
+	}
+
+	// Read back.
+	list, err := repo.ListSubscriptions()
+	if err != nil {
+		t.Fatalf("ListSubscriptions: %v", err)
+	}
+	var found bool
+	for _, sub := range list {
+		if sub.ID == "sub-daily-1" {
+			found = true
+			if sub.UpdateMode != "daily" {
+				t.Fatalf("UpdateMode: got %q, want %q", sub.UpdateMode, "daily")
+			}
+			if sub.UpdateTime != "10:30" {
+				t.Fatalf("UpdateTime: got %q, want %q", sub.UpdateTime, "10:30")
+			}
+			if sub.UpdateTimezone != "Asia/Shanghai" {
+				t.Fatalf("UpdateTimezone: got %q, want %q", sub.UpdateTimezone, "Asia/Shanghai")
+			}
+			if sub.LastCheckedNs != int64(1000000) {
+				t.Fatalf("LastCheckedNs: got %d, want %d", sub.LastCheckedNs, int64(1000000))
+			}
+		}
+	}
+	if !found {
+		t.Fatal("subscription not found in ListSubscriptions")
+	}
+
+	// Update to interval mode (clear daily fields are kept but ignored).
+	s.UpdateMode = "interval"
+	s.LastCheckedNs = int64(2000000)
+	s.UpdatedAtNs = time.Now().UnixNano()
+	if err := repo.UpsertSubscription(s); err != nil {
+		t.Fatalf("UpsertSubscription update to interval: %v", err)
+	}
+	list, err = repo.ListSubscriptions()
+	if err != nil {
+		t.Fatalf("ListSubscriptions after update: %v", err)
+	}
+	for _, sub := range list {
+		if sub.ID == "sub-daily-1" {
+			if sub.UpdateMode != "interval" {
+				t.Fatalf("UpdateMode after update: got %q, want %q", sub.UpdateMode, "interval")
+			}
+			// Daily-specific fields should still be persisted even in interval mode.
+			if sub.UpdateTime != "10:30" {
+				t.Fatalf("UpdateTime should persist even in interval mode, got %q", sub.UpdateTime)
+			}
+			if sub.UpdateTimezone != "Asia/Shanghai" {
+				t.Fatalf("UpdateTimezone should persist even in interval mode, got %q", sub.UpdateTimezone)
+			}
+			if sub.LastCheckedNs != int64(2000000) {
+				t.Fatalf("LastCheckedNs after update: got %d, want %d", sub.LastCheckedNs, int64(2000000))
+			}
+		}
+	}
+
+	// Verify default interval mode for legacy subscriptions.
+	s2 := model.Subscription{
+		ID:                        "sub-interval-default",
+		Name:                      "IntervalSub",
+		SourceType:                "remote",
+		URL:                       "https://example.com/sub2",
+		Content:                   "",
+		UpdateIntervalNs:          int64(5 * time.Minute),
+		UpdateMode:                "", // empty → should default to "interval"
+		UpdateTime:                "",
+		UpdateTimezone:            "",
+		Enabled:                   true,
+		Ephemeral:                 false,
+		IncrementalAliveNodes:     false,
+		EphemeralNodeEvictDelayNs: int64(72 * time.Hour),
+		ClashFingerprintPolicy:    "reject",
+		CreatedAtNs:               now + 1,
+		UpdatedAtNs:               now + 1,
+	}
+	if err := repo.UpsertSubscription(s2); err != nil {
+		t.Fatalf("UpsertSubscription with default mode: %v", err)
+	}
+	list, err = repo.ListSubscriptions()
+	if err != nil {
+		t.Fatalf("ListSubscriptions after adding default: %v", err)
+	}
+	for _, sub := range list {
+		if sub.ID == "sub-interval-default" {
+			if sub.UpdateMode != "interval" {
+				t.Fatalf("expected empty mode to default to 'interval', got %q", sub.UpdateMode)
+			}
+		}
 	}
 }
 
@@ -1555,8 +1696,8 @@ func TestMigrateStateDB_LegacyBaselineWithRuleProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get version: %v", err)
 	}
-	if ver != stateVersionAddRuleProfiles {
-		t.Fatalf("migration version = %d, want %d", ver, stateVersionAddRuleProfiles)
+	if ver != stateVersionAddUpdateSchedule {
+		t.Fatalf("migration version = %d, want %d", ver, stateVersionAddUpdateSchedule)
 	}
 }
 

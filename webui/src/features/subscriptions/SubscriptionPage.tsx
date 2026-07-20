@@ -29,9 +29,20 @@ import {
   updateSubscription,
 } from "./api";
 import { CLASH_FINGERPRINT_POLICY_DEFAULT, type ClashFingerprintPolicy, type Subscription } from "./types";
+import {
+  buildUpdateSchedulePayload,
+  DEFAULT_DAILY_UPDATE_TIME,
+  formatUpdatePlan,
+  isValidUpdateTime,
+  LOCAL_SOURCE_UPDATE_INTERVAL,
+  normalizeUpdateMode,
+  normalizeUpdateTime,
+  resolveBrowserTimezone,
+} from "./updateSchedule";
 
 type EnabledFilter = "all" | "enabled" | "disabled";
 type SubscriptionSourceType = "remote" | "local";
+type SubscriptionUpdateMode = "interval" | "daily";
 
 const CLASH_FINGERPRINT_POLICY_OPTIONS: ClashFingerprintPolicy[] = ["reject", "drop_safe", "drop_always"];
 
@@ -88,39 +99,66 @@ function ClashFingerprintPolicyField({ form, idPrefix, t }: ClashFingerprintPoli
   );
 }
 
+const UPDATE_MODE_TABS: Array<{ key: SubscriptionUpdateMode; label: string }> = [
+  { key: "interval", label: "间隔更新" },
+  { key: "daily", label: "每日定时" },
+];
+
 const SUBSCRIPTION_SOURCE_TABS: Array<{ key: SubscriptionSourceType; label: string; hint: string }> = [
   { key: "remote", label: "远程", hint: "从 HTTP/HTTPS 订阅链接拉取内容" },
   { key: "local", label: "本地", hint: "直接填写订阅文本，不经过网络拉取" },
 ];
 
-const subscriptionCreateSchema = z.object({
-  name: z.string().trim().min(1, "订阅名称不能为空"),
-  source_type: z.enum(["remote", "local"]),
-  url: z.string(),
-  content: z.string(),
-  update_interval: z.string().trim().min(1, "更新间隔不能为空"),
-  ephemeral_node_evict_delay: z.string().trim().min(1, "临时节点驱逐延迟不能为空"),
-  enabled: z.boolean(),
-  ephemeral: z.boolean(),
-  incremental_alive_nodes: z.boolean(),
-  clash_fingerprint_policy: z.enum(["reject", "drop_safe", "drop_always"]),
-}).superRefine((value, ctx) => {
-  const url = value.url.trim();
-  const content = value.content.trim();
-  if (value.source_type === "remote") {
-    if (!url) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["url"], message: "URL 不能为空" });
+const subscriptionCreateSchema = z
+  .object({
+    name: z.string().trim().min(1, "订阅名称不能为空"),
+    source_type: z.enum(["remote", "local"]),
+    url: z.string(),
+    content: z.string(),
+    update_mode: z.enum(["interval", "daily"]),
+    update_interval: z.string(),
+    update_time: z.string(),
+    update_timezone: z.string(),
+    ephemeral_node_evict_delay: z.string().trim().min(1, "临时节点驱逐延迟不能为空"),
+    enabled: z.boolean(),
+    ephemeral: z.boolean(),
+    incremental_alive_nodes: z.boolean(),
+    clash_fingerprint_policy: z.enum(["reject", "drop_safe", "drop_always"]),
+  })
+  .superRefine((value, ctx) => {
+    const url = value.url.trim();
+    const content = value.content.trim();
+    if (value.source_type === "remote") {
+      if (!url) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["url"], message: "URL 不能为空" });
+      } else if (!(url.startsWith("http://") || url.startsWith("https://"))) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["url"], message: "URL 必须是 http/https 地址" });
+      }
+
+      const mode = value.update_mode === "daily" ? "daily" : "interval";
+      if (mode === "interval") {
+        if (!value.update_interval.trim()) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["update_interval"], message: "更新间隔不能为空" });
+        }
+      } else {
+        if (!isValidUpdateTime(value.update_time)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["update_time"],
+            message: "更新时间格式无效，请使用 HH:mm",
+          });
+        }
+        if (!value.update_timezone.trim()) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["update_timezone"], message: "时区不能为空" });
+        }
+      }
       return;
     }
-    if (!(url.startsWith("http://") || url.startsWith("https://"))) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["url"], message: "URL 必须是 http/https 地址" });
+
+    if (!content) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["content"], message: "订阅内容不能为空" });
     }
-    return;
-  }
-  if (!content) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["content"], message: "订阅内容不能为空" });
-  }
-});
+  });
 
 const subscriptionEditSchema = subscriptionCreateSchema;
 
@@ -128,10 +166,23 @@ type SubscriptionCreateForm = z.infer<typeof subscriptionCreateSchema>;
 type SubscriptionEditForm = z.infer<typeof subscriptionEditSchema>;
 const EMPTY_SUBSCRIPTIONS: Subscription[] = [];
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100] as const;
-const LOCAL_SOURCE_UPDATE_INTERVAL = "12h";
 const SUBSCRIPTION_DISABLE_HINT = "禁用订阅后，相关节点不会参与平台路由、健康统计或自动探测。";
 const SUBSCRIPTION_EPHEMERAL_HINT = "临时订阅的非健康节点会在一段时间后被自动删除。订阅本身不会被删除。";
-const SUBSCRIPTION_INCREMENTAL_HINT = "开启后刷新时保留当前仍存活的旧节点，仅清理失效旧节点，并合并新订阅内容；关闭后仅保留刷新后的订阅内容。";
+const SUBSCRIPTION_INCREMENTAL_HINT =
+  "开启后刷新时保留当前仍存活的旧节点，仅清理失效旧节点，并合并新订阅内容；关闭后仅保留刷新后的订阅内容。";
+const SUBSCRIPTION_DAILY_HINT = "按所选时区每天执行；服务错过时间后恢复会补执行一次。";
+
+function defaultScheduleFormValues(): Pick<
+  SubscriptionCreateForm,
+  "update_mode" | "update_interval" | "update_time" | "update_timezone"
+> {
+  return {
+    update_mode: "interval",
+    update_interval: LOCAL_SOURCE_UPDATE_INTERVAL,
+    update_time: DEFAULT_DAILY_UPDATE_TIME,
+    update_timezone: resolveBrowserTimezone(),
+  };
+}
 
 function extractHostname(url: string): string {
   try {
@@ -142,12 +193,16 @@ function extractHostname(url: string): string {
 }
 
 function subscriptionToEditForm(subscription: Subscription): SubscriptionEditForm {
+  const defaults = defaultScheduleFormValues();
   return {
     name: subscription.name,
     source_type: subscription.source_type,
     url: subscription.url,
     content: subscription.content ?? "",
-    update_interval: subscription.update_interval,
+    update_mode: normalizeUpdateMode(subscription.update_mode),
+    update_interval: subscription.update_interval || defaults.update_interval,
+    update_time: normalizeUpdateTime(subscription.update_time) || defaults.update_time,
+    update_timezone: subscription.update_timezone.trim() || defaults.update_timezone,
     ephemeral_node_evict_delay: subscription.ephemeral_node_evict_delay,
     enabled: subscription.enabled,
     ephemeral: subscription.ephemeral,
@@ -170,11 +225,101 @@ function parseEnabledFilter(value: EnabledFilter): boolean | undefined {
   return undefined;
 }
 
-function normalizeSubmitUpdateInterval(sourceType: SubscriptionSourceType, raw: string): string {
-  if (sourceType === "local") {
-    return LOCAL_SOURCE_UPDATE_INTERVAL;
-  }
-  return raw.trim();
+type UpdateScheduleFieldsProps = {
+  form: UseFormReturn<SubscriptionCreateForm>;
+  idPrefix: "create-sub" | "edit-sub";
+  t: (text: string, options?: Record<string, unknown>) => string;
+};
+
+function UpdateScheduleFields({ form, idPrefix, t }: UpdateScheduleFieldsProps) {
+  const updateMode = form.watch("update_mode");
+  const mode = updateMode === "daily" ? "daily" : "interval";
+  const modeHelpId = `${idPrefix}-update-mode-help`;
+
+  return (
+    <div className="field-group field-span-2 subscription-update-schedule">
+      <input type="hidden" {...form.register("update_mode")} />
+      <label className="field-label" id={`${idPrefix}-update-mode-label`}>
+        {t("更新方式")}
+      </label>
+      <div
+        className="platform-detail-tabs subscription-update-mode-tabs"
+        role="tablist"
+        aria-labelledby={`${idPrefix}-update-mode-label`}
+      >
+        {UPDATE_MODE_TABS.map((tab) => {
+          const selected = mode === tab.key;
+          return (
+            <button
+              key={tab.key}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              className={`platform-detail-tab ${selected ? "platform-detail-tab-active" : ""}`}
+              onClick={() => form.setValue("update_mode", tab.key, { shouldDirty: true, shouldValidate: true })}
+            >
+              <span>{t(tab.label)}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Keep both mode field groups mounted so switching modes retains filled values. */}
+      <div className="subscription-update-schedule-fields" hidden={mode !== "interval"}>
+        <label className="field-label" htmlFor={`${idPrefix}-interval`}>
+          {t("更新间隔")}
+        </label>
+        <Input
+          id={`${idPrefix}-interval`}
+          placeholder={t("例如 12h")}
+          invalid={Boolean(form.formState.errors.update_interval)}
+          {...form.register("update_interval")}
+        />
+        {mode === "interval" && form.formState.errors.update_interval?.message ? (
+          <p className="field-error">{t(form.formState.errors.update_interval.message)}</p>
+        ) : null}
+      </div>
+
+      <div className="subscription-update-schedule-fields" hidden={mode !== "daily"}>
+        <div className="subscription-daily-grid">
+          <div className="field-group">
+            <label className="field-label" htmlFor={`${idPrefix}-update-time`}>
+              {t("更新时间")}
+            </label>
+            <Input
+              id={`${idPrefix}-update-time`}
+              type="time"
+              step={60}
+              invalid={Boolean(form.formState.errors.update_time)}
+              {...form.register("update_time")}
+            />
+            {mode === "daily" && form.formState.errors.update_time?.message ? (
+              <p className="field-error">{t(form.formState.errors.update_time.message)}</p>
+            ) : null}
+          </div>
+          <div className="field-group">
+            <label className="field-label" htmlFor={`${idPrefix}-update-timezone`}>
+              {t("时区")}
+            </label>
+            <Input
+              id={`${idPrefix}-update-timezone`}
+              placeholder={t("例如 Asia/Shanghai")}
+              invalid={Boolean(form.formState.errors.update_timezone)}
+              autoComplete="off"
+              spellCheck={false}
+              {...form.register("update_timezone")}
+            />
+            {mode === "daily" && form.formState.errors.update_timezone?.message ? (
+              <p className="field-error">{t(form.formState.errors.update_timezone.message)}</p>
+            ) : null}
+          </div>
+        </div>
+        <p id={modeHelpId} className="subscription-schedule-hint muted">
+          {t(SUBSCRIPTION_DAILY_HINT)}
+        </p>
+      </div>
+    </div>
+  );
 }
 
 export function SubscriptionPage() {
@@ -232,6 +377,8 @@ export function SubscriptionPage() {
 
   const drawerVisible = drawerOpen && Boolean(selectedSubscription);
 
+  const scheduleDefaults = useMemo(() => defaultScheduleFormValues(), []);
+
   const createForm = useForm<SubscriptionCreateForm>({
     resolver: zodResolver(subscriptionCreateSchema),
     defaultValues: {
@@ -239,7 +386,7 @@ export function SubscriptionPage() {
       source_type: "remote",
       url: "",
       content: "",
-      update_interval: "12h",
+      ...scheduleDefaults,
       ephemeral_node_evict_delay: "72h",
       enabled: true,
       ephemeral: false,
@@ -258,7 +405,7 @@ export function SubscriptionPage() {
       source_type: "remote",
       url: "",
       content: "",
-      update_interval: "12h",
+      ...scheduleDefaults,
       ephemeral_node_evict_delay: "72h",
       enabled: true,
       ephemeral: false,
@@ -314,7 +461,7 @@ export function SubscriptionPage() {
         source_type: "remote",
         url: "",
         content: "",
-        update_interval: LOCAL_SOURCE_UPDATE_INTERVAL,
+        ...defaultScheduleFormValues(),
         ephemeral_node_evict_delay: "72h",
         enabled: true,
         ephemeral: false,
@@ -334,17 +481,16 @@ export function SubscriptionPage() {
         throw new Error("请选择要编辑的订阅");
       }
 
+      const schedule = buildUpdateSchedulePayload(formData);
       const payload = {
         name: formData.name.trim(),
-        update_interval: normalizeSubmitUpdateInterval(formData.source_type, formData.update_interval),
+        ...schedule,
         ephemeral_node_evict_delay: formData.ephemeral_node_evict_delay.trim(),
         enabled: formData.enabled,
         ephemeral: formData.ephemeral,
         incremental_alive_nodes: formData.incremental_alive_nodes,
         clash_fingerprint_policy: formData.clash_fingerprint_policy,
-        ...(formData.source_type === "remote"
-          ? { url: formData.url.trim() }
-          : { content: formData.content }),
+        ...(formData.source_type === "remote" ? { url: formData.url.trim() } : { content: formData.content }),
       };
       return updateSubscription(selectedSubscription.id, payload);
     },
@@ -414,7 +560,10 @@ export function SubscriptionPage() {
     setPendingRefreshIds(next);
   }, []);
 
-  const isRefreshPending = useCallback((subscriptionId: string): boolean => pendingRefreshIds.has(subscriptionId), [pendingRefreshIds]);
+  const isRefreshPending = useCallback(
+    (subscriptionId: string): boolean => pendingRefreshIds.has(subscriptionId),
+    [pendingRefreshIds],
+  );
 
   const cleanupCircuitOpenNodesMutation = useMutation({
     mutationFn: async (subscription: Subscription) => {
@@ -435,18 +584,17 @@ export function SubscriptionPage() {
   });
 
   const onCreateSubmit = createForm.handleSubmit(async (values) => {
+    const schedule = buildUpdateSchedulePayload(values);
     const payload = {
       name: values.name.trim(),
       source_type: values.source_type,
-      update_interval: normalizeSubmitUpdateInterval(values.source_type, values.update_interval),
+      ...schedule,
       ephemeral_node_evict_delay: values.ephemeral_node_evict_delay.trim(),
       enabled: values.enabled,
       ephemeral: values.ephemeral,
       incremental_alive_nodes: values.incremental_alive_nodes,
       clash_fingerprint_policy: values.clash_fingerprint_policy,
-      ...(values.source_type === "remote"
-        ? { url: values.url.trim() }
-        : { content: values.content }),
+      ...(values.source_type === "remote" ? { url: values.url.trim() } : { content: values.content }),
     };
     await createMutation.mutateAsync(payload);
   });
@@ -455,13 +603,16 @@ export function SubscriptionPage() {
     await updateMutation.mutateAsync(values);
   });
 
-  const handleDelete = useCallback(async (subscription: Subscription) => {
-    const confirmed = window.confirm(t("确认删除订阅 {{name}}？关联节点会被清理。", { name: subscription.name }));
-    if (!confirmed) {
-      return;
-    }
-    await deleteSubscriptionMutateAsync(subscription);
-  }, [deleteSubscriptionMutateAsync, t]);
+  const handleDelete = useCallback(
+    async (subscription: Subscription) => {
+      const confirmed = window.confirm(t("确认删除订阅 {{name}}？关联节点会被清理。", { name: subscription.name }));
+      if (!confirmed) {
+        return;
+      }
+      await deleteSubscriptionMutateAsync(subscription);
+    },
+    [deleteSubscriptionMutateAsync, t],
+  );
 
   const handleCleanupCircuitOpenNodes = async (subscription: Subscription) => {
     const confirmed = window.confirm(t("确认立即清理订阅 {{name}} 中的熔断或异常节点？", { name: subscription.name }));
@@ -476,18 +627,21 @@ export function SubscriptionPage() {
     setDrawerOpen(true);
   }, []);
 
-  const handleRefresh = useCallback(async (subscription: Subscription) => {
-    if (!markRefreshPending(subscription.id)) {
-      return;
-    }
-    try {
-      await refreshSubscriptionMutateAsync(subscription);
-    } catch {
-      // Mutation callbacks already surface the failure to the user.
-    } finally {
-      clearRefreshPending(subscription.id);
-    }
-  }, [clearRefreshPending, markRefreshPending, refreshSubscriptionMutateAsync]);
+  const handleRefresh = useCallback(
+    async (subscription: Subscription) => {
+      if (!markRefreshPending(subscription.id)) {
+        return;
+      }
+      try {
+        await refreshSubscriptionMutateAsync(subscription);
+      } catch {
+        // Mutation callbacks already surface the failure to the user.
+      } finally {
+        clearRefreshPending(subscription.id);
+      }
+    },
+    [clearRefreshPending, markRefreshPending, refreshSubscriptionMutateAsync],
+  );
 
   const changePageSize = (next: number) => {
     setPageSize(next);
@@ -520,9 +674,28 @@ export function SubscriptionPage() {
           );
         },
       }),
-      col.accessor("update_interval", {
-        header: t("更新间隔"),
-        cell: (info) => formatGoDuration(info.getValue()),
+      col.display({
+        id: "update_plan",
+        header: t("更新计划"),
+        cell: (info) => {
+          const s = info.row.original;
+          const label = formatUpdatePlan(
+            {
+              source_type: s.source_type,
+              update_mode: s.update_mode,
+              update_interval: s.update_interval,
+              update_time: s.update_time,
+              update_timezone: s.update_timezone,
+            },
+            formatGoDuration,
+            t,
+          );
+          return (
+            <p className="subscriptions-plan-cell" title={label}>
+              {label}
+            </p>
+          );
+        },
       }),
       col.display({
         id: "node_count",
@@ -600,7 +773,7 @@ export function SubscriptionPage() {
         },
       }),
     ],
-    [col, handleDelete, handleRefresh, isDeletePending, isRefreshPending, openDrawer, t]
+    [col, handleDelete, handleRefresh, isDeletePending, isRefreshPending, openDrawer, t],
   );
 
   return (
@@ -621,7 +794,11 @@ export function SubscriptionPage() {
             <p>{t("共 {{count}} 个订阅", { count: totalSubscriptions })}</p>
           </div>
           <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-            <label className="subscription-inline-filter" htmlFor="sub-status-filter" style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+            <label
+              className="subscription-inline-filter"
+              htmlFor="sub-status-filter"
+              style={{ flexDirection: "row", alignItems: "center", gap: 6 }}
+            >
               <Filter size={16} />
               <Select
                 id="sub-status-filter"
@@ -649,11 +826,7 @@ export function SubscriptionPage() {
                 style={{ padding: "6px 10px", borderRadius: 8 }}
               />
             </label>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => setCreateModalOpen(true)}
-            >
+            <Button variant="secondary" size="sm" onClick={() => setCreateModalOpen(true)}>
               <Plus size={16} />
               {t("新建")}
             </Button>
@@ -726,12 +899,7 @@ export function SubscriptionPage() {
                 <Badge variant={selectedSubscription.enabled ? "success" : "warning"}>
                   {selectedSubscription.enabled ? t("运行中") : t("已停用")}
                 </Badge>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  aria-label={t("关闭编辑面板")}
-                  onClick={() => setDrawerOpen(false)}
-                >
+                <Button variant="ghost" size="sm" aria-label={t("关闭编辑面板")} onClick={() => setDrawerOpen(false)}>
                   <X size={16} />
                 </Button>
               </div>
@@ -763,7 +931,9 @@ export function SubscriptionPage() {
                 </div>
 
                 {selectedSubscription.last_error ? (
-                  <div className="callout callout-error">{t("最近错误：{{message}}", { message: selectedSubscription.last_error })}</div>
+                  <div className="callout callout-error">
+                    {t("最近错误：{{message}}", { message: selectedSubscription.last_error })}
+                  </div>
                 ) : (
                   <div className="callout callout-success">{t("最近一次刷新无错误")}</div>
                 )}
@@ -789,30 +959,12 @@ export function SubscriptionPage() {
                     <label className="field-label" htmlFor="edit-sub-source-type">
                       {t("订阅类型")}
                     </label>
-                    <Input
-                      id="edit-sub-source-type"
-                      value={t(sourceTypeLabel(editSourceType))}
-                      readOnly
-                      disabled
-                    />
+                    <Input id="edit-sub-source-type" value={t(sourceTypeLabel(editSourceType))} readOnly disabled />
                   </div>
 
                   {editSourceType === "remote" ? (
                     <>
-                      <div className="field-group field-span-2">
-                        <label className="field-label" htmlFor="edit-sub-interval">
-                          {t("更新间隔")}
-                        </label>
-                        <Input
-                          id="edit-sub-interval"
-                          placeholder={t("例如 12h")}
-                          invalid={Boolean(editForm.formState.errors.update_interval)}
-                          {...editForm.register("update_interval")}
-                        />
-                        {editForm.formState.errors.update_interval?.message ? (
-                          <p className="field-error">{t(editForm.formState.errors.update_interval.message)}</p>
-                        ) : null}
-                      </div>
+                      <UpdateScheduleFields form={editForm} idPrefix="edit-sub" t={t} />
 
                       <div className="field-group field-span-2">
                         <label className="field-label" htmlFor="edit-sub-url">
@@ -825,21 +977,27 @@ export function SubscriptionPage() {
                       </div>
                     </>
                   ) : (
-                    <div className="field-group field-span-2">
-                      <label className="field-label" htmlFor="edit-sub-content">
-                        {t("订阅内容")}
-                      </label>
-                      <Textarea
-                        id="edit-sub-content"
-                        rows={8}
-                        placeholder={subscriptionContentPlaceholder}
-                        invalid={Boolean(editForm.formState.errors.content)}
-                        {...editForm.register("content")}
-                      />
-                      {editForm.formState.errors.content?.message ? (
-                        <p className="field-error">{t(editForm.formState.errors.content.message)}</p>
-                      ) : null}
-                    </div>
+                    <>
+                      <input type="hidden" {...editForm.register("update_mode")} />
+                      <input type="hidden" {...editForm.register("update_interval")} />
+                      <input type="hidden" {...editForm.register("update_time")} />
+                      <input type="hidden" {...editForm.register("update_timezone")} />
+                      <div className="field-group field-span-2">
+                        <label className="field-label" htmlFor="edit-sub-content">
+                          {t("订阅内容")}
+                        </label>
+                        <Textarea
+                          id="edit-sub-content"
+                          rows={8}
+                          placeholder={subscriptionContentPlaceholder}
+                          invalid={Boolean(editForm.formState.errors.content)}
+                          {...editForm.register("content")}
+                        />
+                        {editForm.formState.errors.content?.message ? (
+                          <p className="field-error">{t(editForm.formState.errors.content.message)}</p>
+                        ) : null}
+                      </div>
+                    </>
                   )}
 
                   <ClashFingerprintPolicyField form={editForm} idPrefix="edit-sub" t={t} />
@@ -865,7 +1023,11 @@ export function SubscriptionPage() {
                   </div>
 
                   <div className="field-group">
-                    <label className="field-label" htmlFor="edit-sub-incremental-alive-nodes" style={{ visibility: "hidden" }}>
+                    <label
+                      className="field-label"
+                      htmlFor="edit-sub-incremental-alive-nodes"
+                      style={{ visibility: "hidden" }}
+                    >
                       {t("存活节点增量模式")}
                     </label>
                     <div className="subscription-switch-item">
@@ -1022,7 +1184,9 @@ export function SubscriptionPage() {
                         aria-selected={selected}
                         className={`platform-detail-tab ${selected ? "platform-detail-tab-active" : ""}`}
                         title={t(tab.hint)}
-                        onClick={() => createForm.setValue("source_type", tab.key, { shouldDirty: true, shouldValidate: true })}
+                        onClick={() =>
+                          createForm.setValue("source_type", tab.key, { shouldDirty: true, shouldValidate: true })
+                        }
                       >
                         <span>{t(tab.label)}</span>
                       </button>
@@ -1033,20 +1197,7 @@ export function SubscriptionPage() {
 
               {createSourceType === "remote" ? (
                 <>
-                  <div className="field-group field-span-2">
-                    <label className="field-label" htmlFor="create-sub-interval">
-                      {t("更新间隔")}
-                    </label>
-                    <Input
-                      id="create-sub-interval"
-                      placeholder={t("例如 12h")}
-                      invalid={Boolean(createForm.formState.errors.update_interval)}
-                      {...createForm.register("update_interval")}
-                    />
-                    {createForm.formState.errors.update_interval?.message ? (
-                      <p className="field-error">{t(createForm.formState.errors.update_interval.message)}</p>
-                    ) : null}
-                  </div>
+                  <UpdateScheduleFields form={createForm} idPrefix="create-sub" t={t} />
 
                   <div className="field-group field-span-2">
                     <label className="field-label" htmlFor="create-sub-url">
@@ -1063,21 +1214,27 @@ export function SubscriptionPage() {
                   </div>
                 </>
               ) : (
-                <div className="field-group field-span-2">
-                  <label className="field-label" htmlFor="create-sub-content">
-                    {t("订阅内容")}
-                  </label>
-                  <Textarea
-                    id="create-sub-content"
-                    rows={8}
-                    placeholder={subscriptionContentPlaceholder}
-                    invalid={Boolean(createForm.formState.errors.content)}
-                    {...createForm.register("content")}
-                  />
-                  {createForm.formState.errors.content?.message ? (
-                    <p className="field-error">{t(createForm.formState.errors.content.message)}</p>
-                  ) : null}
-                </div>
+                <>
+                  <input type="hidden" {...createForm.register("update_mode")} />
+                  <input type="hidden" {...createForm.register("update_interval")} />
+                  <input type="hidden" {...createForm.register("update_time")} />
+                  <input type="hidden" {...createForm.register("update_timezone")} />
+                  <div className="field-group field-span-2">
+                    <label className="field-label" htmlFor="create-sub-content">
+                      {t("订阅内容")}
+                    </label>
+                    <Textarea
+                      id="create-sub-content"
+                      rows={8}
+                      placeholder={subscriptionContentPlaceholder}
+                      invalid={Boolean(createForm.formState.errors.content)}
+                      {...createForm.register("content")}
+                    />
+                    {createForm.formState.errors.content?.message ? (
+                      <p className="field-error">{t(createForm.formState.errors.content.message)}</p>
+                    ) : null}
+                  </div>
+                </>
               )}
 
               <ClashFingerprintPolicyField form={createForm} idPrefix="create-sub" t={t} />
@@ -1103,7 +1260,11 @@ export function SubscriptionPage() {
               </div>
 
               <div className="field-group">
-                <label className="field-label" htmlFor="create-sub-incremental-alive-nodes" style={{ visibility: "hidden" }}>
+                <label
+                  className="field-label"
+                  htmlFor="create-sub-incremental-alive-nodes"
+                  style={{ visibility: "hidden" }}
+                >
                   {t("存活节点增量模式")}
                 </label>
                 <div className="subscription-switch-item">

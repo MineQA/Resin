@@ -88,9 +88,11 @@ func (s *SubscriptionScheduler) Stop() {
 	s.wg.Wait()
 }
 
-// ForceRefreshAll unconditionally updates ALL enabled subscriptions, regardless
-// of their next-check timestamps. Called once at startup to compensate for
-// lost data from weak persistence (DESIGN.md step 8 batch 3).
+// ForceRefreshAll unconditionally updates ALL enabled interval subscriptions,
+// regardless of their next-check timestamps. Daily-mode subscriptions are
+// skipped — they will be refreshed by the normal tick loop when due.
+// Called once at startup to compensate for lost data from weak persistence
+// (DESIGN.md step 8 batch 3).
 // Updates run in parallel, and this method waits until all started updates exit.
 func (s *SubscriptionScheduler) ForceRefreshAll() {
 	select {
@@ -106,7 +108,7 @@ func (s *SubscriptionScheduler) ForceRefreshAll() {
 			return false
 		default:
 		}
-		if sub.Enabled() {
+		if sub.Enabled() && sub.UpdateMode() == subscription.UpdateModeInterval {
 			subsToRefresh = append(subsToRefresh, sub)
 		}
 		return true
@@ -131,7 +133,7 @@ func (s *SubscriptionScheduler) tick() {
 	default:
 	}
 
-	now := time.Now().UnixNano()
+	now := time.Now()
 	dueSubs := make([]*subscription.Subscription, 0, s.subManager.Size())
 	s.subManager.Range(func(id string, sub *subscription.Subscription) bool {
 		select {
@@ -142,8 +144,15 @@ func (s *SubscriptionScheduler) tick() {
 		if !sub.Enabled() {
 			return true
 		}
-		// Check if due: lastChecked + interval - lookahead <= now.
-		if sub.LastCheckedNs.Load()+sub.UpdateIntervalNs()-int64(schedulerLookahead) <= now {
+		// Check if due using the appropriate mode (interval or daily).
+		if subscription.IsSubscriptionDue(
+			sub.LastCheckedNs.Load(),
+			now,
+			sub.UpdateMode(),
+			sub.UpdateIntervalNs(),
+			sub.UpdateTime(),
+			sub.UpdateTimezone(),
+		) {
 			dueSubs = append(dueSubs, sub)
 		}
 		return true

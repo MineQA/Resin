@@ -2,6 +2,7 @@
 package subscription
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,6 +25,12 @@ const (
 	UpdateModeReplace = false
 	// UpdateModeIncrementalAlive keeps existing non-evicted nodes and merges refreshed content.
 	UpdateModeIncrementalAlive = true
+)
+
+// Subscription update mode constants.
+const (
+	UpdateModeInterval = "interval"
+	UpdateModeDaily    = "daily"
 )
 
 // ManagedNode represents one hash entry in subscription managed nodes.
@@ -133,6 +140,13 @@ type Subscription struct {
 	// during subscription parsing. Default is ClashFingerprintReject.
 	clashFingerprintPolicy ClashFingerprintPolicy
 
+	// updateMode is the subscription refresh schedule mode: "interval" or "daily".
+	updateMode string
+	// updateTime is the daily scheduled time in "HH:mm" format (ignored in interval mode).
+	updateTime string
+	// updateTimezone is the IANA timezone for daily scheduling (ignored in interval mode).
+	updateTimezone string
+
 	// Persistence timestamps (written under mu or single-writer context).
 	CreatedAtNs int64
 	UpdatedAtNs int64
@@ -152,7 +166,9 @@ type Subscription struct {
 	managedNodes atomic.Pointer[ManagedNodes]
 
 	// configVersion is incremented whenever refresh-input-related config changes
-	// (URL/source/content/update-interval). Scheduler uses it for stale-guard.
+	// (URL, source_type, content, update_interval, clash_fingerprint_policy).
+	// Mode/time/timezone do NOT bump it — they only affect scheduling, not
+	// refresh input. Scheduler uses configVersion for stale-guard.
 	configVersion atomic.Int64
 }
 
@@ -162,6 +178,9 @@ func NewSubscription(id, name, url string, enabled, ephemeral bool) *Subscriptio
 		ID:                        id,
 		url:                       url,
 		sourceType:                SourceTypeRemote,
+		updateMode:                UpdateModeInterval,
+		updateTime:                "",
+		updateTimezone:            "",
 		name:                      name,
 		enabled:                   enabled,
 		ephemeral:                 ephemeral,
@@ -354,6 +373,52 @@ func (s *Subscription) SetClashFingerprintPolicy(v ClashFingerprintPolicy) {
 	s.mu.Unlock()
 }
 
+// UpdateMode returns the subscription update mode (thread-safe).
+func (s *Subscription) UpdateMode() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.updateMode
+}
+
+// SetUpdateMode updates the subscription update mode (thread-safe).
+// Does NOT bump configVersion because schedule mode does not affect refresh
+// input (URL, content, fingerprint policy) and must not invalidate an
+// in-flight refresh attempt. This is consistent with SetUpdateTime and
+// SetUpdateTimezone.
+func (s *Subscription) SetUpdateMode(v string) {
+	s.mu.Lock()
+	s.updateMode = v
+	s.mu.Unlock()
+}
+
+// UpdateTime returns the daily scheduled update time "HH:mm" (thread-safe).
+func (s *Subscription) UpdateTime() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.updateTime
+}
+
+// SetUpdateTime sets the daily scheduled update time (thread-safe).
+func (s *Subscription) SetUpdateTime(v string) {
+	s.mu.Lock()
+	s.updateTime = v
+	s.mu.Unlock()
+}
+
+// UpdateTimezone returns the IANA timezone for daily scheduling (thread-safe).
+func (s *Subscription) UpdateTimezone() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.updateTimezone
+}
+
+// SetUpdateTimezone sets the IANA timezone for daily scheduling (thread-safe).
+func (s *Subscription) SetUpdateTimezone(v string) {
+	s.mu.Lock()
+	s.updateTimezone = v
+	s.mu.Unlock()
+}
+
 // ManagedNodes returns the current node view via atomic load.
 func (s *Subscription) ManagedNodes() *ManagedNodes {
 	return s.managedNodes.Load()
@@ -388,6 +453,63 @@ func DiffHashes(
 	})
 
 	return added, kept, removed
+}
+
+// IsSubscriptionDue determines whether a subscription is due for refresh
+// at the given time. For interval mode it checks lastChecked + interval <= now.
+// For daily mode it checks whether lastChecked < most recent scheduled time <= now.
+// This is a pure function for deterministic testing — inject now instead of time.Now().
+func IsSubscriptionDue(lastCheckedNs int64, now time.Time, updateMode string, updateIntervalNs int64, updateTime, updateTimezone string) bool {
+	if updateMode == UpdateModeDaily {
+		if updateTime == "" || updateTimezone == "" {
+			return false // no valid daily config — never due
+		}
+		loc, err := time.LoadLocation(updateTimezone)
+		if err != nil {
+			return false // invalid timezone — never due
+		}
+		h, m, err := ParseHHMM(updateTime)
+		if err != nil {
+			return false // invalid time — never due
+		}
+
+		nowInLoc := now.In(loc)
+		todayScheduled := time.Date(nowInLoc.Year(), nowInLoc.Month(), nowInLoc.Day(), h, m, 0, 0, loc)
+
+		if todayScheduled.After(nowInLoc) {
+			// Today's scheduled time hasn't arrived yet.
+			// For never-checked subs (lastChecked=0), wait for the scheduled time.
+			// Otherwise, use yesterday's scheduled time as the most recent moment.
+			if lastCheckedNs == 0 {
+				return false // not yet due — wait for today's scheduled time
+			}
+			yesterdayScheduled := todayScheduled.AddDate(0, 0, -1)
+			lastChecked := time.Unix(0, lastCheckedNs)
+			return lastChecked.Before(yesterdayScheduled)
+		}
+
+		// Today's scheduled time has arrived or is now.
+		mostRecentScheduled := todayScheduled
+		lastChecked := time.Unix(0, lastCheckedNs)
+		return lastChecked.Before(mostRecentScheduled) && !mostRecentScheduled.After(nowInLoc)
+	}
+
+	// Interval mode: last + interval - lookahead <= now.
+	const schedulerLookahead = 15 * time.Second
+	return lastCheckedNs+updateIntervalNs-int64(schedulerLookahead) <= now.UnixNano()
+}
+
+// ParseHHMM parses a "HH:mm" string into hour and minute components.
+func ParseHHMM(s string) (hour, min int, err error) {
+	if len(s) != 5 || s[2] != ':' {
+		return 0, 0, fmt.Errorf("invalid time format %q, expected HH:mm", s)
+	}
+	h := int(s[0]-'0')*10 + int(s[1]-'0')
+	m := int(s[3]-'0')*10 + int(s[4]-'0')
+	if h < 0 || h > 23 || m < 0 || m > 59 {
+		return 0, 0, fmt.Errorf("invalid time %q, expected HH:mm", s)
+	}
+	return h, m, nil
 }
 
 func normalizeSourceType(sourceType string) string {

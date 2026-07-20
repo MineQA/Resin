@@ -28,6 +28,9 @@ type SubscriptionResponse struct {
 	URL                     string `json:"url"`
 	Content                 string `json:"content"`
 	UpdateInterval          string `json:"update_interval"`
+	UpdateMode              string `json:"update_mode"`
+	UpdateTime              string `json:"update_time"`
+	UpdateTimezone          string `json:"update_timezone"`
 	NodeCount               int    `json:"node_count"`
 	HealthyNodeCount        int    `json:"healthy_node_count"`
 	Ephemeral               bool   `json:"ephemeral"`
@@ -71,6 +74,9 @@ func (s *ControlPlaneService) subToResponse(sub *subscription.Subscription) Subs
 		URL:                     sub.URL(),
 		Content:                 sub.Content(),
 		UpdateInterval:          time.Duration(sub.UpdateIntervalNs()).String(),
+		UpdateMode:              sub.UpdateMode(),
+		UpdateTime:              sub.UpdateTime(),
+		UpdateTimezone:          sub.UpdateTimezone(),
 		NodeCount:               nodeCount,
 		HealthyNodeCount:        healthyNodeCount,
 		Ephemeral:               sub.Ephemeral(),
@@ -123,6 +129,9 @@ type CreateSubscriptionRequest struct {
 	URL                     *string `json:"url"`
 	Content                 *string `json:"content"`
 	UpdateInterval          *string `json:"update_interval"`
+	UpdateMode              *string `json:"update_mode"`
+	UpdateTime              *string `json:"update_time"`
+	UpdateTimezone          *string `json:"update_timezone"`
 	Enabled                 *bool   `json:"enabled"`
 	Ephemeral               *bool   `json:"ephemeral"`
 	IncrementalAliveNodes   *bool   `json:"incremental_alive_nodes"`
@@ -140,6 +149,33 @@ func validateClashFingerprintPolicy(raw string) (subscription.ClashFingerprintPo
 	default:
 		return 0, invalidArg("clash_fingerprint_policy: must be one of reject, drop_safe, drop_always")
 	}
+}
+
+func parseUpdateMode(raw *string) (string, *ServiceError) {
+	if raw == nil {
+		return subscription.UpdateModeInterval, nil
+	}
+	v := strings.ToLower(strings.TrimSpace(*raw))
+	switch v {
+	case subscription.UpdateModeInterval, subscription.UpdateModeDaily:
+		return v, nil
+	default:
+		return "", invalidArg("update_mode: must be \"interval\" or \"daily\"")
+	}
+}
+
+func validateUpdateTime(raw string) (string, *ServiceError) {
+	if _, _, err := subscription.ParseHHMM(raw); err != nil {
+		return "", invalidArg("update_time: " + err.Error())
+	}
+	return raw, nil
+}
+
+func validateUpdateTimezone(raw string) (string, *ServiceError) {
+	if _, err := time.LoadLocation(raw); err != nil {
+		return "", invalidArg("update_timezone: invalid IANA timezone: " + err.Error())
+	}
+	return raw, nil
 }
 
 func parseSubscriptionSourceType(raw *string) (string, *ServiceError) {
@@ -193,6 +229,20 @@ func (s *ControlPlaneService) CreateSubscription(req CreateSubscriptionRequest) 
 		return nil, invalidArg("source_type: must be remote or local")
 	}
 
+	updateMode, verr := parseUpdateMode(req.UpdateMode)
+	if verr != nil {
+		return nil, verr
+	}
+
+	updateTime := ""
+	if req.UpdateTime != nil {
+		updateTime = strings.TrimSpace(*req.UpdateTime)
+	}
+	updateTimezone := ""
+	if req.UpdateTimezone != nil {
+		updateTimezone = strings.TrimSpace(*req.UpdateTimezone)
+	}
+
 	updateInterval := 5 * time.Minute
 	if req.UpdateInterval != nil {
 		d, err := time.ParseDuration(*req.UpdateInterval)
@@ -203,6 +253,25 @@ func (s *ControlPlaneService) CreateSubscription(req CreateSubscriptionRequest) 
 			return nil, invalidArg("update_interval: must be >= 30s")
 		}
 		updateInterval = d
+	}
+
+	// Validate daily-only fields when mode is daily.
+	if updateMode == subscription.UpdateModeDaily {
+		if sourceType == subscription.SourceTypeLocal {
+			return nil, invalidArg("update_mode: local subscriptions cannot use \"daily\" mode; use \"interval\" instead")
+		}
+		if updateTime == "" {
+			return nil, invalidArg("update_time is required when update_mode is \"daily\"")
+		}
+		if _, verr := validateUpdateTime(updateTime); verr != nil {
+			return nil, verr
+		}
+		if updateTimezone == "" {
+			return nil, invalidArg("update_timezone is required when update_mode is \"daily\"")
+		}
+		if _, verr := validateUpdateTimezone(updateTimezone); verr != nil {
+			return nil, verr
+		}
 	}
 
 	enabled := true
@@ -248,6 +317,9 @@ func (s *ControlPlaneService) CreateSubscription(req CreateSubscriptionRequest) 
 		URL:                       subURL,
 		Content:                   content,
 		UpdateIntervalNs:          int64(updateInterval),
+		UpdateMode:                updateMode,
+		UpdateTime:                updateTime,
+		UpdateTimezone:            updateTimezone,
 		Enabled:                   enabled,
 		Ephemeral:                 ephemeral,
 		IncrementalAliveNodes:     incrementalAliveNodes,
@@ -264,6 +336,9 @@ func (s *ControlPlaneService) CreateSubscription(req CreateSubscriptionRequest) 
 	sub.SetFetchConfig(subURL, int64(updateInterval))
 	sub.SetSourceType(sourceType)
 	sub.SetContent(content)
+	sub.SetUpdateMode(updateMode)
+	sub.SetUpdateTime(updateTime)
+	sub.SetUpdateTimezone(updateTimezone)
 	sub.SetIncrementalAliveNodes(incrementalAliveNodes)
 	sub.SetEphemeralNodeEvictDelayNs(int64(ephemeralNodeEvictDelay))
 	sub.SetClashFingerprintPolicy(clashFingerprintPolicy)
@@ -344,6 +419,50 @@ func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMe
 		}
 	}
 
+	newMode := sub.UpdateMode()
+	if modeStr, ok, err := patch.optionalString("update_mode"); err != nil {
+		return nil, err
+	} else if ok {
+		parsed, verr := parseUpdateMode(&modeStr)
+		if verr != nil {
+			return nil, verr
+		}
+		newMode = parsed
+	}
+
+	newUpdateTime := sub.UpdateTime()
+	if t, ok, err := patch.optionalString("update_time"); err != nil {
+		return nil, err
+	} else if ok {
+		if _, verr := validateUpdateTime(t); verr != nil {
+			return nil, verr
+		}
+		newUpdateTime = t
+	}
+
+	newUpdateTimezone := sub.UpdateTimezone()
+	if tz, ok, err := patch.optionalString("update_timezone"); err != nil {
+		return nil, err
+	} else if ok {
+		if _, verr := validateUpdateTimezone(tz); verr != nil {
+			return nil, verr
+		}
+		newUpdateTimezone = tz
+	}
+
+	// Validate daily fields consistency when mode is daily.
+	if newMode == subscription.UpdateModeDaily {
+		if sourceType == subscription.SourceTypeLocal {
+			return nil, invalidArg("update_mode: local subscriptions cannot use \"daily\" mode; use \"interval\" instead")
+		}
+		if newUpdateTime == "" {
+			return nil, invalidArg("update_time is required when update_mode is \"daily\"")
+		}
+		if newUpdateTimezone == "" {
+			return nil, invalidArg("update_timezone is required when update_mode is \"daily\"")
+		}
+	}
+
 	newInterval := sub.UpdateIntervalNs()
 	if d, ok, err := patch.optionalDurationString("update_interval"); err != nil {
 		return nil, err
@@ -410,11 +529,15 @@ func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMe
 		URL:                       newURL,
 		Content:                   newContent,
 		UpdateIntervalNs:          newInterval,
+		UpdateMode:                newMode,
+		UpdateTime:                newUpdateTime,
+		UpdateTimezone:            newUpdateTimezone,
 		Enabled:                   newEnabled,
 		Ephemeral:                 newEphemeral,
 		IncrementalAliveNodes:     newIncrementalAliveNodes,
 		EphemeralNodeEvictDelayNs: newEphemeralNodeEvictDelay,
 		ClashFingerprintPolicy:    newClashFingerprintPolicy.String(),
+		LastCheckedNs:             sub.LastCheckedNs.Load(),
 		CreatedAtNs:               sub.CreatedAtNs,
 		UpdatedAtNs:               now,
 	}
@@ -429,6 +552,9 @@ func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMe
 	sub.SetIncrementalAliveNodes(newIncrementalAliveNodes)
 	sub.SetEphemeralNodeEvictDelayNs(newEphemeralNodeEvictDelay)
 	sub.SetClashFingerprintPolicy(newClashFingerprintPolicy)
+	sub.SetUpdateMode(newMode)
+	sub.SetUpdateTime(newUpdateTime)
+	sub.SetUpdateTimezone(newUpdateTimezone)
 	sub.UpdatedAtNs = now
 
 	if nameChanged {

@@ -31,6 +31,7 @@ const (
 	stateVersionAddPlatformQualityFilters        = 10
 	stateVersionAddQualityCloudflareStatuses     = 11
 	stateVersionAddRuleProfiles                  = 12
+	stateVersionAddUpdateSchedule                = 13
 	stateLegacyBaselineVersion                   = stateVersionAddFixedAccountHeader
 
 	stateBaseSchemaMigration = stateMigrationsPath + "/000001_state_base.up.sql"
@@ -146,8 +147,26 @@ func prepareLegacyStateBaseline(db *sql.DB, driver migratedb.Driver) error {
 	if err != nil {
 		return err
 	}
+	hasUpdateMode, err := hasTableColumn(db, "subscriptions", "update_mode")
+	if err != nil {
+		return err
+	}
+	hasUpdateTime, err := hasTableColumn(db, "subscriptions", "update_time")
+	if err != nil {
+		return err
+	}
+	hasUpdateTimezone, err := hasTableColumn(db, "subscriptions", "update_timezone")
+	if err != nil {
+		return err
+	}
+	hasLastCheckedNs, err := hasTableColumn(db, "subscriptions", "last_checked_ns")
+	if err != nil {
+		return err
+	}
 
 	switch {
+	case hasEmptyBehavior && hasFixedHeader && hasIncrementalAliveNodes && hasPassiveCircuitBreakerDisabled && hasClashFingerprintPolicy && hasProtocolFilters && hasExcludeProtocolFilters && hasQualityGrade && hasQualityCFStatuses && hasRuleProfiles && hasUpdateMode && hasUpdateTime && hasUpdateTimezone && hasLastCheckedNs:
+		return setLegacyMigrationVersion(db, driver, stateVersionAddUpdateSchedule)
 	case hasEmptyBehavior && hasFixedHeader && hasIncrementalAliveNodes && hasPassiveCircuitBreakerDisabled && hasClashFingerprintPolicy && hasProtocolFilters && hasExcludeProtocolFilters && hasQualityGrade && hasQualityCFStatuses && hasRuleProfiles:
 		return setLegacyMigrationVersion(db, driver, stateVersionAddRuleProfiles)
 	case hasEmptyBehavior && hasFixedHeader && hasIncrementalAliveNodes && hasPassiveCircuitBreakerDisabled && hasClashFingerprintPolicy && hasProtocolFilters && hasExcludeProtocolFilters && hasQualityGrade && hasQualityCFStatuses:

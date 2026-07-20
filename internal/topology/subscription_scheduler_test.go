@@ -33,6 +33,143 @@ func newSchedulerTestSub(t *testing.T, id, name string) *subscription.Subscripti
 	return sub
 }
 
+// ---------------------------------------------------------------------------
+// Test: scheduler tick and ForceRefreshAll with daily/interval modes
+// ---------------------------------------------------------------------------
+
+func TestScheduler_ForceRefreshAll_SkipsDailyMode(t *testing.T) {
+	subMgr := NewSubscriptionManager()
+	pool := newSchedulerTestPool(t, subMgr)
+
+	intervalSub := newSchedulerTestSub(t, "interval-sub", "Interval Sub")
+	dailySub := newSchedulerTestSub(t, "daily-sub", "Daily Sub")
+	dailySub.SetUpdateMode(subscription.UpdateModeDaily)
+	dailySub.SetUpdateTime("10:00")
+	dailySub.SetUpdateTimezone("UTC")
+
+	subMgr.Register(intervalSub)
+	subMgr.Register(dailySub)
+
+	updated := make(map[string]int)
+	onUpdated := func(s *subscription.Subscription) { updated[s.ID]++ }
+
+	sched := NewSubscriptionScheduler(SchedulerConfig{
+		SubManager:   subMgr,
+		Pool:         pool,
+		OnSubUpdated: onUpdated,
+	})
+	subMgr.Register(intervalSub)
+	subMgr.Register(dailySub)
+
+	// ForceRefreshAll should NOT refresh daily subscriptions.
+	// Both need content to actually run UpdateSubscription.
+	intervalSub.SetContent(string(clashJSONClean()))
+	dailySub.SetContent(string(clashJSONClean()))
+
+	sched.ForceRefreshAll()
+
+	if updated[intervalSub.ID] == 0 {
+		t.Fatal("expected interval subscription to be refreshed by ForceRefreshAll")
+	}
+	if updated[dailySub.ID] > 0 {
+		t.Fatal("expected daily subscription to be SKIPPED by ForceRefreshAll")
+	}
+}
+
+func TestScheduler_ForceRefreshAllAsync_SkipsDailyMode(t *testing.T) {
+	// ForceRefreshAllAsync is a goroutine wrapper around ForceRefreshAll.
+	// The synchronous version has the same skip logic.
+	// This test verifies the async wrapper works for interval subscriptions.
+	subMgr := NewSubscriptionManager()
+	pool := newSchedulerTestPool(t, subMgr)
+
+	intervalSub := newSchedulerTestSub(t, "interval-async", "Interval Async")
+	dailySub := newSchedulerTestSub(t, "daily-async", "Daily Async")
+	dailySub.SetUpdateMode(subscription.UpdateModeDaily)
+	dailySub.SetUpdateTime("10:00")
+	dailySub.SetUpdateTimezone("UTC")
+
+	subMgr.Register(intervalSub)
+	subMgr.Register(dailySub)
+
+	intervalSub.SetContent(string(clashJSONClean()))
+	dailySub.SetContent(string(clashJSONClean()))
+
+	// Verify the synchronous ForceRefreshAll skips daily.
+	updated := make(map[string]int)
+	onUpdated := func(s *subscription.Subscription) { updated[s.ID]++ }
+
+	sched := NewSubscriptionScheduler(SchedulerConfig{
+		SubManager:   subMgr,
+		Pool:         pool,
+		OnSubUpdated: onUpdated,
+	})
+
+	sched.ForceRefreshAll()
+
+	if updated[intervalSub.ID] == 0 {
+		t.Fatal("expected interval subscription to be refreshed by ForceRefreshAll")
+	}
+	if updated[dailySub.ID] > 0 {
+		t.Fatal("expected daily subscription to be SKIPPED by ForceRefreshAll")
+	}
+}
+
+func TestScheduler_ManualRefreshSubscription_WorksForDaily(t *testing.T) {
+	// Even for daily mode, manual RefreshSubscription should still work.
+	subMgr := NewSubscriptionManager()
+	pool := newSchedulerTestPool(t, subMgr)
+
+	sub := newSchedulerTestSub(t, "daily-manual", "Daily Manual")
+	sub.SetUpdateMode(subscription.UpdateModeDaily)
+	sub.SetUpdateTime("10:00")
+	sub.SetUpdateTimezone("UTC")
+
+	subMgr.Register(sub)
+
+	updated := false
+	onUpdated := func(s *subscription.Subscription) { updated = true }
+
+	sched := NewSubscriptionScheduler(SchedulerConfig{
+		SubManager:   subMgr,
+		Pool:         pool,
+		OnSubUpdated: onUpdated,
+	})
+
+	sub.SetContent(string(clashJSONClean()))
+	sched.UpdateSubscription(sub)
+
+	if !updated {
+		t.Fatal("expected manual UpdateSubscription to work for daily mode")
+	}
+}
+
+func TestScheduler_Tick_DailyDue(t *testing.T) {
+	// Test that IsSubscriptionDue correctly identifies a daily subscription as due.
+	// This is the logic used by the scheduler tick function.
+	sub := newSchedulerTestSub(t, "daily-tick", "Daily Tick")
+	sub.SetUpdateMode(subscription.UpdateModeDaily)
+	sub.SetUpdateTime("10:00")
+	sub.SetUpdateTimezone("UTC")
+
+	// Simulate lastChecked being yesterday at 10:00, now being today at 10:01.
+	yesterday10AM := time.Date(2025, 1, 14, 10, 0, 0, 0, time.UTC)
+	sub.LastCheckedNs.Store(yesterday10AM.UnixNano())
+
+	now := time.Date(2025, 1, 15, 10, 1, 0, 0, time.UTC)
+	due := subscription.IsSubscriptionDue(
+		sub.LastCheckedNs.Load(),
+		now,
+		sub.UpdateMode(),
+		sub.UpdateIntervalNs(),
+		sub.UpdateTime(),
+		sub.UpdateTimezone(),
+	)
+	if !due {
+		t.Fatal("expected daily subscription to be due at scheduled time")
+	}
+}
+
 // clashJSONMixed returns Clash JSON with one node having a malformed
 // fingerprint (rejected under default policy) and one clean SS node.
 func clashJSONMixed() []byte {

@@ -34,11 +34,15 @@ type Subscription struct {
 	URL                       string `json:"url"`
 	Content                   string `json:"content"`
 	UpdateIntervalNs          int64  `json:"update_interval_ns"`
+	UpdateMode                string `json:"update_mode"`
+	UpdateTime                string `json:"update_time"`
+	UpdateTimezone            string `json:"update_timezone"`
 	Enabled                   bool   `json:"enabled"`
 	Ephemeral                 bool   `json:"ephemeral"`
 	IncrementalAliveNodes     bool   `json:"incremental_alive_nodes"`
 	EphemeralNodeEvictDelayNs int64  `json:"ephemeral_node_evict_delay_ns"`
 	ClashFingerprintPolicy    string `json:"clash_fingerprint_policy"`
+	LastCheckedNs             int64  `json:"last_checked_ns"`
 	CreatedAtNs               int64  `json:"created_at_ns"`
 	UpdatedAtNs               int64  `json:"updated_at_ns"`
 }
