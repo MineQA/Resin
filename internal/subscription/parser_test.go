@@ -3,6 +3,7 @@ package subscription
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"strings"
 	"testing"
@@ -1853,7 +1854,7 @@ func TestParseGeneralSubscription_HY2URIUserPassAuth(t *testing.T) {
 
 func TestParseGeneralSubscription_HY2URIPinSHA256RejectedLegacy(t *testing.T) {
 	// Legacy wrapper *must* also reject pinSHA256, not silently drop it.
-	data := []byte("hy2://hy2-password@hy2.example.com:443?pinSHA256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=&sni=hy2.example.com")
+	data := []byte("hy2://hy2-password@hy2.example.com:443?pinSHA256=" + validSHA256Hex + "&sni=hy2.example.com")
 
 	nodes, err := ParseGeneralSubscription(data)
 	if err != nil {
@@ -1865,7 +1866,10 @@ func TestParseGeneralSubscription_HY2URIPinSHA256RejectedLegacy(t *testing.T) {
 }
 
 func TestParseGeneralSubscriptionDetailed_HY2URIPinSHA256Rejected(t *testing.T) {
-	data := []byte("hy2://hy2-password@hy2.example.com:443?pinSHA256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=&sni=hy2.example.com")
+	// Use a valid hex SHA-256 to test the reject policy path. A base64 value
+	// would fail hex validation and be rejected as CLASH_FINGERPRINT_INVALID
+	// before reaching the policy check.
+	data := []byte("hy2://hy2-password@hy2.example.com:443?pinSHA256=" + validSHA256Hex + "&sni=hy2.example.com")
 
 	result, err := ParseGeneralSubscriptionDetailed(data, &ParseOptions{
 		ClashFingerprintPolicy: ClashFingerprintReject,
@@ -1879,8 +1883,141 @@ func TestParseGeneralSubscriptionDetailed_HY2URIPinSHA256Rejected(t *testing.T) 
 	if len(result.Rejected) != 1 {
 		t.Fatalf("expected 1 rejected node, got %d", len(result.Rejected))
 	}
-	if result.Rejected[0].Code != HY2PinSHA256Unsupported {
-		t.Fatalf("expected HY2_PIN_SHA256_UNSUPPORTED code, got %q", result.Rejected[0].Code)
+	if result.Rejected[0].Code != ClashCertFingerprintUnsupported {
+		t.Fatalf("expected CLASH_CERTIFICATE_FINGERPRINT_UNSUPPORTED code, got %q", result.Rejected[0].Code)
+	}
+}
+
+func TestParseGeneralSubscriptionDetailed_HY2URIPinSHA256DropSafe(t *testing.T) {
+	// HY2 URI with pinSHA256 under drop_safe policy.
+	// insecure=false → node accepted with warning.
+	noInsecureData := []byte("hy2://hy2-password@hy2.example.com:443?pinSHA256=" + validSHA256Hex + "&sni=hy2.example.com")
+
+	result, err := ParseGeneralSubscriptionDetailed(noInsecureData, &ParseOptions{
+		ClashFingerprintPolicy: ClashFingerprintDropSafe,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Nodes) != 1 {
+		t.Fatalf("drop_safe insecure=false: expected 1 node, got %d", len(result.Nodes))
+	}
+	if len(result.Warnings) != 1 {
+		t.Fatalf("drop_safe insecure=false: expected 1 warning, got %d", len(result.Warnings))
+	}
+	if result.Warnings[0].Code != ClashFingerprintDropSafeWarning {
+		t.Fatalf("drop_safe insecure=false: expected CLASH_FINGERPRINT_DROP_SAFE, got %q", result.Warnings[0].Code)
+	}
+	if len(result.Rejected) != 0 {
+		t.Fatalf("drop_safe insecure=false: expected 0 rejected, got %d", len(result.Rejected))
+	}
+	// Pin value must NOT appear in the outbound.
+	node := parseNodeRaw(t, result.Nodes[0].RawOptions)
+	tls := mustMapField(t, node, "tls")
+	if _, ok := tls["certificate_public_key_sha256"]; ok {
+		t.Fatal("pinSHA256 should not appear in tls.certificate_public_key_sha256 after drop")
+	}
+
+	// insecure=true → node rejected as unsafe drop.
+	insecureData := []byte("hy2://hy2-password@hy2.example.com:443?insecure=1&pinSHA256=" + validSHA256Hex + "&sni=hy2.example.com")
+	result2, err := ParseGeneralSubscriptionDetailed(insecureData, &ParseOptions{
+		ClashFingerprintPolicy: ClashFingerprintDropSafe,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result2.Nodes) != 0 {
+		t.Fatalf("drop_safe insecure=true: expected 0 nodes, got %d", len(result2.Nodes))
+	}
+	if len(result2.Rejected) != 1 {
+		t.Fatalf("drop_safe insecure=true: expected 1 rejected, got %d", len(result2.Rejected))
+	}
+	if result2.Rejected[0].Code != ClashFingerprintUnsafeDrop {
+		t.Fatalf("drop_safe insecure=true: expected CLASH_FINGERPRINT_UNSAFE_DROP, got %q", result2.Rejected[0].Code)
+	}
+}
+
+func TestParseGeneralSubscriptionDetailed_HY2URIPinSHA256DropAlways(t *testing.T) {
+	// HY2 URI with pinSHA256 under drop_always policy.
+	// insecure=false → node accepted with warning.
+	noInsecureData := []byte("hy2://hy2-password@hy2.example.com:443?pinSHA256=" + validSHA256Hex + "&sni=hy2.example.com")
+
+	result, err := ParseGeneralSubscriptionDetailed(noInsecureData, &ParseOptions{
+		ClashFingerprintPolicy: ClashFingerprintDropAlways,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Nodes) != 1 {
+		t.Fatalf("drop_always insecure=false: expected 1 node, got %d", len(result.Nodes))
+	}
+	if len(result.Warnings) != 1 {
+		t.Fatalf("drop_always insecure=false: expected 1 warning, got %d", len(result.Warnings))
+	}
+	if result.Warnings[0].Code != ClashFingerprintDropAlwaysWarning {
+		t.Fatalf("drop_always insecure=false: expected CLASH_FINGERPRINT_DROP_ALWAYS, got %q", result.Warnings[0].Code)
+	}
+	// Pin value must NOT appear in the outbound.
+	node := parseNodeRaw(t, result.Nodes[0].RawOptions)
+	tls := mustMapField(t, node, "tls")
+	if _, ok := tls["certificate_public_key_sha256"]; ok {
+		t.Fatal("pinSHA256 should not appear in tls.certificate_public_key_sha256 after drop")
+	}
+
+	// insecure=true → node accepted with MITM warning.
+	insecureData := []byte("hy2://hy2-password@hy2.example.com:443?insecure=1&pinSHA256=" + validSHA256Hex + "&sni=hy2.example.com")
+	result2, err := ParseGeneralSubscriptionDetailed(insecureData, &ParseOptions{
+		ClashFingerprintPolicy: ClashFingerprintDropAlways,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result2.Nodes) != 1 {
+		t.Fatalf("drop_always insecure=true: expected 1 node, got %d", len(result2.Nodes))
+	}
+	if len(result2.Warnings) != 1 {
+		t.Fatalf("drop_always insecure=true: expected 1 warning, got %d", len(result2.Warnings))
+	}
+	if result2.Warnings[0].Code != ClashFingerprintDropAlwaysUnsafe {
+		t.Fatalf("drop_always insecure=true: expected CLASH_FINGERPRINT_DROP_ALWAYS_UNSAFE, got %q", result2.Warnings[0].Code)
+	}
+}
+
+func TestParseGeneralSubscriptionDetailed_HY2URIPinSHA256InvalidValueAlwaysRejected(t *testing.T) {
+	// An invalid pinSHA256 value (not a valid hex SHA-256) must be rejected
+	// regardless of policy.
+	invalidData := []byte("hy2://hy2-password@hy2.example.com:443?pinSHA256=nothex&sni=hy2.example.com")
+	invalidData2 := []byte("hy2://hy2-password@hy2.example.com:443?pinSHA256=chrome&sni=hy2.example.com")
+
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{"invalid hex", invalidData},
+		{"browser name", invalidData2},
+	}
+
+	for _, policy := range []ClashFingerprintPolicy{ClashFingerprintReject, ClashFingerprintDropSafe, ClashFingerprintDropAlways} {
+		for _, tc := range tests {
+			t.Run(fmt.Sprintf("%s_%s", tc.name, policy), func(t *testing.T) {
+				result, err := ParseGeneralSubscriptionDetailed(tc.data, &ParseOptions{
+					ClashFingerprintPolicy: policy,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(result.Nodes) != 0 {
+					t.Fatalf("expected 0 nodes, got %d", len(result.Nodes))
+				}
+				if len(result.Rejected) != 1 {
+					t.Fatalf("expected 1 rejected, got %d", len(result.Rejected))
+				}
+				if result.Rejected[0].Code != ClashFingerprintInvalid &&
+					result.Rejected[0].Code != ClashFingerprintBrowserName {
+					t.Fatalf("expected CLASH_FINGERPRINT_INVALID or CLASH_FINGERPRINT_BROWSER_NAME, got %q", result.Rejected[0].Code)
+				}
+			})
+		}
 	}
 }
 

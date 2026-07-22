@@ -3075,3 +3075,285 @@ func TestUpdateSubscription_DailyToIntervalToDaily_PreservesFields(t *testing.T)
 		t.Fatalf("runtime update_timezone: got %q, want %q", sub.UpdateTimezone(), "Europe/Berlin")
 	}
 }
+
+func TestCreateSubscription_DailyMode_IgnoresInvalidInterval(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	cp := &ControlPlaneService{
+		Engine: engine,
+		Pool:   pool,
+		SubMgr: subMgr,
+	}
+
+	// daily mode + invalid interval should succeed (interval is not active-mode field).
+	mode := "daily"
+	updateTime := "07:00"
+	updateTZ := "UTC"
+	badInterval := "not-a-duration"
+	resp, err := cp.CreateSubscription(CreateSubscriptionRequest{
+		Name:           strPtr("daily-ignore-interval"),
+		URL:            strPtr("https://example.com/daily-ignore-interval"),
+		UpdateMode:     &mode,
+		UpdateTime:     &updateTime,
+		UpdateTimezone: &updateTZ,
+		UpdateInterval: &badInterval,
+	})
+	if err != nil {
+		t.Fatalf("CreateSubscription daily with invalid interval: %v", err)
+	}
+	if resp.UpdateMode != "daily" {
+		t.Fatalf("update_mode: got %q, want daily", resp.UpdateMode)
+	}
+	// Falls back to default 5m when retained interval is unparseable.
+	if resp.UpdateInterval != (5 * time.Minute).String() {
+		t.Fatalf("update_interval fallback: got %q, want %q", resp.UpdateInterval, (5 * time.Minute).String())
+	}
+}
+
+func TestCreateSubscription_DailyMode_RetainsValidIntervalIgnoresBelowMin(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	cp := &ControlPlaneService{
+		Engine: engine,
+		Pool:   pool,
+		SubMgr: subMgr,
+	}
+
+	mode := "daily"
+	updateTime := "07:00"
+	updateTZ := "UTC"
+
+	// Valid retained interval (>=30s) is stored for seamless mode switching.
+	validInterval := "2h"
+	resp, err := cp.CreateSubscription(CreateSubscriptionRequest{
+		Name:           strPtr("daily-retain-valid-interval"),
+		URL:            strPtr("https://example.com/daily-retain-valid-interval"),
+		UpdateMode:     &mode,
+		UpdateTime:     &updateTime,
+		UpdateTimezone: &updateTZ,
+		UpdateInterval: &validInterval,
+	})
+	if err != nil {
+		t.Fatalf("CreateSubscription daily with valid interval: %v", err)
+	}
+	if resp.UpdateInterval != (2 * time.Hour).String() {
+		t.Fatalf("update_interval retained: got %q, want %q", resp.UpdateInterval, (2 * time.Hour).String())
+	}
+
+	// Below-min interval is ignored (persistence floor is 30s); keep default, no error.
+	shortInterval := "15s"
+	resp2, err := cp.CreateSubscription(CreateSubscriptionRequest{
+		Name:           strPtr("daily-ignore-short-interval"),
+		URL:            strPtr("https://example.com/daily-ignore-short-interval"),
+		UpdateMode:     &mode,
+		UpdateTime:     &updateTime,
+		UpdateTimezone: &updateTZ,
+		UpdateInterval: &shortInterval,
+	})
+	if err != nil {
+		t.Fatalf("CreateSubscription daily with <30s interval: %v", err)
+	}
+	if resp2.UpdateInterval != (5 * time.Minute).String() {
+		t.Fatalf("update_interval fallback: got %q, want %q", resp2.UpdateInterval, (5 * time.Minute).String())
+	}
+
+	// PATCH while daily: valid interval retained; below-min keeps previous.
+	if _, err := cp.UpdateSubscription(resp.ID, json.RawMessage(`{"update_interval": "45m"}`)); err != nil {
+		t.Fatalf("UpdateSubscription daily with valid interval: %v", err)
+	}
+	resp3, err := cp.UpdateSubscription(resp.ID, json.RawMessage(`{"update_interval": "10s"}`))
+	if err != nil {
+		t.Fatalf("UpdateSubscription daily with <30s interval: %v", err)
+	}
+	if resp3.UpdateInterval != (45 * time.Minute).String() {
+		t.Fatalf("update_interval should keep previous: got %q, want %q", resp3.UpdateInterval, (45 * time.Minute).String())
+	}
+
+	// Switching back to interval uses the retained valid interval without re-sending it.
+	resp4, err := cp.UpdateSubscription(resp.ID, json.RawMessage(`{"update_mode": "interval"}`))
+	if err != nil {
+		t.Fatalf("UpdateSubscription daily->interval: %v", err)
+	}
+	if resp4.UpdateMode != "interval" {
+		t.Fatalf("update_mode: got %q, want interval", resp4.UpdateMode)
+	}
+	if resp4.UpdateInterval != (45 * time.Minute).String() {
+		t.Fatalf("update_interval after switch: got %q, want %q", resp4.UpdateInterval, (45 * time.Minute).String())
+	}
+}
+
+func TestCreateSubscription_IntervalMode_IgnoresInvalidDailyFields(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	cp := &ControlPlaneService{
+		Engine: engine,
+		Pool:   pool,
+		SubMgr: subMgr,
+	}
+
+	// interval mode + invalid daily fields should succeed (daily fields not active).
+	mode := "interval"
+	interval := "12h"
+	badTime := "25:99"
+	badTZ := "Not/A/Timezone"
+	resp, err := cp.CreateSubscription(CreateSubscriptionRequest{
+		Name:           strPtr("interval-ignore-daily"),
+		URL:            strPtr("https://example.com/interval-ignore-daily"),
+		UpdateMode:     &mode,
+		UpdateInterval: &interval,
+		UpdateTime:     &badTime,
+		UpdateTimezone: &badTZ,
+	})
+	if err != nil {
+		t.Fatalf("CreateSubscription interval with invalid daily fields: %v", err)
+	}
+	if resp.UpdateMode != "interval" {
+		t.Fatalf("update_mode: got %q, want interval", resp.UpdateMode)
+	}
+	if resp.UpdateTime != "25:99" {
+		t.Fatalf("update_time retained as-is: got %q", resp.UpdateTime)
+	}
+	if resp.UpdateTimezone != "Not/A/Timezone" {
+		t.Fatalf("update_timezone retained as-is: got %q", resp.UpdateTimezone)
+	}
+}
+
+func TestUpdateSubscription_ModeLinkedValidation(t *testing.T) {
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+
+	subMgr := topology.NewSubscriptionManager()
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+
+	cp := &ControlPlaneService{
+		Engine: engine,
+		Pool:   pool,
+		SubMgr: subMgr,
+	}
+
+	createResp, err := cp.CreateSubscription(CreateSubscriptionRequest{
+		Name: strPtr("mode-linked"),
+		URL:  strPtr("https://example.com/mode-linked"),
+	})
+	if err != nil {
+		t.Fatalf("CreateSubscription: %v", err)
+	}
+	subID := createResp.ID
+
+	// While interval: invalid daily fields accepted (retained, not validated).
+	patchDailyFields := json.RawMessage(`{"update_time": "99:99", "update_timezone": "Bogus/Zone"}`)
+	resp1, err := cp.UpdateSubscription(subID, patchDailyFields)
+	if err != nil {
+		t.Fatalf("UpdateSubscription interval with invalid daily fields: %v", err)
+	}
+	if resp1.UpdateMode != "interval" {
+		t.Fatalf("update_mode should remain interval: got %q", resp1.UpdateMode)
+	}
+	if resp1.UpdateTime != "99:99" {
+		t.Fatalf("update_time retained: got %q", resp1.UpdateTime)
+	}
+
+	// Switch to daily requires valid time/tz (retained invalid values must be fixed).
+	patchBadDaily := json.RawMessage(`{"update_mode": "daily"}`)
+	if _, err := cp.UpdateSubscription(subID, patchBadDaily); err == nil {
+		t.Fatal("expected error switching to daily with invalid retained time/tz")
+	}
+
+	// Switch to daily with valid fields.
+	patchDaily := json.RawMessage(`{"update_mode": "daily", "update_time": "09:30", "update_timezone": "UTC"}`)
+	resp2, err := cp.UpdateSubscription(subID, patchDaily)
+	if err != nil {
+		t.Fatalf("UpdateSubscription to daily: %v", err)
+	}
+	if resp2.UpdateMode != "daily" {
+		t.Fatalf("update_mode: got %q, want daily", resp2.UpdateMode)
+	}
+
+	// While daily: invalid interval ignored (does not fail; interval unchanged if unparseable).
+	beforeInterval := resp2.UpdateInterval
+	patchBadInterval := json.RawMessage(`{"update_interval": "not-a-duration"}`)
+	resp3, err := cp.UpdateSubscription(subID, patchBadInterval)
+	if err != nil {
+		t.Fatalf("UpdateSubscription daily with invalid interval: %v", err)
+	}
+	if resp3.UpdateMode != "daily" {
+		t.Fatalf("update_mode should remain daily: got %q", resp3.UpdateMode)
+	}
+	if resp3.UpdateInterval != beforeInterval {
+		t.Fatalf("update_interval should remain %q, got %q", beforeInterval, resp3.UpdateInterval)
+	}
+
+	// While daily: valid interval retained for mode switch.
+	patchGoodInterval := json.RawMessage(`{"update_interval": "2h"}`)
+	resp4, err := cp.UpdateSubscription(subID, patchGoodInterval)
+	if err != nil {
+		t.Fatalf("UpdateSubscription daily with valid interval: %v", err)
+	}
+	if resp4.UpdateInterval != (2 * time.Hour).String() {
+		t.Fatalf("update_interval retained: got %q, want %q", resp4.UpdateInterval, (2 * time.Hour).String())
+	}
+}

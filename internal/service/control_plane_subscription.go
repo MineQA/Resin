@@ -244,15 +244,25 @@ func (s *ControlPlaneService) CreateSubscription(req CreateSubscriptionRequest) 
 	}
 
 	updateInterval := 5 * time.Minute
+	// update_interval is hard-validated only in interval mode. In daily mode a
+	// retained value may still be stored for seamless mode switching (must still
+	// satisfy the persistence floor of >=30s); unparseable or below-min values
+	// fall back to the default and are ignored by the scheduler.
 	if req.UpdateInterval != nil {
 		d, err := time.ParseDuration(*req.UpdateInterval)
 		if err != nil {
-			return nil, invalidArg("update_interval: " + err.Error())
+			if updateMode == subscription.UpdateModeInterval {
+				return nil, invalidArg("update_interval: " + err.Error())
+			}
+			// daily mode: keep default when retained interval is unparseable
+		} else if d < minSubscriptionUpdateInterval {
+			if updateMode == subscription.UpdateModeInterval {
+				return nil, invalidArg("update_interval: must be >= 30s")
+			}
+			// daily mode: keep default when retained interval is below persistence floor
+		} else {
+			updateInterval = d
 		}
-		if d < minSubscriptionUpdateInterval {
-			return nil, invalidArg("update_interval: must be >= 30s")
-		}
-		updateInterval = d
 	}
 
 	// Validate daily-only fields when mode is daily.
@@ -434,8 +444,12 @@ func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMe
 	if t, ok, err := patch.optionalString("update_time"); err != nil {
 		return nil, err
 	} else if ok {
-		if _, verr := validateUpdateTime(t); verr != nil {
-			return nil, verr
+		// Only validate update_time format when mode is (or will be) daily;
+		// interval mode retains the value as-is for seamless mode switching.
+		if newMode == subscription.UpdateModeDaily {
+			if _, verr := validateUpdateTime(t); verr != nil {
+				return nil, verr
+			}
 		}
 		newUpdateTime = t
 	}
@@ -444,13 +458,19 @@ func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMe
 	if tz, ok, err := patch.optionalString("update_timezone"); err != nil {
 		return nil, err
 	} else if ok {
-		if _, verr := validateUpdateTimezone(tz); verr != nil {
-			return nil, verr
+		// Only validate update_timezone format when mode is (or will be) daily;
+		// interval mode retains the value as-is for seamless mode switching.
+		if newMode == subscription.UpdateModeDaily {
+			if _, verr := validateUpdateTimezone(tz); verr != nil {
+				return nil, verr
+			}
 		}
 		newUpdateTimezone = tz
 	}
 
 	// Validate daily fields consistency when mode is daily.
+	// Re-validate final retained values (not only patch-present fields) so switching
+	// to daily with previously-ignored invalid time/tz fails cleanly.
 	if newMode == subscription.UpdateModeDaily {
 		if sourceType == subscription.SourceTypeLocal {
 			return nil, invalidArg("update_mode: local subscriptions cannot use \"daily\" mode; use \"interval\" instead")
@@ -458,19 +478,36 @@ func (s *ControlPlaneService) UpdateSubscription(id string, patchJSON json.RawMe
 		if newUpdateTime == "" {
 			return nil, invalidArg("update_time is required when update_mode is \"daily\"")
 		}
+		if _, verr := validateUpdateTime(newUpdateTime); verr != nil {
+			return nil, verr
+		}
 		if newUpdateTimezone == "" {
 			return nil, invalidArg("update_timezone is required when update_mode is \"daily\"")
+		}
+		if _, verr := validateUpdateTimezone(newUpdateTimezone); verr != nil {
+			return nil, verr
 		}
 	}
 
 	newInterval := sub.UpdateIntervalNs()
+	// update_interval is hard-validated only in interval mode. In daily mode a
+	// retained value may still be stored for seamless mode switching (must still
+	// satisfy the persistence floor of >=30s); unparseable or below-min values
+	// keep the previous interval and are ignored by the scheduler.
 	if d, ok, err := patch.optionalDurationString("update_interval"); err != nil {
-		return nil, err
+		if newMode == subscription.UpdateModeInterval {
+			return nil, err
+		}
+		// daily mode: keep previous interval when retained value is unparseable
 	} else if ok {
 		if d < minSubscriptionUpdateInterval {
-			return nil, invalidArg("update_interval: must be >= 30s")
+			if newMode == subscription.UpdateModeInterval {
+				return nil, invalidArg("update_interval: must be >= 30s")
+			}
+			// daily mode: keep previous interval when retained value is below floor
+		} else {
+			newInterval = int64(d)
 		}
-		newInterval = int64(d)
 	}
 
 	newEnabled := sub.Enabled()

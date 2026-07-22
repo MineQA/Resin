@@ -5,22 +5,25 @@ import (
 	"strings"
 )
 
-// ClashFingerprintPolicy controls handling of Clash `fingerprint`
-// (Mihomo full-certificate SHA-256 pin) values during subscription parsing.
+// ClashFingerprintPolicy controls handling of full-certificate SHA-256 pins
+// during subscription parsing. This covers both Clash/Mihomo `fingerprint`
+// and Hysteria2 URI `pinSHA256` / `pin-sha256` / `pin_sha256` (same semantic:
+// SHA-256 of the leaf certificate DER). The pin value is never written into
+// sing-box outbound TLS options (v1.12.x has no full-cert pin field).
 type ClashFingerprintPolicy int
 
 const (
-	// ClashFingerprintReject rejects any node that carries a Clash certificate
-	// fingerprint. This is the default and safest policy.
+	// ClashFingerprintReject rejects any node that carries a certificate pin
+	// (Clash fingerprint or HY2 pinSHA256). This is the default and safest policy.
 	ClashFingerprintReject ClashFingerprintPolicy = iota
-	// ClashFingerprintDropSafe omits the fingerprint when skip-cert-verify is
+	// ClashFingerprintDropSafe omits the pin when skip-cert-verify / insecure is
 	// not true (standard CA/hostname verification still applies; self-signed
-	// may fail). If skip-cert-verify resolves true the node is rejected as
-	// unsafe.
+	// may fail). If skip-cert-verify / insecure resolves true the node is
+	// rejected as unsafe.
 	ClashFingerprintDropSafe
-	// ClashFingerprintDropAlways omits the fingerprint unconditionally and
-	// accepts the node. A warning is emitted; when skip-cert-verify is true
-	// the warning is elevated to explicitly flag the MITM risk.
+	// ClashFingerprintDropAlways omits the pin unconditionally and accepts the
+	// node. A warning is emitted; when skip-cert-verify / insecure is true the
+	// warning is elevated to explicitly flag the MITM risk.
 	ClashFingerprintDropAlways
 )
 
@@ -51,43 +54,39 @@ func ParseClashFingerprintPolicy(s string) ClashFingerprintPolicy {
 	}
 }
 
-// Diagnostic codes for Clash certificate fingerprint handling and related
-// unsupported features. These are stable identifiers; consumers must not
-// depend on the message text.
+// Diagnostic codes for certificate SHA-256 pin (fingerprint) handling.
+// These are stable identifiers; consumers must not depend on the message text.
 const (
-	// Clash fingerprint value is a known browser TLS fingerprint profile
+	// Certificate pin value is a known browser TLS fingerprint profile
 	// name (chrome, firefox, safari, ios, android, edge, 360, qq, random,
 	// randomized) rather than a hex SHA-256 certificate fingerprint.
 	ClashFingerprintBrowserName = "CLASH_FINGERPRINT_BROWSER_NAME"
 
-	// Clash fingerprint value is not a valid hex-encoded SHA-256 digest
+	// Certificate pin value is not a valid hex-encoded SHA-256 digest
 	// (not a browser name, but fails to decode to exactly 32 bytes).
 	ClashFingerprintInvalid = "CLASH_FINGERPRINT_INVALID"
 
-	// Node rejected because it contains a valid Clash certificate fingerprint
-	// and the active policy is reject (default).
+	// Node rejected because it contains a valid certificate SHA-256 pin
+	// (Clash `fingerprint` or HY2 `pinSHA256`) and the active policy is
+	// reject (default).
 	ClashCertFingerprintUnsupported = "CLASH_CERTIFICATE_FINGERPRINT_UNSUPPORTED"
 
 	// Node rejected under drop_safe policy because skip-cert-verify is true,
 	// making it unsafe to drop the certificate pin.
 	ClashFingerprintUnsafeDrop = "CLASH_FINGERPRINT_UNSAFE_DROP"
 
-	// Node accepted under drop_safe policy; the Clash certificate fingerprint
-	// was successfully omitted. Standard CA/hostname verification still
-	// applies; self-signed nodes may fail.
+	// Node accepted under drop_safe policy; the certificate SHA-256 pin was
+	// successfully omitted. Standard CA/hostname verification still applies;
+	// self-signed nodes may fail.
 	ClashFingerprintDropSafeWarning = "CLASH_FINGERPRINT_DROP_SAFE"
 
-	// Node accepted under drop_always policy; the Clash certificate fingerprint
-	// was omitted. Standard CA/hostname verification still applies.
+	// Node accepted under drop_always policy; the certificate SHA-256 pin was
+	// omitted. Standard CA/hostname verification still applies.
 	ClashFingerprintDropAlwaysWarning = "CLASH_FINGERPRINT_DROP_ALWAYS"
 
 	// Node accepted under drop_always policy but skip-cert-verify is true,
 	// meaning no certificate verification will take place (MITM risk).
 	ClashFingerprintDropAlwaysUnsafe = "CLASH_FINGERPRINT_DROP_ALWAYS_UNSAFE"
-
-	// HY2 URI contains pinSHA256 which is not supported by the current
-	// sing-box version (v1.12.21).
-	HY2PinSHA256Unsupported = "HY2_PIN_SHA256_UNSUPPORTED"
 )
 
 // knownClashFingerprintBrowserNames are Clash TLS fingerprint profile names
@@ -142,75 +141,78 @@ func validateClashFingerprint(raw string) ([]byte, string) {
 	return decoded, ""
 }
 
-// applyClashFingerprintPolicy checks a Clash proxy for a non-empty `fingerprint`
-// (cert SHA-256 pin), validates it, and applies the configured policy.
+// applyCertPinPolicy validates a certificate SHA-256 pin value (from Clash
+// `fingerprint` or HY2 URI `pinSHA256`) and applies the configured policy.
 //
-// This is the Clash‑only entry point called at the proxy boundary
-// (parseClashProxies) so that Surge/QX and URI paths are never affected.
+// Parameters:
+//   - tag: node tag/name for diagnostics.
+//   - pinValue: the raw pin value (may be a hex SHA-256, browser profile name,
+//     or empty).
+//   - skipVerify: whether skip-cert-verify/insecure is enabled.
+//   - ctx: parse context for diagnostics and policy; when nil defaults to reject.
 //
-// Returns false when the node must be rejected. Diagnostics are recorded
-// on ctx when non‑nil. All policies are fail‑closed: a node with an
-// unrecognised or rejected fingerprint is never accepted.
-func applyClashFingerprintPolicy(proxy map[string]any, ctx *parseCtx) bool {
-	clashFP := strings.TrimSpace(getString(proxy, "fingerprint"))
-	if clashFP == "" {
+// Returns false when the node must be rejected. Diagnostics are recorded on ctx
+// when non‑nil. All policies are fail‑closed: an unrecognised or rejected pin
+// never accepts the node.
+func applyCertPinPolicy(tag, pinValue string, skipVerify bool, ctx *parseCtx) bool {
+	pinValue = strings.TrimSpace(pinValue)
+	if pinValue == "" {
 		return true
 	}
 
-	_, diagCode := validateClashFingerprint(clashFP)
+	_, diagCode := validateClashFingerprint(pinValue)
 	if diagCode != "" {
 		// Browser name or malformed — always reject.
 		if ctx != nil {
 			switch diagCode {
 			case ClashFingerprintBrowserName:
-				ctx.rejectNode(getProxyTag(proxy), ClashFingerprintBrowserName,
-					"Clash fingerprint is a browser TLS profile name, not a certificate SHA-256 pin; use client-fingerprint instead")
+				ctx.rejectNode(tag, ClashFingerprintBrowserName,
+					"Certificate pin is a browser TLS profile name, not a SHA-256 digest; use client-fingerprint instead")
 			default:
-				ctx.rejectNode(getProxyTag(proxy), ClashFingerprintInvalid,
-					"Clash fingerprint is not a valid hex-encoded SHA-256 certificate fingerprint")
+				ctx.rejectNode(tag, ClashFingerprintInvalid,
+					"Certificate pin is not a valid hex-encoded SHA-256 certificate fingerprint")
 			}
 		}
 		return false
 	}
 
-	// Valid cert SHA-256 fingerprint — apply policy.
+	// Valid SHA-256 fingerprint — apply policy.
 	policy := ClashFingerprintReject
 	if ctx != nil {
 		policy = ctx.policy
 	}
-	skipVerify, _ := getBool(proxy, "skip-cert-verify", "insecure", "allowInsecure")
 
 	switch policy {
 	case ClashFingerprintReject:
 		if ctx != nil {
-			ctx.rejectNode(getProxyTag(proxy), ClashCertFingerprintUnsupported,
-				"Node contains a Clash certificate fingerprint which is not supported by this version")
+			ctx.rejectNode(tag, ClashCertFingerprintUnsupported,
+				"Node contains a certificate SHA-256 pin which is not supported by this version")
 		}
 		return false
 
 	case ClashFingerprintDropSafe:
 		if skipVerify {
 			if ctx != nil {
-				ctx.rejectNode(getProxyTag(proxy), ClashFingerprintUnsafeDrop,
-					"Cannot safely drop Clash certificate fingerprint: skip-cert-verify is enabled")
+				ctx.rejectNode(tag, ClashFingerprintUnsafeDrop,
+					"Cannot safely drop certificate pin: skip-cert-verify is enabled")
 			}
 			return false
 		}
 		if ctx != nil {
-			ctx.warnNode(getProxyTag(proxy), ClashFingerprintDropSafeWarning,
-				"Clash certificate fingerprint omitted; standard CA/hostname verification still applies, self-signed nodes may fail")
+			ctx.warnNode(tag, ClashFingerprintDropSafeWarning,
+				"Certificate SHA-256 pin omitted; standard CA/hostname verification still applies, self-signed nodes may fail")
 		}
 
 	case ClashFingerprintDropAlways:
 		if skipVerify {
 			if ctx != nil {
-				ctx.warnNode(getProxyTag(proxy), ClashFingerprintDropAlwaysUnsafe,
-					"Clash certificate fingerprint omitted with skip-cert-verify=true: no server authentication (MITM risk)")
+				ctx.warnNode(tag, ClashFingerprintDropAlwaysUnsafe,
+					"Certificate SHA-256 pin omitted with skip-cert-verify=true: no server authentication (MITM risk)")
 			}
 		} else {
 			if ctx != nil {
-				ctx.warnNode(getProxyTag(proxy), ClashFingerprintDropAlwaysWarning,
-					"Clash certificate fingerprint omitted; standard CA/hostname verification still applies")
+				ctx.warnNode(tag, ClashFingerprintDropAlwaysWarning,
+					"Certificate SHA-256 pin omitted; standard CA/hostname verification still applies")
 			}
 		}
 	}
@@ -218,11 +220,30 @@ func applyClashFingerprintPolicy(proxy map[string]any, ctx *parseCtx) bool {
 	return true
 }
 
+// applyClashFingerprintPolicy checks a Clash proxy for a non-empty `fingerprint`
+// (cert SHA-256 pin), validates it, and applies the configured policy.
+//
+// This is the Clash‑only entry point called at the proxy boundary
+// (parseClashProxies). It delegates to applyCertPinPolicy.
+//
+// Returns false when the node must be rejected. Diagnostics are recorded
+// on ctx when non‑nil.
+func applyClashFingerprintPolicy(proxy map[string]any, ctx *parseCtx) bool {
+	clashFP := strings.TrimSpace(getString(proxy, "fingerprint"))
+	if clashFP == "" {
+		return true
+	}
+
+	skipVerify, _ := getBool(proxy, "skip-cert-verify", "insecure", "allowInsecure")
+	return applyCertPinPolicy(getProxyTag(proxy), clashFP, skipVerify, ctx)
+}
+
 // ParseOptions controls detailed subscription parsing behavior.
 // The zero value provides safe defaults (fingerprint policy = reject).
 type ParseOptions struct {
-	// ClashFingerprintPolicy controls how Clash `fingerprint` (cert SHA-256
-	// pin) values are handled. Default is ClashFingerprintReject.
+	// ClashFingerprintPolicy controls how full-certificate SHA-256 pins are
+	// handled for both Clash `fingerprint` and HY2 URI `pinSHA256`. Default is
+	// ClashFingerprintReject.
 	ClashFingerprintPolicy ClashFingerprintPolicy
 }
 

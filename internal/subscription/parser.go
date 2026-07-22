@@ -3389,14 +3389,14 @@ func parseHysteria2URI(uri string, ctx *parseCtx) (ParsedNode, bool) {
 		query.Get("pin-sha256"),
 		query.Get("pin_sha256"),
 	); pin != "" {
-		// On current sing-box v1.12.21, pinSHA256 is not supported for HY2.
-		// Reject the node regardless of whether ctx is available (both legacy
-		// wrapper and detailed path).
-		if ctx != nil {
-			ctx.rejectNode(tag, HY2PinSHA256Unsupported,
-				"HY2 URI contains pinSHA256 which is not supported by this version")
+		// pinSHA256 has the same semantics as Clash `fingerprint`: a leaf cert
+		// DER SHA-256 digest. Apply the shared certificate pin policy instead
+		// of hard-rejecting. The pin value is not written to the outbound
+		// because sing-box v1.12.21 has no dedicated field for it.
+		skipVerify := queryBool(query, "insecure", "allowInsecure")
+		if !applyCertPinPolicy(tag, pin, skipVerify, ctx) {
+			return ParsedNode{}, false
 		}
-		return ParsedNode{}, false
 	}
 	if certPath := strings.TrimSpace(query.Get("ca")); certPath != "" {
 		tls["certificate_path"] = certPath
