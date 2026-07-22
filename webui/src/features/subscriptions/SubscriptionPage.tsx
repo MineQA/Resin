@@ -264,15 +264,20 @@ function UpdateScheduleFields({ form, idPrefix, t }: UpdateScheduleFieldsProps) 
         })}
       </div>
 
-      {/* Keep both mode field groups mounted so switching modes retains filled values. */}
-      <div className="subscription-update-schedule-fields" hidden={mode !== "interval"}>
+      {/* Keep both mode field groups mounted so switching modes retains filled values.
+          Use [hidden] + CSS display:none (theme.css) so display:flex cannot override. */}
+      <div
+        className="subscription-update-schedule-fields"
+        hidden={mode !== "interval"}
+        aria-hidden={mode !== "interval"}
+      >
         <label className="field-label" htmlFor={`${idPrefix}-interval`}>
           {t("更新间隔")}
         </label>
         <Input
           id={`${idPrefix}-interval`}
           placeholder={t("例如 12h")}
-          invalid={Boolean(form.formState.errors.update_interval)}
+          invalid={mode === "interval" && Boolean(form.formState.errors.update_interval)}
           {...form.register("update_interval")}
         />
         {mode === "interval" && form.formState.errors.update_interval?.message ? (
@@ -280,7 +285,11 @@ function UpdateScheduleFields({ form, idPrefix, t }: UpdateScheduleFieldsProps) 
         ) : null}
       </div>
 
-      <div className="subscription-update-schedule-fields" hidden={mode !== "daily"}>
+      <div
+        className="subscription-update-schedule-fields"
+        hidden={mode !== "daily"}
+        aria-hidden={mode !== "daily"}
+      >
         <div className="subscription-daily-grid">
           <div className="field-group">
             <label className="field-label" htmlFor={`${idPrefix}-update-time`}>
@@ -290,7 +299,7 @@ function UpdateScheduleFields({ form, idPrefix, t }: UpdateScheduleFieldsProps) 
               id={`${idPrefix}-update-time`}
               type="time"
               step={60}
-              invalid={Boolean(form.formState.errors.update_time)}
+              invalid={mode === "daily" && Boolean(form.formState.errors.update_time)}
               {...form.register("update_time")}
             />
             {mode === "daily" && form.formState.errors.update_time?.message ? (
@@ -304,7 +313,7 @@ function UpdateScheduleFields({ form, idPrefix, t }: UpdateScheduleFieldsProps) 
             <Input
               id={`${idPrefix}-update-timezone`}
               placeholder={t("例如 Asia/Shanghai")}
-              invalid={Boolean(form.formState.errors.update_timezone)}
+              invalid={mode === "daily" && Boolean(form.formState.errors.update_timezone)}
               autoComplete="off"
               spellCheck={false}
               {...form.register("update_timezone")}

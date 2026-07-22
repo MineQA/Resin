@@ -2355,6 +2355,11 @@ a {
   gap: 8px;
 }
 
+/* display:flex above would otherwise override the HTML hidden attribute. */
+.subscription-update-schedule-fields[hidden] {
+  display: none;
+}
+
 .subscription-daily-grid {
   display: grid;
   grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
