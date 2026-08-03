@@ -4,9 +4,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"io/fs"
+	"io"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -195,10 +196,23 @@ func TestPlatformRegexFilterRulesMigrationIsIrreversible(t *testing.T) {
 	const downMigration = stateMigrationsPath + "/000016_platform_regex_filter_rules.down.sql"
 	file, err := migrationsFS.Open(downMigration)
 	if file != nil {
-		_ = file.Close()
+		defer file.Close()
 	}
-	if !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("open irreversible migration %q: got %v, want fs.ErrNotExist", downMigration, err)
+	if err != nil {
+		t.Fatalf("open irreversible migration %q: got %v, want no error (down migration must exist)", downMigration, err)
+	}
+	content, err := io.ReadAll(file)
+	if err != nil {
+		t.Fatalf("read irreversible migration %q: %v", downMigration, err)
+	}
+	// A true downgrade is impossible (ANY/MUST_NOT rules cannot be represented
+	// by the legacy format), so the down migration must be a safe no-op and
+	// must not attempt destructive SQL.
+	body := strings.ToUpper(string(content))
+	for _, stmt := range []string{"UPDATE", "ALTER", "DROP", "DELETE", "INSERT", "CREATE"} {
+		if strings.Contains(body, stmt) {
+			t.Fatalf("down migration %q must be a no-op, found destructive statement %q", downMigration, stmt)
+		}
 	}
 }
 

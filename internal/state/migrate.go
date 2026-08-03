@@ -167,8 +167,20 @@ func prepareLegacyStateBaseline(db *sql.DB, driver migratedb.Driver) error {
 	if err != nil {
 		return err
 	}
+	hasEndpoints, err := hasTable(db, "endpoints")
+	if err != nil {
+		return err
+	}
+	hasEndpointsEnabled, err := hasTableColumn(db, "endpoints", "enabled")
+	if err != nil {
+		return err
+	}
 
 	switch {
+	case hasEndpoints && hasEndpointsEnabled:
+		return setLegacyMigrationVersion(db, driver, stateVersionAddEndpointEnabled)
+	case hasEndpoints:
+		return setLegacyMigrationVersion(db, driver, stateVersionAddEndpoints)
 	case hasEmptyBehavior && hasFixedHeader && hasIncrementalAliveNodes && hasPassiveCircuitBreakerDisabled && hasClashFingerprintPolicy && hasProtocolFilters && hasExcludeProtocolFilters && hasQualityGrade && hasQualityCFStatuses && hasRuleProfiles && hasUpdateMode && hasUpdateTime && hasUpdateTimezone && hasLastCheckedNs:
 		return setLegacyMigrationVersion(db, driver, stateVersionAddUpdateSchedule)
 	case hasEmptyBehavior && hasFixedHeader && hasIncrementalAliveNodes && hasPassiveCircuitBreakerDisabled && hasClashFingerprintPolicy && hasProtocolFilters && hasExcludeProtocolFilters && hasQualityGrade && hasQualityCFStatuses && hasRuleProfiles:
