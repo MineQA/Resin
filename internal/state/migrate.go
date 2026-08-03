@@ -32,6 +32,10 @@ const (
 	stateVersionAddQualityCloudflareStatuses     = 11
 	stateVersionAddRuleProfiles                  = 12
 	stateVersionAddUpdateSchedule                = 13
+	stateVersionAddEndpoints                     = 14
+	stateVersionAddEndpointEnabled               = 15
+	stateVersionPlatformRegexFilterRules         = 16
+	stateLatestVersion                           = stateVersionPlatformRegexFilterRules
 	stateLegacyBaselineVersion                   = stateVersionAddFixedAccountHeader
 
 	stateBaseSchemaMigration = stateMigrationsPath + "/000001_state_base.up.sql"

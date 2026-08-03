@@ -32,15 +32,31 @@ func ValidateRegionFilters(regionFilters []string) error {
 	return nil
 }
 
-// CompileRegexFilters compiles regex filters in order.
-func CompileRegexFilters(regexFilters []string) ([]*regexp.Regexp, error) {
-	compiled := make([]*regexp.Regexp, 0, len(regexFilters))
-	for i, re := range regexFilters {
-		c, err := regexp.Compile(re)
-		if err != nil {
-			return nil, fmt.Errorf("regex_filters[%d]: invalid regex: %v", i, err)
+// CompileRegexFilters compiles line-oriented tag regex rules.
+// Plain rules are ANY, "*" prefixes MUST, and "!" prefixes MUST_NOT.
+// Only the first byte is interpreted; the remaining regex body is left unchanged.
+func CompileRegexFilters(regexFilters []string) (node.TagFilter, error) {
+	var compiled node.TagFilter
+	for i, rule := range regexFilters {
+		pattern := rule
+		kind := byte(0)
+		if len(rule) > 0 && (rule[0] == '*' || rule[0] == '!') {
+			kind = rule[0]
+			pattern = rule[1:]
 		}
-		compiled = append(compiled, c)
+
+		c, err := regexp.Compile(pattern)
+		if err != nil {
+			return node.TagFilter{}, fmt.Errorf("regex_filters[%d]: invalid regex: %v", i, err)
+		}
+		switch kind {
+		case '*':
+			compiled.Must = append(compiled.Must, c)
+		case '!':
+			compiled.MustNot = append(compiled.MustNot, c)
+		default:
+			compiled.Any = append(compiled.Any, c)
+		}
 	}
 	return compiled, nil
 }
@@ -50,7 +66,7 @@ func CompileRegexFilters(regexFilters []string) ([]*regexp.Regexp, error) {
 // Unknown/unrecognised values are kept as-is (caller is expected to validate first).
 func NewConfiguredPlatform(
 	id, name string,
-	regexFilters []*regexp.Regexp,
+	regexFilters node.TagFilter,
 	regionFilters []string,
 	protocolFilters []string,
 	excludeProtocolFilters []string,
@@ -74,7 +90,7 @@ func NewConfiguredPlatform(
 // convenience wrapper that leaves all quality filters at their zero values.
 func NewConfiguredPlatformWithQuality(
 	id, name string,
-	regexFilters []*regexp.Regexp,
+	regexFilters node.TagFilter,
 	regionFilters []string,
 	protocolFilters []string,
 	excludeProtocolFilters []string,
@@ -96,7 +112,7 @@ func NewConfiguredPlatformWithQuality(
 		normalizedFixedHeaders = strings.TrimSpace(fixedAccountHeader)
 		fixedHeaders = nil
 	}
-	plat := NewPlatform(id, name, regexFilters, regionFilters)
+	plat := NewPlatformWithTagFilter(id, name, regexFilters, regionFilters)
 	plat.ProtocolFilters = normalizeProtocolSlice(protocolFilters)
 	plat.ExcludeProtocolFilters = normalizeProtocolSlice(excludeProtocolFilters)
 	plat.StickyTTLNs = stickyTTLNs
@@ -155,10 +171,10 @@ func ValidateProtocolFilters(include, exclude []string) error {
 }
 
 // CompileModelRegexFilters compiles regex filters from persisted model values.
-func CompileModelRegexFilters(platformID string, regexFilters []string) ([]*regexp.Regexp, error) {
+func CompileModelRegexFilters(platformID string, regexFilters []string) (node.TagFilter, error) {
 	compiled, err := CompileRegexFilters(regexFilters)
 	if err != nil {
-		return nil, fmt.Errorf("decode platform %s regex_filters: %w", platformID, err)
+		return node.TagFilter{}, fmt.Errorf("decode platform %s regex_filters: %w", platformID, err)
 	}
 	return compiled, nil
 }

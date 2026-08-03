@@ -116,6 +116,46 @@ func TestPreviewFilter_RegionNegation(t *testing.T) {
 	}
 }
 
+func TestPreviewFilter_RegexRulesAnyMustAndMustNot(t *testing.T) {
+	fixture := buildPreviewFilterFixture(t)
+
+	nodes, err := fixture.cp.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			RegexFilters: []string{"hk", "us"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter ANY: %v", err)
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("ANY nodes len = %d, want 2", len(nodes))
+	}
+
+	nodes, err = fixture.cp.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			RegexFilters: []string{"hk", "us", `*^sub-1/`},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter MUST: %v", err)
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("MUST nodes len = %d, want 2", len(nodes))
+	}
+
+	nodes, err = fixture.cp.PreviewFilter(PreviewFilterRequest{
+		PlatformSpec: &PlatformSpecFilter{
+			RegexFilters: []string{"all", "!hk", "!unknown"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PreviewFilter MUST_NOT: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].NodeHash != fixture.usHash {
+		t.Fatalf("MUST_NOT nodes = %+v, want only %s", nodes, fixture.usHash)
+	}
+}
+
 func TestPreviewFilter_RegionMixedIncludeExclude(t *testing.T) {
 	fixture := buildPreviewFilterFixture(t)
 
@@ -366,7 +406,7 @@ func TestPreviewFilter_ProtocolExcludeWithPlatformID(t *testing.T) {
 	platID := "plat-preview-exclude"
 	plat := platform.NewConfiguredPlatform(
 		platID, "ExcludePreview",
-		nil, nil, // regex, region
+		node.TagFilter{}, nil, // regex, region
 		nil,               // protocolFilters (include all)
 		[]string{"vmess"}, // excludeProtocolFilters
 		int64(30*time.Minute),
@@ -681,7 +721,7 @@ func TestPreviewFilter_QualityCloudflareStatusWithPlatformID(t *testing.T) {
 	platID := "plat-cf-filter"
 	plat := platform.NewConfiguredPlatformWithQuality(
 		platID, "CFStatusPlatform",
-		nil, nil,
+		node.TagFilter{}, nil,
 		nil, nil,
 		int64(30*time.Minute),
 		"TREAT_AS_EMPTY", "RANDOM", "", "BALANCED", false,

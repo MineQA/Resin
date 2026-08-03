@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"reflect"
 	"strconv"
 	"testing"
@@ -67,6 +68,138 @@ func TestMigrateStateDB_UpgradesLegacyPlatformsColumns(t *testing.T) {
 	if ok, err := hasTableColumn(db, "platforms", "passive_circuit_breaker_disabled"); err != nil || !ok {
 		t.Fatalf("expected migrated column passive_circuit_breaker_disabled, ok=%v err=%v", ok, err)
 	}
+	if ok, err := hasTableColumn(db, "endpoints", "enabled"); err != nil || !ok {
+		t.Fatalf("expected migrated column endpoints.enabled, ok=%v err=%v", ok, err)
+	}
+}
+
+func TestMigrateStateDB_AddsEnabledToExistingEndpoints(t *testing.T) {
+	dir := t.TempDir()
+	db, err := OpenDB(dir + "/state.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`
+		CREATE TABLE schema_migrations (version uint64 NOT NULL PRIMARY KEY, dirty bool NOT NULL);
+		INSERT INTO schema_migrations (version, dirty) VALUES (14, 0);
+		CREATE TABLE platforms (
+			id TEXT PRIMARY KEY,
+			regex_filters_json TEXT NOT NULL DEFAULT '[]'
+		);
+		CREATE TABLE endpoints (
+			id TEXT PRIMARY KEY,
+			port INTEGER NOT NULL UNIQUE CHECK (port BETWEEN 1 AND 65535),
+			allow_management INTEGER NOT NULL,
+			allow_proxy INTEGER NOT NULL,
+			require_proxy_auth_info INTEGER NOT NULL DEFAULT 0,
+			allow_http_forward INTEGER NOT NULL,
+			allow_http_reverse INTEGER NOT NULL,
+			allow_socks5 INTEGER NOT NULL,
+			created_at_ns INTEGER NOT NULL,
+			updated_at_ns INTEGER NOT NULL
+		);
+		INSERT INTO endpoints (
+			id, port, allow_management, allow_proxy, require_proxy_auth_info,
+			allow_http_forward, allow_http_reverse, allow_socks5, created_at_ns, updated_at_ns
+		) VALUES ('existing', 32000, 1, 1, 0, 1, 1, 1, 1, 1);
+	`)
+	if err != nil {
+		t.Fatalf("create version 7 endpoint schema: %v", err)
+	}
+
+	if err := MigrateStateDB(db); err != nil {
+		t.Fatalf("MigrateStateDB: %v", err)
+	}
+	var enabled bool
+	if err := db.QueryRow(`SELECT enabled FROM endpoints WHERE id = 'existing'`).Scan(&enabled); err != nil {
+		t.Fatalf("read migrated endpoint: %v", err)
+	}
+	if !enabled {
+		t.Fatal("existing endpoint should remain enabled after migration")
+	}
+}
+
+func TestMigrateStateDB_ConvertsLegacyRegexFiltersToMustRules(t *testing.T) {
+	dir := t.TempDir()
+	db, err := OpenDB(dir + "/state.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`
+		CREATE TABLE schema_migrations (version uint64 NOT NULL PRIMARY KEY, dirty bool NOT NULL);
+		INSERT INTO schema_migrations (version, dirty) VALUES (15, 0);
+		CREATE TABLE platforms (
+			id TEXT PRIMARY KEY,
+			regex_filters_json TEXT NOT NULL DEFAULT '[]'
+		);
+		INSERT INTO platforms (id, regex_filters_json) VALUES
+			('legacy', '["^Provider/.*","!literal","\\!escaped",""]'),
+			('single', '["^Provider/.*"]'),
+			('single-bang', '["!literal"]'),
+			('empty', '[]');
+	`)
+	if err != nil {
+		t.Fatalf("create version 8 schema: %v", err)
+	}
+
+	if err := MigrateStateDB(db); err != nil {
+		t.Fatalf("MigrateStateDB: %v", err)
+	}
+
+	var raw string
+	if err := db.QueryRow(`SELECT regex_filters_json FROM platforms WHERE id = 'legacy'`).Scan(&raw); err != nil {
+		t.Fatalf("read migrated filters: %v", err)
+	}
+	got, err := decodeStringSliceJSON(raw)
+	if err != nil {
+		t.Fatalf("decode migrated filters: %v", err)
+	}
+	want := []string{"*^Provider/.*", "*!literal", `*\!escaped`, "*"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("migrated filters: got %v, want %v", got, want)
+	}
+
+	for id, want := range map[string][]string{
+		"single":      {"^Provider/.*"},
+		"single-bang": {`\!literal`},
+	} {
+		if err := db.QueryRow(`SELECT regex_filters_json FROM platforms WHERE id = ?`, id).Scan(&raw); err != nil {
+			t.Fatalf("read migrated %s filters: %v", id, err)
+		}
+		got, err = decodeStringSliceJSON(raw)
+		if err != nil {
+			t.Fatalf("decode migrated %s filters: %v", id, err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("migrated %s filters: got %v, want %v", id, got, want)
+		}
+	}
+
+	if err := db.QueryRow(`SELECT regex_filters_json FROM platforms WHERE id = 'empty'`).Scan(&raw); err != nil {
+		t.Fatalf("read migrated empty filters: %v", err)
+	}
+	got, err = decodeStringSliceJSON(raw)
+	if err != nil {
+		t.Fatalf("decode migrated empty filters: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("migrated empty filters: got %v, want []", got)
+	}
+}
+
+func TestPlatformRegexFilterRulesMigrationIsIrreversible(t *testing.T) {
+	const downMigration = stateMigrationsPath + "/000016_platform_regex_filter_rules.down.sql"
+	file, err := migrationsFS.Open(downMigration)
+	if file != nil {
+		_ = file.Close()
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("open irreversible migration %q: got %v, want fs.ErrNotExist", downMigration, err)
+	}
 }
 
 func TestMigrateStateDB_LegacyBaselineAdvancesToLatest(t *testing.T) {
@@ -108,8 +241,8 @@ func TestMigrateStateDB_LegacyBaselineAdvancesToLatest(t *testing.T) {
 	if dirty {
 		t.Fatalf("schema_migrations dirty=true")
 	}
-	if version != stateVersionAddUpdateSchedule {
-		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddUpdateSchedule)
+	if version != stateLatestVersion {
+		t.Fatalf("schema_migrations version: got %d, want %d", version, stateLatestVersion)
 	}
 	if ok, err := hasTableColumn(db, "subscriptions", "incremental_alive_nodes"); err != nil || !ok {
 		t.Fatalf("expected migrated column subscriptions.incremental_alive_nodes, ok=%v err=%v", ok, err)
@@ -200,8 +333,8 @@ func TestMigrateStateDB_LegacyV8AdvancesToLatest(t *testing.T) {
 	if dirty {
 		t.Fatalf("schema_migrations dirty=true")
 	}
-	if version != stateVersionAddUpdateSchedule {
-		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddUpdateSchedule)
+	if version != stateLatestVersion {
+		t.Fatalf("schema_migrations version: got %d, want %d", version, stateLatestVersion)
 	}
 
 	// Verify update schedule columns were created by latest migration.
@@ -279,8 +412,8 @@ func TestMigrateStateDB_AddsIncrementalAliveNodesToLegacySubscriptions(t *testin
 	if dirty {
 		t.Fatalf("schema_migrations dirty=true")
 	}
-	if version != stateVersionAddUpdateSchedule {
-		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddUpdateSchedule)
+	if version != stateLatestVersion {
+		t.Fatalf("schema_migrations version: got %d, want %d", version, stateLatestVersion)
 	}
 	if ok, err := hasTableColumn(db, "subscriptions", "incremental_alive_nodes"); err != nil || !ok {
 		t.Fatalf("expected migrated column subscriptions.incremental_alive_nodes, ok=%v err=%v", ok, err)
@@ -360,8 +493,8 @@ func TestMigrateStateDB_NormalizesLegacyRandomMissAction(t *testing.T) {
 	if dirty {
 		t.Fatalf("schema_migrations dirty=true")
 	}
-	if version != stateVersionAddUpdateSchedule {
-		t.Fatalf("schema_migrations version: got %d, want %d", version, stateVersionAddUpdateSchedule)
+if version != stateLatestVersion {
+		t.Fatalf("schema_migrations version: got %d, want %d", version, stateLatestVersion)
 	}
 	if ok, err := hasTableColumn(db, "subscriptions", "incremental_alive_nodes"); err != nil || !ok {
 		t.Fatalf("expected migrated column subscriptions.incremental_alive_nodes, ok=%v err=%v", ok, err)
@@ -1696,8 +1829,8 @@ func TestMigrateStateDB_LegacyBaselineWithRuleProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get version: %v", err)
 	}
-	if ver != stateVersionAddUpdateSchedule {
-		t.Fatalf("migration version = %d, want %d", ver, stateVersionAddUpdateSchedule)
+	if ver != stateLatestVersion {
+		t.Fatalf("migration version = %d, want %d", ver, stateLatestVersion)
 	}
 }
 
